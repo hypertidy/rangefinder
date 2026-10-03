@@ -1312,17 +1312,21 @@ function stopPlay() {
   state.playing = false;
   $("playDay").textContent = "play";
 }
+var PLAY_AHEAD = 2;
 async function play() {
   state.playing = true;
   $("playDay").textContent = "stop";
   if (state.dayIndex < 0 || state.dayIndex >= state.days.length - 1) await selectDay(0, true);
+  for (var a0 = 1; a0 <= PLAY_AHEAD; a0++) prefetchDay(state.dayIndex + a0);
   while (state.playing && state.dayIndex < state.days.length - 1) {
     var next = state.dayIndex + 1;
     var dwell = new Promise(function (ok) { setTimeout(ok, 700); });
     await dwell;
     if (!state.playing) break;
     await selectDay(next, true);
-    if (state.playing && next + 1 < state.days.length) prefetchDay(next + 1);
+    // read two days ahead: fetches overlap, so the next frame is usually in
+    // hand by the time the dwell ends
+    for (var ahead = 1; ahead <= PLAY_AHEAD && state.playing; ahead++) prefetchDay(next + ahead);
   }
   stopPlay();
 }
@@ -1589,9 +1593,17 @@ function dayComposite(i, ctl, onProgress) {
   return entry.promise;
 }
 
+// Read-ahead shares one controller, so a new search or region drops all of
+// it; pieces it shares with the visible load keep coming (chunks.js).
 function prefetchDay(i) {
-  state.prefetch = new AbortController();
-  dayComposite(i, state.prefetch).catch(function () {});
+  if (!state.prefetch || state.prefetch.signal.aborted) state.prefetch = new AbortController();
+  if (i < state.days.length && !state.cache.has(cacheKey(i))) {
+    dayComposite(i, state.prefetch).catch(function () {});
+  }
+}
+function cacheMB() {
+  var c = X.chunkStats();
+  return (c.bytes / 1048576).toFixed(0) + "/" + (c.budget / 1048576).toFixed(0) + " MB";
 }
 
 async function loadImagery() {
@@ -1626,6 +1638,12 @@ async function loadImagery() {
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
     var what = s.files + " files";
+    var cl = s.log.filter(function (t) { return t.kind === "cog" && t.tiles; });
+    if (cl.length) {   // COGs: native tiles touched, and how many were already held
+      var nt = cl.reduce(function (a, t) { return a + t.tiles; }, 0);
+      var nc = cl.reduce(function (a, t) { return a + t.tilesCached; }, 0);
+      what += " (" + nt + " tiles" + (nc ? ", " + nc + " from cache" : "") + ")";
+    }
     var tl = s.log.filter(function (t) { return t.kind === "tile"; });
     var zc = s.log.filter(function (t) { return t.kind === "chunk"; });
     if (zc.length) {   // a Zarr store: chunks, and what they cost
@@ -1637,12 +1655,14 @@ async function loadImagery() {
     }
     else if (tl.length) {   // a tile source: say what the level read looked like
       var got = tl.filter(function (t) { return t.ok; }).length;
+      var th = tl.filter(function (t) { return t.cached; }).length;
       what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " +
-        (tl.length - got) + " missing or failed)";
+        (tl.length - got) + " missing or failed" + (th ? ", " + th + " from cache" : "") + ")";
     }
     setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " +
       grid.width + "x" + grid.height + " px at " + X.gridGroundRes(grid).toFixed(0) +
       " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached ? " (cached)" : "") +
+      ", chunk cache " + cacheMB() +
       (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {

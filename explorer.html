@@ -428,8 +428,10 @@ __export(explorer_exports, {
   bboxIntersects: () => bboxIntersects,
   boxPolygon: () => boxPolygon,
   chooseLevel: () => chooseLevel,
+  chunkStats: () => chunkStats,
   classCounts: () => classCounts,
   classPalette: () => classPalette,
+  clearChunks: () => clearChunks,
   cogCatalog: () => cogCatalog,
   cogInfo: () => cogInfo,
   cogReadTiles: () => cogReadTiles,
@@ -485,6 +487,7 @@ __export(explorer_exports, {
   sceneOffset: () => sceneOffset,
   scenesOffset: () => scenesOffset,
   secureUrl: () => secureUrl,
+  setChunkBudget: () => setChunkBudget,
   solarDay: () => solarDay,
   stacCatalog: () => stacCatalog,
   starcCatalog: () => starcCatalog,
@@ -1098,6 +1101,117 @@ function rgbaToCanvas(rgba, width, height) {
   return cv;
 }
 
+// lib/chunks.js
+var budget = 512 * 1024 * 1024;
+var entries = /* @__PURE__ */ new Map();
+var bytes = 0;
+var hits = 0;
+var misses = 0;
+function abortError() {
+  try {
+    return new DOMException("Aborted", "AbortError");
+  } catch (e) {
+    var err = new Error("Aborted");
+    err.name = "AbortError";
+    return err;
+  }
+}
+function evict() {
+  var it = entries.keys();
+  while (bytes > budget && entries.size > 1) {
+    var k = it.next().value, e = entries.get(k);
+    if (!e.done) continue;
+    entries.delete(k);
+    bytes -= e.size;
+  }
+}
+function follow(e, signal) {
+  if (!signal) {
+    e.waiters++;
+    return e.p.finally(function() {
+      e.waiters--;
+    });
+  }
+  e.waiters++;
+  return new Promise(function(ok, no) {
+    var left = false;
+    function leave() {
+      if (left) return;
+      left = true;
+      e.waiters--;
+      signal.removeEventListener("abort", onAbort);
+    }
+    function onAbort() {
+      leave();
+      if (!e.done && e.waiters <= 0) {
+        e.ctl.abort();
+        if (entries.get(e.key) === e) entries.delete(e.key);
+      }
+      no(abortError());
+    }
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort);
+    e.p.then(function(v) {
+      leave();
+      ok(v);
+    }, function(err) {
+      leave();
+      no(err);
+    });
+  });
+}
+function getChunk(key, make, opts) {
+  opts = opts || {};
+  var e = entries.get(key);
+  if (e) {
+    entries.delete(key);
+    entries.set(key, e);
+    hits++;
+    return { p: follow(e, opts.signal), hit: true };
+  }
+  misses++;
+  var ctl = new AbortController();
+  e = { key, size: 0, done: false, ctl, waiters: 0 };
+  e.p = Promise.resolve().then(function() {
+    return make(ctl.signal);
+  });
+  e.p.then(function(v) {
+    if (entries.get(key) !== e) return;
+    e.done = true;
+    var sizeOf = opts.sizeOf || function(x) {
+      return x && x.byteLength || 0;
+    };
+    e.size = sizeOf(v) || 0;
+    bytes += e.size;
+    evict();
+  }, function() {
+    if (entries.get(key) === e) entries.delete(key);
+  });
+  entries.set(key, e);
+  return { p: follow(e, opts.signal), hit: false };
+}
+function hasChunk(key) {
+  var e = entries.get(key);
+  return !!(e && e.done);
+}
+function chunkStats() {
+  return { bytes, entries: entries.size, budget, hits, misses };
+}
+function setChunkBudget(b) {
+  budget = Math.max(0, b);
+  evict();
+}
+function clearChunks() {
+  entries.forEach(function(e) {
+    if (!e.done && e.waiters <= 0) e.ctl.abort();
+  });
+  entries.clear();
+  bytes = 0;
+}
+
 // lib/cog.js
 var LATTICE = 16;
 var tiffCache = /* @__PURE__ */ new Map();
@@ -1249,6 +1363,105 @@ function resampleWindow(lat, grid, src, ww, wh, wx0, wy0, fx, fy, nd, alpha) {
   }
   return { bands, valid, any };
 }
+function sampleType(im, s) {
+  var f = im.getSampleFormat(s), b = im.getBitsPerSample(s);
+  if (f === 1) return b === 8 ? Uint8Array : b === 16 ? Uint16Array : b === 32 ? Uint32Array : null;
+  if (f === 2) return b === 8 ? Int8Array : b === 16 ? Int16Array : b === 32 ? Int32Array : null;
+  if (f === 3) return b === 32 ? Float32Array : b === 64 ? Float64Array : null;
+  return null;
+}
+var GETTER = /* @__PURE__ */ new Map([
+  [Uint8Array, "getUint8"],
+  [Uint16Array, "getUint16"],
+  [Uint32Array, "getUint32"],
+  [Int8Array, "getInt8"],
+  [Int16Array, "getInt16"],
+  [Int32Array, "getInt32"],
+  [Float32Array, "getFloat32"],
+  [Float64Array, "getFloat64"]
+]);
+var HOST_LE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+function unpack(buf, T, n, stride, offset, le) {
+  if (stride === T.BYTES_PER_ELEMENT && offset === 0 && le === HOST_LE && buf.byteLength >= n * stride) {
+    return new T(buf, 0, n);
+  }
+  var out = new T(n), dv = new DataView(buf), get = GETTER.get(T);
+  var m = Math.min(n, Math.floor((buf.byteLength - offset - T.BYTES_PER_ELEMENT) / stride) + 1);
+  for (var i = 0; i < m; i++) out[i] = dv[get](i * stride + offset, le);
+  return out;
+}
+var decoders = /* @__PURE__ */ new WeakMap();
+function decoderFor(im) {
+  if (!decoders.has(im)) decoders.set(im, geotiff().getDecoder(im.fileDirectory));
+  return decoders.get(im);
+}
+function nativeTile(im, href, level, tx, ty, types, signal) {
+  return getChunk("cog|" + href + "|" + level + "|" + tx + "," + ty, async function(sig) {
+    var dec = await decoderFor(im);
+    var tw = im.getTileWidth(), th = im.getBlockHeight(ty), n = tw * th;
+    var spp = im.getSamplesPerPixel(), le = im.littleEndian, bands = [];
+    if (im.planarConfiguration === 2) {
+      var got = await Promise.all(types.map(function(T, s2) {
+        return im.getTileOrStrip(tx, ty, s2, dec, sig);
+      }));
+      for (var s = 0; s < spp; s++) {
+        bands.push(unpack(got[s].data, types[s], n, types[s].BYTES_PER_ELEMENT, 0, le));
+      }
+    } else {
+      var t = await im.getTileOrStrip(tx, ty, 0, dec, sig), bpp = 0, offs = [];
+      for (var k = 0; k < spp; k++) {
+        offs.push(bpp);
+        bpp += types[k].BYTES_PER_ELEMENT;
+      }
+      for (var j = 0; j < spp; j++) bands.push(unpack(t.data, types[j], n, bpp, offs[j], le));
+    }
+    return { w: tw, h: th, bands };
+  }, { signal, sizeOf: function(v) {
+    return v.bands.reduce(function(a, b) {
+      return a + b.byteLength;
+    }, 0);
+  } });
+}
+async function readWindowCached(im, href, level, win, signal) {
+  var spp = im.getSamplesPerPixel(), types = [];
+  for (var s = 0; s < spp; s++) {
+    var T = sampleType(im, s);
+    if (!T) return null;
+    types.push(T);
+  }
+  if (im.planarConfiguration !== 1 && im.planarConfiguration !== 2) return null;
+  var tw = im.getTileWidth(), th = im.getTileHeight();
+  var W = im.getWidth(), H = im.getHeight();
+  var ww = win[2] - win[0], wh = win[3] - win[1];
+  var out = types.map(function(T2) {
+    return new T2(ww * wh);
+  });
+  var tx0 = Math.floor(win[0] / tw), tx1 = Math.min(Math.ceil(win[2] / tw), Math.ceil(W / tw));
+  var ty0 = Math.floor(win[1] / th), ty1 = Math.min(Math.ceil(win[3] / th), Math.ceil(H / th));
+  var jobs = [], cachedN = 0;
+  for (var ty = ty0; ty < ty1; ty++) {
+    for (var tx = tx0; tx < tx1; tx++) {
+      var got = nativeTile(im, href, level, tx, ty, types, signal);
+      if (got.hit) cachedN++;
+      jobs.push(got.p.then(place.bind(null, tx, ty)));
+    }
+  }
+  function place(tx2, ty2, t) {
+    var c0 = tx2 * tw, r0 = ty2 * th;
+    var xa = Math.max(win[0], c0), xb = Math.min(win[2], c0 + tw, W);
+    var ya = Math.max(win[1], r0), yb = Math.min(win[3], r0 + t.h, H);
+    if (!(xb > xa && yb > ya)) return;
+    for (var b = 0; b < out.length; b++) {
+      var src = t.bands[b], dst = out[b];
+      for (var y = ya; y < yb; y++) {
+        var so = (y - r0) * t.w + (xa - c0), dofs = (y - win[1]) * ww + (xa - win[0]);
+        dst.set(src.subarray(so, so + (xb - xa)), dofs);
+      }
+    }
+  }
+  await Promise.all(jobs);
+  return { bands: out, tiles: jobs.length, cached: cachedN };
+}
 async function readWarped(href, grid, opts) {
   opts = opts || {};
   var tiff = await openCog(href);
@@ -1275,11 +1488,9 @@ async function readWarped(href, grid, opts) {
   var wx0 = Math.max(0, Math.floor(win[0] / fx)), wy0 = Math.max(0, Math.floor(win[1] / fy));
   var wx1 = Math.min(Wl, Math.ceil(win[2] / fx)), wy1 = Math.min(Hl, Math.ceil(win[3] / fy));
   if (!(wx1 > wx0 && wy1 > wy0)) return null;
-  var src = await im.readRasters({
-    window: [wx0, wy0, wx1, wy1],
-    interleave: false,
-    signal: opts.signal
-  });
+  var level = lv.indexOf(im), win = [wx0, wy0, wx1, wy1];
+  var read = await readWindowCached(im, href, level, win, opts.signal);
+  var src = read ? read.bands : await im.readRasters({ window: win, interleave: false, signal: opts.signal });
   var nd = base.getGDALNoData();
   if (nd === null || nd === void 0) nd = opts.nodata !== void 0 && opts.nodata !== null ? opts.nodata : 0;
   var r = resampleWindow(
@@ -1300,14 +1511,16 @@ async function readWarped(href, grid, opts) {
     bands: r.bands,
     valid: r.valid,
     nodata: nd,
-    level: lv.indexOf(im),
-    window: [wx0, wy0, wx1, wy1],
+    level,
+    window: win,
     // what was read, for the inspector's "last read" view
     log: [{
       kind: "cog",
       href,
-      level: lv.indexOf(im),
-      window: [wx0, wy0, wx1, wy1],
+      level,
+      window: win,
+      tiles: read ? read.tiles : null,
+      tilesCached: read ? read.cached : null,
       tileSize: im.getTileWidth ? [im.getTileWidth(), im.getTileHeight()] : null,
       origin,
       res: [res[0] * fx, res[1] * fy],
@@ -1395,8 +1608,6 @@ function tileUrl(src, level, col, row) {
   var s = typeof subs === "string" ? subs[(col + row) % subs.length] : subs[(col + row) % subs.length];
   return secureUrl(src.template).replace(/\{z\}/g, z).replace(/\{x\}/g, col).replace(/\{y\}/g, row).replace(/\{-y\}/g, level.matrixHeight - 1 - row).replace(/\{q\}/g, quadkey(+z, col, row)).replace(/\{s\}/g, s).replace(/\{TileMatrix\}/gi, level.id).replace(/\{TileRow\}/gi, row).replace(/\{TileCol\}/gi, col).replace(/\{TileMatrixSet\}/gi, src.tms.id).replace(/\{Time\}/gi, src.time || "").replace(/\{Style\}/gi, src.style || "default");
 }
-var tileCache = /* @__PURE__ */ new Map();
-var TILE_CACHE_MAX = 1024;
 function fnv(buf) {
   var h = 2166136261, b = new Uint8Array(buf);
   for (var i = 0; i < b.length; i++) {
@@ -1417,13 +1628,7 @@ async function decode(blob) {
   return g.getImageData(0, 0, cv.width, cv.height);
 }
 function fetchTile(url, signal) {
-  var hit2 = tileCache.get(url);
-  if (hit2) {
-    tileCache.delete(url);
-    tileCache.set(url, hit2);
-    return hit2;
-  }
-  var p = (async function() {
+  return getChunk("tile|" + url, async function(signal2) {
     var t0 = performance.now(), out = {
       url,
       status: 0,
@@ -1436,7 +1641,7 @@ function fetchTile(url, signal) {
       error: null
     };
     try {
-      var r = await fetch(url, { signal, mode: "cors" });
+      var r = await fetch(url, { signal: signal2, mode: "cors" });
       out.status = r.status;
       out.type = r.headers.get("content-type") || "";
       var buf = await r.arrayBuffer();
@@ -1458,13 +1663,9 @@ function fetchTile(url, signal) {
       out.error = "network or CORS failure";
     }
     return out;
-  })();
-  p.catch(function() {
-    tileCache.delete(url);
-  });
-  tileCache.set(url, p);
-  if (tileCache.size > TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
-  return p;
+  }, { signal, sizeOf: function(t) {
+    return 256 + (t.image ? t.image.data.byteLength : 0) + (t.blob ? t.blob.size : 0);
+  } }).p;
 }
 var DECODERS = {
   terrarium: function(r, g, b) {
@@ -1546,7 +1747,7 @@ async function readTilesWarped(src, grid, opts) {
   }
   var log = [];
   await pool(jobs, opts.concurrency || 8, async function(j) {
-    var url = tileUrl(src, L2, j[0], j[1]);
+    var url = tileUrl(src, L2, j[0], j[1]), held = hasChunk("tile|" + url);
     var t = await fetchTile(url, opts.signal);
     log.push({
       kind: "tile",
@@ -1560,6 +1761,7 @@ async function readTilesWarped(src, grid, opts) {
       hash: t.hash,
       ok: t.ok,
       error: t.error,
+      cached: held,
       extent: tileExtent(L2, j[0], j[1]),
       crs: src.tms.crs
     });
@@ -1948,13 +2150,13 @@ function children(src, tile, box) {
 }
 async function coverageWalk(src, startIndex, lonlat, opts) {
   opts = opts || {};
-  var budget = opts.budget || 300, tol = opts.tolerance === void 0 ? 2 : opts.tolerance;
+  var budget2 = opts.budget || 300, tol = opts.tolerance === void 0 ? 2 : opts.tolerance;
   var box = transformBbox(lonlat, "EPSG:4326", ensureCrs(src.tms.crs), 32);
   var maxLevel = levelRange(src)[1];
-  var frontier = tilesInBox(src, startIndex, lonlat, budget), all = [], requests = 0, stopped = null;
+  var frontier = tilesInBox(src, startIndex, lonlat, budget2), all = [], requests = 0, stopped = null;
   while (frontier.length) {
-    if (requests + frontier.length > budget) {
-      frontier = frontier.slice(0, Math.max(0, budget - requests));
+    if (requests + frontier.length > budget2) {
+      frontier = frontier.slice(0, Math.max(0, budget2 - requests));
       stopped = "budget";
       if (!frontier.length) break;
     }
@@ -1971,7 +2173,7 @@ async function coverageWalk(src, startIndex, lonlat, opts) {
     });
     requests += frontier.length;
     all = all.concat(frontier);
-    if (opts.onProgress) opts.onProgress(requests, budget, frontier[0] && frontier[0].z);
+    if (opts.onProgress) opts.onProgress(requests, budget2, frontier[0] && frontier[0].z);
     if (stopped) break;
     var next = [];
     frontier.forEach(function(t) {
@@ -2618,19 +2820,19 @@ function zarrita() {
 }
 function countingStore(z, url) {
   var raw = new z.FetchStore(url);
-  var bytes = /* @__PURE__ */ new Map();
+  var bytes2 = /* @__PURE__ */ new Map();
   var s = {
-    bytes,
+    bytes: bytes2,
     get: async function(key, opts) {
       var b = await raw.get(key, opts);
-      if (b) bytes.set(key, b.byteLength);
+      if (b) bytes2.set(key, b.byteLength);
       return b;
     }
   };
   if (raw.getRange) {
     s.getRange = async function(key, range, opts) {
       var b = await raw.getRange(key, range, opts);
-      if (b) bytes.set(key, (bytes.get(key) || 0) + b.byteLength);
+      if (b) bytes2.set(key, (bytes2.get(key) || 0) + b.byteLength);
       return b;
     };
   }
@@ -2909,32 +3111,10 @@ function describe(ds, name, opts) {
   }
   return ds.vars.get(key);
 }
-var CACHE_BYTES = 320 * 1024 * 1024;
-var cache = /* @__PURE__ */ new Map();
-var cacheSize = 0;
-function cached(key, make) {
-  if (cache.has(key)) {
-    var hit2 = cache.get(key);
-    cache.delete(key);
-    cache.set(key, hit2);
-    return { p: hit2.p, hit: true };
-  }
-  var e = { p: make(), size: 0 };
-  cache.set(key, e);
-  e.p.then(function(ch) {
-    e.size = ch.data.byteLength || 0;
-    cacheSize += e.size;
-    var it = cache.keys();
-    while (cacheSize > CACHE_BYTES && cache.size > 1) {
-      var k = it.next().value, old = cache.get(k);
-      if (old === e) break;
-      cache.delete(k);
-      cacheSize -= old.size;
-    }
-  }, function() {
-    cache.delete(key);
-  });
-  return { p: e.p, hit: false };
+function cached(key, make, signal) {
+  return getChunk("zarr|" + key, make, { signal, sizeOf: function(ch) {
+    return ch && ch.data && ch.data.byteLength || 0;
+  } });
 }
 function chunkKey(v, coords) {
   return [
@@ -3002,9 +3182,9 @@ async function readZarrWarped(a, grid, opts) {
     });
     var key = a.url + "|" + v.path + "|" + coords.join(".");
     var t0 = performance.now();
-    var got = cached(key, function() {
-      return v.arr.getChunk(coords, { signal: opts.signal });
-    });
+    var got = cached(key, function(sig) {
+      return v.arr.getChunk(coords, { signal: sig });
+    }, opts.signal);
     var e = {
       kind: "chunk",
       z: v.path.slice(1),
@@ -3164,7 +3344,7 @@ function zarrCatalog(opts) {
     //   bbox, res, times: [first, last, n] | null, chunkMB }
     describe: async function() {
       var c = await variable(), v = c.v, a = v.arr;
-      var bytes = +(a.dtype.match(/\d+/) || [32])[0] / 8;
+      var bytes2 = +(a.dtype.match(/\d+/) || [32])[0] / 8;
       return {
         name: v.path.slice(1),
         dims: v.dims,
@@ -3185,7 +3365,7 @@ function zarrCatalog(opts) {
         ] : null,
         chunkMB: a.chunks.reduce(function(p, k) {
           return p * k;
-        }, 1) * bytes / 1048576
+        }, 1) * bytes2 / 1048576
       };
     },
     search: async function(q) {
@@ -3517,15 +3697,15 @@ function hyparquet() {
 function trimSlash2(u) {
   return String(u).trim().replace(/\/+$/, "");
 }
-function cached2(cache2, key, make) {
-  if (!cache2.has(key)) {
+function cached2(cache, key, make) {
+  if (!cache.has(key)) {
     var p = make();
-    cache2.set(key, p);
+    cache.set(key, p);
     p.catch(function() {
-      cache2.delete(key);
+      cache.delete(key);
     });
   }
-  return cache2.get(key);
+  return cache.get(key);
 }
 async function pool4(items, n, fn) {
   var out = new Array(items.length), next = 0;
@@ -3680,10 +3860,10 @@ async function readAll(files, want, onFile) {
   });
   return [].concat.apply([], parts);
 }
-function wkbGeometry(bytes) {
-  if (!bytes || !bytes.length) return null;
-  if (typeof bytes === "string") return null;
-  var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), o = 0;
+function wkbGeometry(bytes2) {
+  if (!bytes2 || !bytes2.length) return null;
+  if (typeof bytes2 === "string") return null;
+  var dv = new DataView(bytes2.buffer, bytes2.byteOffset, bytes2.byteLength), o = 0;
   function geom() {
     var le = dv.getUint8(o) === 1;
     o += 1;
@@ -3928,7 +4108,7 @@ function starcCatalog(opts) {
       var d0 = range[0] && range[0] !== ".." ? range[0].slice(0, 10) : "0000-01-01";
       var d1 = range[1] && range[1] !== ".." ? range[1].slice(0, 10) : "9999-12-31";
       var cloudMax = q.cloudMax !== void 0 && q.cloudMax < 100 ? q.cloudMax : null;
-      var hits = [];
+      var hits2 = [];
       acqs.forEach(function(a) {
         if (!a.day || a.day < d0 || a.day > d1) return;
         var fp = footprint(a);
@@ -3936,16 +4116,16 @@ function starcCatalog(opts) {
         var p = pickProduct(prods.byAcq.get(a.id) || []);
         if (!p) return;
         if (cloudMax !== null && p.cloud !== null && p.cloud > cloudMax) return;
-        hits.push({ a, p, fp });
+        hits2.push({ a, p, fp });
       });
-      hits.sort(function(x, y) {
+      hits2.sort(function(x, y) {
         return x.a.day < y.a.day ? 1 : x.a.day > y.a.day ? -1 : 0;
       });
-      hits = hits.slice(0, q.maxItems || 500);
-      var got = await loadAssets(st, hits.map(function(h) {
+      hits2 = hits2.slice(0, q.maxItems || 500);
+      var got = await loadAssets(st, hits2.map(function(h) {
         return h.p;
       }));
-      return hits.map(function(h) {
+      return hits2.map(function(h) {
         var a = h.a, p = h.p, fp = h.fp;
         return {
           id: p.item,
@@ -5491,10 +5671,12 @@ function stopPlay() {
   state.playing = false;
   $("playDay").textContent = "play";
 }
+var PLAY_AHEAD = 2;
 async function play() {
   state.playing = true;
   $("playDay").textContent = "stop";
   if (state.dayIndex < 0 || state.dayIndex >= state.days.length - 1) await selectDay(0, true);
+  for (var a0 = 1; a0 <= PLAY_AHEAD; a0++) prefetchDay(state.dayIndex + a0);
   while (state.playing && state.dayIndex < state.days.length - 1) {
     var next = state.dayIndex + 1;
     var dwell = new Promise(function(ok) {
@@ -5503,7 +5685,7 @@ async function play() {
     await dwell;
     if (!state.playing) break;
     await selectDay(next, true);
-    if (state.playing && next + 1 < state.days.length) prefetchDay(next + 1);
+    for (var ahead = 1; ahead <= PLAY_AHEAD && state.playing; ahead++) prefetchDay(next + ahead);
   }
   stopPlay();
 }
@@ -5707,7 +5889,7 @@ function paint() {
   }
   state.overlay.setExtent(g.bbox);
 }
-var CACHE_BYTES2 = 4e8;
+var CACHE_BYTES = 4e8;
 function minRes() {
   var rs = state.scenes.map(function(sc) {
     return sc.meta && sc.meta.res;
@@ -5776,7 +5958,7 @@ function dayComposite(i, ctl, onProgress) {
       r.composite.valid.byteLength
     ) : 0;
     state.cacheBytes += entry.bytes;
-    while (state.cacheBytes > CACHE_BYTES2 && state.cache.size > 1) {
+    while (state.cacheBytes > CACHE_BYTES && state.cache.size > 1) {
       var oldest = state.cache.keys().next().value, e = state.cache.get(oldest);
       state.cache.delete(oldest);
       state.cacheBytes -= e.bytes;
@@ -5791,9 +5973,15 @@ function dayComposite(i, ctl, onProgress) {
   return entry.promise;
 }
 function prefetchDay(i) {
-  state.prefetch = new AbortController();
-  dayComposite(i, state.prefetch).catch(function() {
-  });
+  if (!state.prefetch || state.prefetch.signal.aborted) state.prefetch = new AbortController();
+  if (i < state.days.length && !state.cache.has(cacheKey(i))) {
+    dayComposite(i, state.prefetch).catch(function() {
+    });
+  }
+}
+function cacheMB() {
+  var c = chunkStats();
+  return (c.bytes / 1048576).toFixed(0) + "/" + (c.budget / 1048576).toFixed(0) + " MB";
 }
 async function loadImagery() {
   if (state.dayIndex < 0) throw new Error("search scenes and pick a day first");
@@ -5832,6 +6020,18 @@ async function loadImagery() {
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
     var what = s.files + " files";
+    var cl = s.log.filter(function(t) {
+      return t.kind === "cog" && t.tiles;
+    });
+    if (cl.length) {
+      var nt = cl.reduce(function(a, t) {
+        return a + t.tiles;
+      }, 0);
+      var nc = cl.reduce(function(a, t) {
+        return a + t.tilesCached;
+      }, 0);
+      what += " (" + nt + " tiles" + (nc ? ", " + nc + " from cache" : "") + ")";
+    }
     var tl = s.log.filter(function(t) {
       return t.kind === "tile";
     });
@@ -5842,18 +6042,21 @@ async function loadImagery() {
       var mb = zc.reduce(function(a, t) {
         return a + (t.bytes || 0);
       }, 0) / 1048576;
-      var hits = zc.filter(function(t) {
+      var hits2 = zc.filter(function(t) {
         return t.cached;
       }).length;
-      what = zc.length + " chunk(s) of " + zc[0].z + " (" + (hits ? hits + " from cache, " : "") + mb.toFixed(1) + " MB fetched)";
+      what = zc.length + " chunk(s) of " + zc[0].z + " (" + (hits2 ? hits2 + " from cache, " : "") + mb.toFixed(1) + " MB fetched)";
       tl = zc;
     } else if (tl.length) {
       var got = tl.filter(function(t) {
         return t.ok;
       }).length;
-      what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " + (tl.length - got) + " missing or failed)";
+      var th = tl.filter(function(t) {
+        return t.cached;
+      }).length;
+      what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " + (tl.length - got) + " missing or failed" + (th ? ", " + th + " from cache" : "") + ")";
     }
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + ", chunk cache " + cacheMB() + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) {
@@ -5981,7 +6184,7 @@ async function inspRun(what) {
   var ctl = insp.ctl = new AbortController();
   var src = insp.src || await inspSource();
   if (!src) throw new Error("grid, probe and walk need a tile server source");
-  var idx = +$("inspLevel").value, budget = +$("inspBudget").value || 200, Lv = src.tms.levels[idx];
+  var idx = +$("inspLevel").value, budget2 = +$("inspBudget").value || 200, Lv = src.tms.levels[idx];
   if (what === "grid") {
     var g = tilesInBox(src, idx, viewBox(), 4e3);
     inspDraw(g);
@@ -5991,7 +6194,7 @@ async function inspRun(what) {
   if (what === "probe") {
     inspInfo("probing level " + Lv.id + " ...");
     var p = await probeTiles(src, idx, viewBox(), {
-      max: budget,
+      max: budget2,
       signal: ctl.signal,
       onProgress: function(n, of) {
         if (insp.ctl === ctl) inspInfo("probing level " + Lv.id + ": " + n + "/" + of);
@@ -5999,15 +6202,15 @@ async function inspRun(what) {
     });
     if (insp.ctl !== ctl) return;
     inspDraw(p);
-    var bytes = p.reduce(function(a, t) {
+    var bytes2 = p.reduce(function(a, t) {
       return a + (t.bytes || 0);
     }, 0);
-    inspInfo(p.length + " tiles at level " + Lv.id + ", " + (bytes / 1e6).toFixed(2) + " MB:", kindSummary(p));
+    inspInfo(p.length + " tiles at level " + Lv.id + ", " + (bytes2 / 1e6).toFixed(2) + " MB:", kindSummary(p));
     return;
   }
   inspInfo("walking down from level " + Lv.id + " ...");
   var w = await coverageWalk(src, idx, viewBox(), {
-    budget,
+    budget: budget2,
     signal: ctl.signal,
     onProgress: function(n, of, z) {
       if (insp.ctl === ctl) inspInfo("walking: level " + z + ", " + n + "/" + of + " requests");

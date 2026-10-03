@@ -72,8 +72,10 @@ Two ways to open it locally:
 4. **Timeline.** Under the map once a search returns: one bar per day on a
    true time axis, taller for clearer days, brighter once read. Drag or
    click it, `<` / `>` (or the arrow keys, `[` / `]`), or `play` (key `p`)
-   to step through the days, reading the next one ahead. Days already read
-   come back from a cache without refetching. "hold limits" keeps the
+   to step through the days, reading the next two ahead. Days already read
+   come back from a cache without refetching, and a new view, a band change
+   or another day reuses any native tile or chunk read before (see
+   "Caching" below). "hold limits" keeps the
    current min/max for every day so dates compare like for like.
 5. **Composite.** The picker lists what the scenes actually carry: the
    Sentinel-2 combinations when those bands are there, then every asset on
@@ -124,6 +126,7 @@ lib/sources/cog.js       layers 1+2: pasted COG URLs (headers only)
 lib/sources/tiles.js     layers 1+2: XYZ template or WMTS capabilities (layers, sets, times)
 lib/sources/zarr.js      layers 1-3: one variable of a Zarr store (zarrita), chunk reads
 lib/cog.js               layer 3: windowed overview reads warped to the grid
+lib/chunks.js            shared byte-budgeted cache of native tiles and chunks
 lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/decode,
                          the same warp for tile pyramids, WMTS capabilities parsing
 lib/mapcrs.js            Leaflet in any CRS: a CRS from proj4, overlays placed by extent,
@@ -154,8 +157,8 @@ zarrita 0.7 the same way (esm.sh as a fallback). No build step.
    assets, sorts them least-cloudy first and reads at most `maxScenes`.
 3. `readWarped(href, grid)` (lib/cog.js) reprojects a lattice of grid pixels
    (every 16 px) into the file's CRS, takes the covered window, picks the
-   coarsest overview that is still as fine as the grid, reads only that
-   window, and resamples nearest-neighbour with bilinear coordinate
+   coarsest overview that is still as fine as the grid, reads the file's
+   own tiles under that window (each decoded once and cached), and resamples nearest-neighbour with bilinear coordinate
    interpolation inside each lattice cell.
 4. `mosaic()` fills each grid pixel from the first scene with valid data.
 5. `autoStretch()` + `renderRGBA()` turn the composite into RGBA, drawn into
@@ -235,7 +238,7 @@ design:
 
 A read fetches whole chunks, the only unit a store has, so the chunk shape
 sets what a view costs. Reads are capped at 64 chunks or 400 MB decoded.
-Decoded chunks stay in a small cache (320 MB), so stepping through days
+Decoded chunks stay in the shared chunk cache, so stepping through days
 that share a chunk refetches nothing. Each chunk is logged like a map
 tile, so `last read` draws the chunk grid.
 ```
@@ -250,12 +253,45 @@ Extension points left for the next pieces of work:
 - **Time scrubber** (done): a canvas timeline over `state.days`; loads go
   through `dayComposite(i)`, a per-day cache keyed by day, bands, grid and
   scene cap (400 MB, least recently used out), which `play` also uses to
-  read one day ahead. `window.explorer` exposes `stepDay`, `play`,
+  read two days ahead. `window.explorer` exposes `stepDay`, `play`,
   `stopPlay`, `selectDay`.
 - **starc store source** (done): `starcCatalog({ url, collection })`, plus
   `info()` for the store summary. Footprints come from `footprint_wkb` or
   the MGRS tile code (`mgrsExtent()` in geo.js). Details in
   `docs/starc.md`.
+
+## Caching
+
+Two levels, both in memory for the life of the page:
+
+1. **Native pieces** (`lib/chunks.js`): one cache, 512 MB by default
+   (`setChunkBudget(bytes)`), least recently used out. It holds decoded
+   pieces exactly as the source stores them, keyed by the source's own
+   grid, not by the view that asked:
+   - COG: one internal tile (or strip) of one overview level of one file,
+     all its samples, decoded.
+   - Zarr: one chunk of one array, decoded.
+   - XYZ/WMTS: one tile, decoded image plus its bytes (failed tiles too,
+     so a known hole is not asked for again).
+
+   So a pan, a zoom that stays on the same overview level, a band
+   combination sharing files with the last one, or a day revisited under a
+   different grid only fetches the tiles it has not seen. Two reads that
+   want the same piece at once share one request, and a request is only
+   cancelled when every read waiting on it is (a cancelled read-ahead does
+   not take the visible load down with it). The status line says how many
+   tiles or chunks came from the cache, and the cache's size.
+2. **Day composites** (`dayComposite` in index.html): the finished mosaic
+   per day, bands, grid and scene cap (400 MB). Replaying an animation
+   over the same region is a repaint.
+
+What a request costs is still set by the source's layout: a sentinel-cogs
+band is read in whole internal tiles at the chosen overview, a MUR SST read
+is a 5-day chunk, an ITS_LIVE cube read is many small all-time chunks.
+geotiff.js fetches the tile bytes in 64 KB-aligned ranges, merging runs of
+contiguous tiles into one request, and keeps up to 100 such blocks per
+open file. Nothing is kept across page loads (no IndexedDB or Cache API
+yet), and STAC search responses are not cached.
 
 ## Notes and limits
 
