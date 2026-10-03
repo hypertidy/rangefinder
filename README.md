@@ -47,6 +47,11 @@ Two ways to open it locally:
    store** (default: MUR SST on AWS) is read with zarrita through its
    consolidated metadata: `read` lists the gridded variables, and the chosen
    one's coordinates give its grid, CRS and times (see "Zarr" below).
+   Each of these sources has a "common ..." picker (servers, files,
+   mosaics, stores) that fills in a known public URL and reads it; pasting
+   your own URL and leaving the box (or pressing `read`) does the same. An
+   `http://` URL is fetched over https when the page itself is on https,
+   since browsers block the mixed request.
 2. **Region.** `draw on map`, then drag a box; or `use view`.
 3. **Scenes.** Date range (a blank date is an open end), max cloud,
    `Search scenes`. Results are grouped by solar day (local date at the

@@ -51,6 +51,7 @@
           background: var(--bg); color: var(--text); border: 1px solid var(--edge);
           border-radius: 6px; font: inherit; }
   input:focus, select:focus { outline: 1px solid var(--accent); }
+  select.pick { margin-top: 8px; }
   button { margin-top: 10px; background: var(--accent); color: #06222e; border: none;
            font-weight: 600; cursor: pointer; }
   button.minor { background: var(--bg); color: var(--text); border: 1px solid var(--edge);
@@ -160,22 +161,19 @@
     </div>
 
     <div id="vrtbox" class="hide">
-      <label for="vrtUrl">VRT URL</label>
+      <select id="vrtPick" class="pick"></select>
+      <label for="vrtUrl">or paste a VRT URL</label>
       <div class="row">
-        <input id="vrtUrl" list="vrts" spellcheck="false"
+        <input id="vrtUrl" spellcheck="false"
           value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/32m_dem_tiles.vrt">
         <button id="readVrt" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
       </div>
-      <datalist id="vrts">
-        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/32m_dem_tiles.vrt">REMA v2 32 m (Antarctica)</option>
-        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/10m_dem_tiles.vrt">REMA v2 10 m</option>
-        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/arcticdem/mosaics/v4.1/32m_dem_tiles.vrt">ArcticDEM v4.1 32 m</option>
-      </datalist>
       <div id="vrtInfo" class="note">a GDAL VRT that mosaics many COGs: it is read once as the
         index of every file and where it sits</div>
     </div>
     <div id="cogbox" class="hide">
-      <label for="cogUrls">COG URLs (one per line)</label>
+      <select id="cogPick" class="pick"></select>
+      <label for="cogUrls">or paste COG URLs (one per line)</label>
       <textarea id="cogUrls" rows="3" spellcheck="false"
         style="width:100%;box-sizing:border-box;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:6px;font:12px ui-monospace,monospace;padding:6px"
         placeholder="https://host/path/file.tif"></textarea>
@@ -185,15 +183,13 @@
     </div>
 
     <div id="zarrbox" class="hide">
-      <label for="zarrUrl">Zarr store URL</label>
+      <select id="zarrPick" class="pick"></select>
+      <label for="zarrUrl">or paste a Zarr store URL</label>
       <div class="row">
-        <input id="zarrUrl" list="zarrs" spellcheck="false"
+        <input id="zarrUrl" spellcheck="false"
           value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">
         <button id="readZarr" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
       </div>
-      <datalist id="zarrs">
-        <option value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">MUR SST, daily, 0.01 degree (AWS)</option>
-      </datalist>
       <div class="row">
         <div><label for="zarrVar">variable</label><select id="zarrVar"></select></div>
         <div><label for="zarrCrs">CRS, if the store has none</label>
@@ -204,18 +200,13 @@
     </div>
 
     <div id="tilebox" class="hide">
-      <label for="tileUrl">XYZ template or WMTS capabilities URL</label>
+      <select id="tilePick" class="pick"></select>
+      <label for="tileUrl">or paste an XYZ template or WMTS capabilities URL, then read</label>
       <div class="row">
-        <input id="tileUrl" list="tileUrls" spellcheck="false"
+        <input id="tileUrl" spellcheck="false"
           value="https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png">
         <button id="readTiles" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
       </div>
-      <datalist id="tileUrls">
-        <option value="https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png">AWS terrain tiles (terrarium elevation, z0-15)</option>
-        <option value="https://gibs.earthdata.nasa.gov/wmts/epsg3031/best/wmts.cgi?SERVICE=WMTS&amp;REQUEST=GetCapabilities">NASA GIBS, Antarctic polar stereographic (WMTS)</option>
-        <option value="https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/wmts.cgi?SERVICE=WMTS&amp;REQUEST=GetCapabilities">NASA GIBS, Web Mercator (WMTS)</option>
-        <option value="https://tile.openstreetmap.org/{z}/{x}/{y}.png">OpenStreetMap (light use only)</option>
-      </datalist>
       <div id="wmtsBox" class="hide">
         <label for="tileLayer">layer</label>
         <select id="tileLayer"></select>
@@ -470,6 +461,7 @@ __export(explorer_exports, {
   rgbaToCanvas: () => rgbaToCanvas,
   sceneOffset: () => sceneOffset,
   scenesOffset: () => scenesOffset,
+  secureUrl: () => secureUrl,
   solarDay: () => solarDay,
   stacCatalog: () => stacCatalog,
   starcCatalog: () => starcCatalog,
@@ -550,6 +542,13 @@ function crsFromWkt(wkt) {
   var name = "WKT:" + ++wktCount;
   proj().defs(name, wkt);
   return name;
+}
+function secureUrl(u) {
+  u = String(u || "").trim();
+  if (typeof location !== "undefined" && location.protocol === "https:" && /^http:\/\//i.test(u) && !/^http:\/\/(localhost|127\.|\[::1\])/i.test(u)) {
+    return "https://" + u.slice(7);
+  }
+  return u;
 }
 function utmCode(zone, south) {
   return "EPSG:" + (south ? "327" : "326") + String(zone).padStart(2, "0");
@@ -1245,7 +1244,7 @@ function tileUrl(src, level, col, row) {
   var z = level.z !== void 0 ? level.z : level.id;
   var subs = src.subdomains || "abc";
   var s = typeof subs === "string" ? subs[(col + row) % subs.length] : subs[(col + row) % subs.length];
-  return src.template.replace(/\{z\}/g, z).replace(/\{x\}/g, col).replace(/\{y\}/g, row).replace(/\{-y\}/g, level.matrixHeight - 1 - row).replace(/\{q\}/g, quadkey(+z, col, row)).replace(/\{s\}/g, s).replace(/\{TileMatrix\}/gi, level.id).replace(/\{TileRow\}/gi, row).replace(/\{TileCol\}/gi, col).replace(/\{TileMatrixSet\}/gi, src.tms.id).replace(/\{Time\}/gi, src.time || "").replace(/\{Style\}/gi, src.style || "default");
+  return secureUrl(src.template).replace(/\{z\}/g, z).replace(/\{x\}/g, col).replace(/\{y\}/g, row).replace(/\{-y\}/g, level.matrixHeight - 1 - row).replace(/\{q\}/g, quadkey(+z, col, row)).replace(/\{s\}/g, s).replace(/\{TileMatrix\}/gi, level.id).replace(/\{TileRow\}/gi, row).replace(/\{TileCol\}/gi, col).replace(/\{TileMatrixSet\}/gi, src.tms.id).replace(/\{Time\}/gi, src.time || "").replace(/\{Style\}/gi, src.style || "default");
 }
 var tileCache = /* @__PURE__ */ new Map();
 var TILE_CACHE_MAX = 1024;
@@ -1905,9 +1904,7 @@ function sceneOf(info, i) {
 function cogCatalog(opts) {
   var urls = opts.urls;
   if (typeof urls === "string") urls = urls.split(/\s+/);
-  urls = (urls || []).map(function(u) {
-    return u.trim();
-  }).filter(Boolean);
+  urls = (urls || []).map(secureUrl).filter(Boolean);
   var infos = null;
   function read() {
     if (!infos) {
@@ -1969,7 +1966,7 @@ function guessDecode(u) {
   return "rgb";
 }
 function tileCatalog(opts) {
-  var url = String(opts.url || "").trim();
+  var url = secureUrl(opts.url);
   var wmts = isCapabilitiesUrl(url);
   var caps = null;
   function readCaps() {
@@ -2164,7 +2161,7 @@ function hit(a, b) {
   return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
 }
 function vrtCatalog(opts) {
-  var url = String(opts.url).trim();
+  var url = secureUrl(opts.url);
   var parsed = null;
   function read() {
     if (!parsed) {
@@ -2731,7 +2728,7 @@ function isoDay(ms) {
   return new Date(ms).toISOString().slice(0, 10);
 }
 function zarrCatalog(opts) {
-  var url = String(opts.url || "").trim().replace(/\/+$/, "");
+  var url = secureUrl(opts.url).replace(/\/+$/, "");
   var chosen = null;
   async function variable() {
     if (chosen) return chosen;
@@ -4424,6 +4421,84 @@ async function readCogs(fit) {
 $("readCogs").addEventListener("click", function() {
   readCogs(true).catch(fail);
 });
+var GIBS = "https://gibs.earthdata.nasa.gov/wmts/";
+var SCOGS = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/55/G/EN/2025/1/";
+var PGC = "https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/";
+var EXAMPLES = {
+  tiles: [
+    ["AWS terrain tiles (terrarium elevation, XYZ)", "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+    ["Esri World Imagery (WMTS)", "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/WMTS/1.0.0/WMTSCapabilities.xml"],
+    ["Esri World Imagery (XYZ)", "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    ["Esri Ocean basemap (XYZ)", "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"],
+    ["NASA GIBS, Web Mercator (WMTS, daily layers)", GIBS + "epsg3857/best/wmts.cgi?SERVICE=WMTS&REQUEST=GetCapabilities"],
+    ["NASA GIBS, Antarctic polar stereographic (WMTS)", GIBS + "epsg3031/best/wmts.cgi?SERVICE=WMTS&REQUEST=GetCapabilities"],
+    ["NASA GIBS, Arctic polar stereographic (WMTS)", GIBS + "epsg3413/best/wmts.cgi?SERVICE=WMTS&REQUEST=GetCapabilities"],
+    ["OpenStreetMap (XYZ, light use only)", "https://tile.openstreetmap.org/{z}/{x}/{y}.png"]
+  ],
+  cog: [
+    ["Sentinel-2 true colour (TCI), Tasmania 2025-01-03", SCOGS + "S2A_55GEN_20250103_0_L2A/TCI.tif"],
+    ["Sentinel-2 TCI, the same tile on two dates", SCOGS + "S2A_55GEN_20250103_0_L2A/TCI.tif\n" + SCOGS + "S2A_55GEN_20250109_0_L2A/TCI.tif"],
+    [
+      "DEA water observations frequency 1986-2023, Tasmania (Australian Albers)",
+      "https://dea-public-data.s3.ap-southeast-2.amazonaws.com/derivative/ga_ls_wo_fq_myear_3/1-6-0/x41/y08/1986--P37Y/ga_ls_wo_fq_myear_3_x41y08_1986--P37Y_final_frequency.tif"
+    ],
+    ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"]
+  ],
+  vrt: [
+    ["REMA v2 32 m (Antarctica)", PGC + "rema/mosaics/v2.0/32m_dem_tiles.vrt"],
+    ["REMA v2 10 m", PGC + "rema/mosaics/v2.0/10m_dem_tiles.vrt"],
+    ["ArcticDEM v4.1 32 m", PGC + "arcticdem/mosaics/v4.1/32m_dem_tiles.vrt"]
+  ],
+  zarr: [
+    ["MUR SST, daily, 0.01 degree, 2002-2020 (AWS)", "https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1"],
+    [
+      "ITS_LIVE ice velocity cube, West Antarctica (EPSG:3031; chunked for time series, so draw a small region)",
+      "https://its-live-data.s3.amazonaws.com/datacubes/v2-updated-october2024/S70W060/ITS_LIVE_vel_EPSG3031_G0120_X-1050000_Y450000.zarr"
+    ]
+  ]
+};
+function setupPick(id, list, apply) {
+  var sel = $(id);
+  fillSelect(sel, [["", "common " + (id === "tilePick" ? "servers" : id === "cogPick" ? "files" : id === "vrtPick" ? "mosaics" : "stores") + " ..."]].concat(
+    list.map(function(e, i) {
+      return [String(i), e[0]];
+    })
+  ));
+  sel.addEventListener("change", function() {
+    var e = list[+sel.value];
+    sel.value = "";
+    if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+    if (e) apply(e[1]);
+  });
+}
+setupPick("tilePick", EXAMPLES.tiles, function(u) {
+  $("tileUrl").value = u;
+  $("tileDecode").value = "";
+  $("tileMax").value = "";
+  clearScenes();
+  readTiles().catch(fail);
+});
+setupPick("cogPick", EXAMPLES.cog, function(u) {
+  $("cogUrls").value = u;
+  clearScenes();
+  readCogs(true).catch(fail);
+});
+setupPick("vrtPick", EXAMPLES.vrt, function(u) {
+  $("vrtUrl").value = u;
+  clearScenes();
+  readVrt(true).catch(fail);
+});
+setupPick("zarrPick", EXAMPLES.zarr, function(u) {
+  $("zarrUrl").value = u;
+  clearScenes();
+  readZarr(true).catch(fail);
+});
+$("vrtUrl").addEventListener("change", function() {
+  readVrt(true).catch(fail);
+});
+$("zarrUrl").addEventListener("change", function() {
+  readZarr(true).catch(fail);
+});
 var zarrCat = null;
 var zarrNoTime = false;
 function zarrCatalog2() {
@@ -5001,7 +5076,7 @@ function rebuildPresets(want) {
     o.textContent = p.label;
     sel.appendChild(o);
   });
-  if (cur && cur !== "custom" && !presetInfo[cur]) {
+  if (want && cur !== "custom" && !presetInfo[cur]) {
     var q = parsePresetId(cur);
     q.id = presetId(q);
     q.label = q.keys.join(",") + " (" + q.mode + ")";
