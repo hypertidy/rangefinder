@@ -45,6 +45,8 @@
   h2 { font-size: 11px; margin: 16px 0 2px; color: var(--accent); text-transform: uppercase;
        letter-spacing: 0.8px; border-top: 1px solid var(--edge); padding-top: 10px; }
   .sub { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .links { font-size: 12px; margin-bottom: 4px; }
+  .links a { color: var(--accent, #4fc3f7); margin-right: 12px; }
   label { display: block; margin: 9px 0 3px; color: var(--muted); font-size: 11px;
           text-transform: uppercase; letter-spacing: 0.6px; }
   input, select, button { width: 100%; box-sizing: border-box; padding: 6px 9px;
@@ -104,6 +106,9 @@
   <div id="panel">
     <h1>rangefinder</h1>
     <div class="sub">search a catalogue or a tile server, draw a region, compose from the raw pixels</div>
+    <div class="links"><a href="https://github.com/hypertidy/rangefinder#readme" target="_blank" rel="noopener">help</a>
+      <a href="https://github.com/hypertidy/rangefinder" target="_blank" rel="noopener">source code</a>
+      <a href="https://github.com/hypertidy/rangefinder/issues" target="_blank" rel="noopener">report an issue</a></div>
 
     <h2>source</h2>
     <select id="src">
@@ -5105,7 +5110,7 @@ var EXAMPLES = {
     ]
   ]
 };
-function setupPick(id, list, apply) {
+function setupPick(id, list, apply, field) {
   var sel = $(id);
   fillSelect(sel, [["", "common " + (id === "tilePick" ? "servers" : id === "cogPick" ? "files" : id === "vrtPick" ? "mosaics" : "stores") + " ..."]].concat(
     list.map(function(e, i) {
@@ -5114,9 +5119,23 @@ function setupPick(id, list, apply) {
   ));
   sel.addEventListener("change", function() {
     var e = list[+sel.value];
-    sel.value = "";
-    if (sel.selectedIndex < 0) sel.selectedIndex = 0;
     if (e) apply(e[1]);
+  });
+  function sync() {
+    var v = $(field).value.trim(), i = list.findIndex(function(e) {
+      return e[1] === v;
+    });
+    sel.value = i < 0 ? "" : String(i);
+  }
+  $(field).addEventListener("input", sync);
+  $(field).addEventListener("change", sync);
+  pickSyncs.push(sync);
+  sync();
+}
+var pickSyncs = [];
+function syncPicks() {
+  pickSyncs.forEach(function(f) {
+    f();
   });
 }
 setupPick("tilePick", EXAMPLES.tiles, function(u) {
@@ -5125,22 +5144,22 @@ setupPick("tilePick", EXAMPLES.tiles, function(u) {
   $("tileMax").value = "";
   clearScenes();
   readTiles().catch(fail);
-});
+}, "tileUrl");
 setupPick("cogPick", EXAMPLES.cog, function(u) {
   $("cogUrls").value = u;
   clearScenes();
   readCogs(true).catch(fail);
-});
+}, "cogUrls");
 setupPick("vrtPick", EXAMPLES.vrt, function(u) {
   $("vrtUrl").value = u;
   clearScenes();
   readVrt(true).catch(fail);
-});
+}, "vrtUrl");
 setupPick("zarrPick", EXAMPLES.zarr, function(u) {
   $("zarrUrl").value = u;
   clearScenes();
   readZarr(true).catch(fail);
-});
+}, "zarrUrl");
 $("vrtUrl").addEventListener("change", function() {
   readVrt(true).catch(fail);
 });
@@ -6559,6 +6578,7 @@ async function readHash() {
     return;
   }
   if (h.get("url")) $("stacUrl").value = h.get("url");
+  syncPicks();
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("cloud")) $("cloud").value = h.get("cloud");
   if (h.get("ramp")) $("ramp").value = h.get("ramp");
