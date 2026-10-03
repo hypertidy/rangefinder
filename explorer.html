@@ -2829,7 +2829,7 @@ function vrtCatalog(opts) {
       var v = await read();
       cat.note = null;
       if (q.res && v.overviews.length && q.res > Math.abs(v.gt[1]) * 1.05) {
-        var pick2 = null, skipped = [];
+        var pick2 = null, skipped = [], coarser = false;
         for (var i = v.overviews.length - 1; i >= 0; i--) {
           var res;
           try {
@@ -2843,12 +2843,13 @@ function vrtCatalog(opts) {
             pick2 = v.overviews[i];
             break;
           }
+          coarser = true;
         }
         if (pick2) {
           var name = decodeURIComponent(pick2.href.split("/").pop());
           cat.note = "read from overview " + name + " (" + +pick2.res.toPrecision(3) + " m) for this region's pixel size; a smaller region reads finer data";
         }
-        if (skipped.length) {
+        if (skipped.length && !coarser) {
           cat.note = (cat.note ? cat.note + "\n" : "") + "skipped overview(s): " + skipped.join("; ");
         }
         if (pick2) {
