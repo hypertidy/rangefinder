@@ -2,7 +2,8 @@
 
 A static, server-free explorer for online imagery and gridded data. Point it
 at a STAC API (default: Earth Search v1, `sentinel-2-l2a`), a published starc
-store, the wildtiles cube, a GDAL VRT mosaic or a list of COG URLs, draw a
+store, the wildtiles cube, a GDAL VRT mosaic, a list of COG URLs or a map
+tile server (XYZ or WMTS, any tile matrix set), draw a
 region on the map, search, scrub through the days, and the page reads the
 COGs directly by HTTP range request and composes the image in the browser:
 three bands to RGB, one band through a colour ramp (with hillshade for
@@ -34,7 +35,14 @@ Two ways to open it locally:
    REMA v2 32 m, Antarctica) is read once as the index of every file it
    mosaics, and the files are outlined; **COG files** takes pasted URLs and
    reads only their headers to place them. Neither has a time axis or cloud
-   cover, so those controls hide, and a search loads straight away.
+   cover, so those controls hide, and a search loads straight away. A **tile
+   server** is an XYZ template (`{z}/{x}/{y}`, `{-y}`, `{q}`, `{s}`) or a
+   WMTS GetCapabilities URL: `read` lists its layers, tile matrix sets (in
+   any CRS: a polar stereographic pyramid works like a Web Mercator one)
+   and formats, and a WMTS time dimension becomes the day list and timeline.
+   Tiles go through the same warp as COGs, at the level that suits the
+   region. Elevation packed into RGB (terrarium, Mapbox terrain-RGB) is
+   decoded to metres, so it gets ramps and hillshade like a DEM.
 2. **Region.** `draw on map`, then drag a box; or `use view`.
 3. **Scenes.** Date range (a blank date is an open end), max cloud,
    `Search scenes`. Results are grouped by solar day (local date at the
@@ -77,7 +85,10 @@ lib/sources/starc.js     layers 1+2: starc store binding (acquisitions/products/
 lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory, tile registry, BANDS.txt)
 lib/sources/vrt.js       layers 1+2: GDAL VRT mosaic (the VRT is the file index)
 lib/sources/cog.js       layers 1+2: pasted COG URLs (headers only)
+lib/sources/tiles.js     layers 1+2: XYZ template or WMTS capabilities (layers, sets, times)
 lib/cog.js               layer 3: windowed overview reads warped to the grid
+lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/decode,
+                         the same warp for tile pyramids, WMTS capabilities parsing
 lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma, ramps,
                          hillshade, class palettes -> RGBA
 dev/                     mock STAC server, headless test, fixture and standalone builders
@@ -147,6 +158,21 @@ RenderParams = { stretch: [[lo, hi] x3 or x1], gamma, transfer: "linear",
                  ramp, hillshade (0..1), shade }
 ```
 
+**TileSource** (see `lib/tiles.js`): a Scene asset can be an object instead
+of an href, and `loadComposite` reads it with `readTilesWarped` instead of
+`readWarped`:
+
+```
+TileSource = { kind: "tiles", template, tms, format: "rgb" | "terrarium" | "mapbox",
+               time, minzoom, maxzoom, subdomains }
+tms        = { id, crs, levels: [{ id, cell, origin: [x, y], tileWidth, tileHeight,
+                                   matrixWidth, matrixHeight, limits? }] }
+```
+
+A read returns the usual `{ bands, valid, level }` plus `log`: one entry per
+tile (url, status, bytes, ms, hash), which the status line summarises.
+```
+
 Extension points left for the next pieces of work:
 
 - **RGB compositing controls** (done): `TRANSFERS` has linear/sqrt/log,
@@ -203,7 +229,13 @@ explorer itself has no dependencies to install).
   54/55 seam in Victoria Feb 2025), a mock wildtiles bucket under `/wt/`
   (cube, inventory, registry and BANDS.txt),
   and mock starc stores under `/starc/` (manifest), `/starc-flat/`
-  (consolidated) and `/s3/store/` (bucket listing only).
+  (consolidated) and `/s3/store/` (bucket listing only), and a mock tile
+  server: XYZ at `/xyz/{z}/{x}/{y}.png` and a WMTS at
+  `/wmts/1.0.0/WMTSCapabilities.xml` (Web Mercator and EPSG:3031 sets, two
+  times). Its synthetic pattern covers only Tasmania (and a Ross Sea box in
+  3031), has native data to level 11 (6 in 3031) and exact upsamples beyond
+  it, and answers outside its coverage with 404s and a blank placeholder
+  tile, so the tile inspector has something to find.
 - `make_fixtures.py` rebuilds the fixtures from the public bucket
   (`pip install rasterio pyarrow`); the wildtiles tiles are not committed
   (`python3 make_fixtures.py wildtiles` rebuilds just those).

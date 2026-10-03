@@ -106,6 +106,7 @@
       <option value="wildtiles">wildtiles cube</option>
       <option value="vrt">GDAL VRT mosaic</option>
       <option value="cog">COG files (paste URLs)</option>
+      <option value="tiles">tile server (XYZ / WMTS)</option>
     </select>
     <div id="stacbox">
       <label for="stacUrl">STAC API URL</label>
@@ -175,6 +176,42 @@
       <button id="readCogs" class="minor">read headers and zoom to them</button>
       <div id="cogInfo" class="note">any public, CORS-enabled GeoTIFF; the header gives the
         footprint, CRS and bands</div>
+    </div>
+
+    <div id="tilebox" class="hide">
+      <label for="tileUrl">XYZ template or WMTS capabilities URL</label>
+      <div class="row">
+        <input id="tileUrl" list="tileUrls" spellcheck="false"
+          value="https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png">
+        <button id="readTiles" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
+      </div>
+      <datalist id="tileUrls">
+        <option value="https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png">AWS terrain tiles (terrarium elevation, z0-15)</option>
+        <option value="https://gibs.earthdata.nasa.gov/wmts/epsg3031/best/wmts.cgi?SERVICE=WMTS&amp;REQUEST=GetCapabilities">NASA GIBS, Antarctic polar stereographic (WMTS)</option>
+        <option value="https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/wmts.cgi?SERVICE=WMTS&amp;REQUEST=GetCapabilities">NASA GIBS, Web Mercator (WMTS)</option>
+        <option value="https://tile.openstreetmap.org/{z}/{x}/{y}.png">OpenStreetMap (light use only)</option>
+      </datalist>
+      <div id="wmtsBox" class="hide">
+        <label for="tileLayer">layer</label>
+        <select id="tileLayer"></select>
+        <div class="row">
+          <div><label for="tileSet">tile matrix set</label><select id="tileSet"></select></div>
+          <div><label for="tileFmt">format</label><select id="tileFmt"></select></div>
+        </div>
+      </div>
+      <div class="row">
+        <div><label for="tileDecode">pixels are</label>
+          <select id="tileDecode">
+            <option value="">(guess from URL)</option>
+            <option value="rgb">an image (as served)</option>
+            <option value="terrarium">terrarium elevation</option>
+            <option value="mapbox">Mapbox terrain-RGB</option>
+          </select></div>
+        <div><label for="tileMax">max zoom</label>
+          <input id="tileMax" type="number" min="0" max="30" placeholder="server's"></div>
+      </div>
+      <div id="tileInfo" class="note">tiles are warped onto the map grid like any COG, so
+        polar and lon/lat pyramids work too; the server must allow CORS</div>
     </div>
 
     <h2>region</h2>
@@ -398,7 +435,17 @@ $("from").value = isoDay(new Date(today.getTime() - 60 * 864e5));
 
 // --- source ------------------------------------------------------------------
 
+function tileOpts() {
+  return { url: $("tileUrl").value.trim(), layer: $("tileLayer").value || null,
+           set: $("tileSet").value || null, format: $("tileFmt").value || null,
+           decode: $("tileDecode").value || X.guessDecode($("tileUrl").value),
+           maxzoom: $("tileMax").value === "" ? null : +$("tileMax").value };
+}
 function makeCatalog() {
+  if ($("src").value === "tiles") {
+    if (!$("tileUrl").value.trim()) throw new Error("enter a tile URL template or WMTS capabilities URL");
+    return X.tileCatalog(tileOpts());
+  }
   if ($("src").value === "vrt") {
     if (!$("vrtUrl").value.trim()) throw new Error("enter the VRT URL");
     return X.vrtCatalog({ url: $("vrtUrl").value.trim() });
@@ -423,6 +470,7 @@ function sourceChanged() {
   $("wtbox").classList.toggle("hide", src !== "wildtiles");
   $("vrtbox").classList.toggle("hide", src !== "vrt");
   $("cogbox").classList.toggle("hide", src !== "cog");
+  $("tilebox").classList.toggle("hide", src !== "tiles");
   coverLayer.clearLayers();
   state.catalog = null;
   capabilitiesChanged(null);
@@ -433,7 +481,8 @@ function sourceChanged() {
 function capabilitiesChanged(cat) {
   var src = $("src").value;
   var caps = (cat && cat.capabilities) ||
-    { cloud: src === "stac" || src === "starc", time: src !== "vrt" && src !== "cog" };
+    { cloud: src === "stac" || src === "starc",
+      time: src !== "vrt" && src !== "cog" && !(src === "tiles" && !X.isCapabilitiesUrl($("tileUrl").value)) };
   $("cloudBox").classList.toggle("hide", !caps.cloud);
   $("from").parentNode.parentNode.classList.toggle("hide", !caps.time);
   $("dateNote").classList.toggle("hide", !caps.time);
@@ -441,8 +490,10 @@ function capabilitiesChanged(cat) {
 $("src").addEventListener("change", function () {
   sourceChanged();
   if ($("src").value === "wildtiles") readCube(false).catch(fail);   // three small files
+  if ($("src").value === "tiles") readTiles().catch(fail);
 });
-["stacUrl", "coll", "wtBucket", "wtRes", "starcColl", "vrtUrl", "cogUrls"].forEach(function (id) {
+["stacUrl", "coll", "wtBucket", "wtRes", "starcColl", "vrtUrl", "cogUrls", "tileUrl", "tileLayer",
+ "tileSet", "tileFmt", "tileDecode", "tileMax"].forEach(function (id) {
   $(id).addEventListener("change", clearScenes);
 });
 $("starcUrl").addEventListener("change", function () { coverLayer.clearLayers(); clearScenes(); });
@@ -567,6 +618,60 @@ async function readCogs(fit) {
   return info;
 }
 $("readCogs").addEventListener("click", function () { readCogs(true).catch(fail); });
+
+// A WMTS describes itself: layers, matrix sets (any CRS), formats, times.
+// An XYZ template is Web Mercator by definition and says nothing more.
+var tileCaps = null;
+function fillSelect(sel, items, want) {
+  sel.innerHTML = "";
+  items.forEach(function (it) {
+    var o = document.createElement("option");
+    o.value = it[0]; o.textContent = it[1];
+    sel.appendChild(o);
+  });
+  if (want && items.some(function (it) { return it[0] === want; })) sel.value = want;
+}
+function tileLayerChanged(wantSet, wantFmt) {
+  var l = tileCaps && tileCaps.layers.filter(function (x) { return x.id === $("tileLayer").value; })[0];
+  if (!l) return;
+  fillSelect($("tileSet"), l.links.map(function (k) {
+    var ts = tileCaps.sets[k.set];
+    return [k.set, k.set + (ts ? " (" + ts.crs + ", " + ts.levels.length + " levels)" : "")];
+  }), wantSet);
+  fillSelect($("tileFmt"), (l.templates.length ? l.templates.map(function (t) { return t.format; }) : l.formats)
+    .map(function (f) { return [f, f]; }), wantFmt);
+  $("tileInfo").textContent = l.title + ": " + (l.times ? l.times.length + " times, " + l.times[0] +
+    " to " + l.times[l.times.length - 1] + "; " : "") + "bbox " +
+    (l.bbox ? l.bbox.map(function (v) { return v.toFixed(1); }).join(", ") : "not given");
+  if (l.times && l.times.length) {   // a daily layer: show the last 60 days
+    var last = l.times[l.times.length - 1].slice(0, 10);
+    $("to").value = last;
+    $("from").value = isoDay(new Date(Date.parse(last) - 60 * 864e5));
+  }
+}
+async function readTiles(want) {
+  want = want || {};
+  var url = $("tileUrl").value.trim();
+  $("wmtsBox").classList.toggle("hide", !X.isCapabilitiesUrl(url));
+  capabilitiesChanged(null);
+  if (!X.isCapabilitiesUrl(url)) {
+    tileCaps = null;
+    var dec = $("tileDecode").value || X.guessDecode(url);
+    $("tileInfo").textContent = "XYZ, Web Mercator, 256 px tiles; pixels read as " +
+      (dec === "rgb" ? "an image" : dec + " elevation") + ". Draw a region and search.";
+    return null;
+  }
+  setStatus("reading WMTS capabilities ...");
+  tileCaps = await makeCatalog().info();
+  fillSelect($("tileLayer"), tileCaps.layers.map(function (l) { return [l.id, l.title]; }), want.layer);
+  tileLayerChanged(want.set, want.format);
+  setStatus(tileCaps.layers.length + " layers in " + (tileCaps.title || "the capabilities") +
+    ": pick one, draw a region and search");
+  return tileCaps;
+}
+$("readTiles").addEventListener("click", function () { readTiles().catch(fail); });
+$("tileLayer").addEventListener("change", function () { tileLayerChanged(); });
+$("tileUrl").addEventListener("change", function () { readTiles().catch(fail); });
 
 $("readStore").addEventListener("click", function () {
   readStore(true).then(function (info) {
@@ -1225,11 +1330,18 @@ async function loadImagery() {
       return;
     }
     state.comp = r.composite;
+    state.lastLog = s.log;
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + s.files + " files, " +
+    var what = s.files + " files";
+    if (s.log.length) {   // a tile source: say what the level read looked like
+      var got = s.log.filter(function (t) { return t.ok; }).length;
+      what = s.log.length + " tiles at level " + s.log[0].z + " (" + got + " with data, " +
+        (s.log.length - got) + " missing or failed)";
+    }
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " +
       grid.width + "x" + grid.height + " px at " + X.gridGroundRes(grid).toFixed(0) +
-      " m, overview " + lv + ", " + s.ms + " ms" + (cached ? " (cached)" : "") +
+      " m" + (s.log.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached ? " (cached)" : "") +
       (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {
@@ -1304,6 +1416,14 @@ function writeHash() {
   }
   else if ($("src").value === "vrt") h.set("vrt", $("vrtUrl").value.trim());
   else if ($("src").value === "cog") h.set("cogs", $("cogUrls").value.trim().split(/\s+/).join(" "));
+  else if ($("src").value === "tiles") {
+    h.set("tiles", $("tileUrl").value.trim());
+    if ($("tileLayer").value) h.set("tlayer", $("tileLayer").value);
+    if ($("tileSet").value) h.set("tset", $("tileSet").value);
+    if ($("tileFmt").value) h.set("tfmt", $("tileFmt").value);
+    if ($("tileDecode").value) h.set("tdec", $("tileDecode").value);
+    if ($("tileMax").value !== "") h.set("tmax", $("tileMax").value);
+  }
   else { h.set("bucket", $("wtBucket").value.trim()); h.set("res", $("wtRes").value); }
   if (state.roi) h.set("roi", state.roi.map(function (v) { return v.toFixed(5); }).join(","));
   h.set("from", $("from").value); h.set("to", $("to").value); h.set("cloud", $("cloud").value);
@@ -1335,6 +1455,12 @@ async function readHash() {
   if (h.get("res")) $("wtRes").value = h.get("res");
   if (h.get("vrt")) $("vrtUrl").value = h.get("vrt");
   if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
+  if (h.get("tiles")) {
+    $("tileUrl").value = h.get("tiles");
+    if (h.get("tdec")) $("tileDecode").value = h.get("tdec");
+    if (h.get("tmax")) $("tileMax").value = h.get("tmax");
+    await readTiles({ layer: h.get("tlayer"), set: h.get("tset"), format: h.get("tfmt") });
+  }
   if (!h.has("roi")) {
     if (h.get("src") === "vrt" && h.get("vrt")) await readVrt(true);
     if (h.get("src") === "cog" && h.get("cogs")) await readCogs(true);

@@ -107,6 +107,7 @@
       <option value="wildtiles">wildtiles cube</option>
       <option value="vrt">GDAL VRT mosaic</option>
       <option value="cog">COG files (paste URLs)</option>
+      <option value="tiles">tile server (XYZ / WMTS)</option>
     </select>
     <div id="stacbox">
       <label for="stacUrl">STAC API URL</label>
@@ -176,6 +177,42 @@
       <button id="readCogs" class="minor">read headers and zoom to them</button>
       <div id="cogInfo" class="note">any public, CORS-enabled GeoTIFF; the header gives the
         footprint, CRS and bands</div>
+    </div>
+
+    <div id="tilebox" class="hide">
+      <label for="tileUrl">XYZ template or WMTS capabilities URL</label>
+      <div class="row">
+        <input id="tileUrl" list="tileUrls" spellcheck="false"
+          value="https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png">
+        <button id="readTiles" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
+      </div>
+      <datalist id="tileUrls">
+        <option value="https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png">AWS terrain tiles (terrarium elevation, z0-15)</option>
+        <option value="https://gibs.earthdata.nasa.gov/wmts/epsg3031/best/wmts.cgi?SERVICE=WMTS&amp;REQUEST=GetCapabilities">NASA GIBS, Antarctic polar stereographic (WMTS)</option>
+        <option value="https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/wmts.cgi?SERVICE=WMTS&amp;REQUEST=GetCapabilities">NASA GIBS, Web Mercator (WMTS)</option>
+        <option value="https://tile.openstreetmap.org/{z}/{x}/{y}.png">OpenStreetMap (light use only)</option>
+      </datalist>
+      <div id="wmtsBox" class="hide">
+        <label for="tileLayer">layer</label>
+        <select id="tileLayer"></select>
+        <div class="row">
+          <div><label for="tileSet">tile matrix set</label><select id="tileSet"></select></div>
+          <div><label for="tileFmt">format</label><select id="tileFmt"></select></div>
+        </div>
+      </div>
+      <div class="row">
+        <div><label for="tileDecode">pixels are</label>
+          <select id="tileDecode">
+            <option value="">(guess from URL)</option>
+            <option value="rgb">an image (as served)</option>
+            <option value="terrarium">terrarium elevation</option>
+            <option value="mapbox">Mapbox terrain-RGB</option>
+          </select></div>
+        <div><label for="tileMax">max zoom</label>
+          <input id="tileMax" type="number" min="0" max="30" placeholder="server's"></div>
+      </div>
+      <div id="tileInfo" class="note">tiles are warped onto the map grid like any COG, so
+        polar and lon/lat pyramids work too; the server must allow CORS</div>
     </div>
 
     <h2>region</h2>
@@ -320,6 +357,7 @@ var __export = (target, all) => {
 var explorer_exports = {};
 __export(explorer_exports, {
   BAND_ALIASES: () => BAND_ALIASES,
+  DECODERS: () => DECODERS,
   HARMONISED_ARCHIVES: () => HARMONISED_ARCHIVES,
   KNOWN_CLASSES: () => KNOWN_CLASSES,
   KNOWN_CRS: () => KNOWN_CRS,
@@ -331,6 +369,7 @@ __export(explorer_exports, {
   autoStretch: () => autoStretch,
   bboxIntersects: () => bboxIntersects,
   boxPolygon: () => boxPolygon,
+  chooseLevel: () => chooseLevel,
   classCounts: () => classCounts,
   classPalette: () => classPalette,
   cogCatalog: () => cogCatalog,
@@ -338,11 +377,16 @@ __export(explorer_exports, {
   crsCode: () => crsCode,
   crsFromWkt: () => crsFromWkt,
   ensureCrs: () => ensureCrs,
+  fetchTile: () => fetchTile,
   geometryBbox: () => geometryBbox,
   gridGroundRes: () => gridGroundRes,
   gridLonLatBounds: () => gridLonLatBounds,
+  gridTiles: () => gridTiles,
   groupByDay: () => groupByDay,
+  guessDecode: () => guessDecode,
   hillshade: () => hillshade,
+  isCapabilitiesUrl: () => isCapabilitiesUrl,
+  levelRange: () => levelRange,
   listCollections: () => listCollections,
   loadComposite: () => loadComposite,
   makeGrid: () => makeGrid,
@@ -353,11 +397,13 @@ __export(explorer_exports, {
   parsePresetId: () => parsePresetId,
   parseTileId: () => parseTileId,
   parseVrt: () => parseVrt,
+  parseWmtsCapabilities: () => parseWmtsCapabilities,
   percentiles: () => percentiles,
   presetId: () => presetId,
   presetsFor: () => presetsFor,
   rampTable: () => rampTable,
   readAsset: () => readAsset,
+  readTilesWarped: () => readTilesWarped,
   readWarped: () => readWarped,
   renderRGBA: () => renderRGBA,
   resolveAssets: () => resolveAssets,
@@ -367,15 +413,20 @@ __export(explorer_exports, {
   solarDay: () => solarDay,
   stacCatalog: () => stacCatalog,
   starcCatalog: () => starcCatalog,
+  tileCatalog: () => tileCatalog,
+  tileExtent: () => tileExtent,
   tileLonLatBbox: () => tileLonLatBbox,
+  tileUrl: () => tileUrl,
   tilesForBbox: () => tilesForBbox,
   transform: () => transform,
   transformBbox: () => transformBbox,
   utmCode: () => utmCode,
   utmZoneOf: () => utmZoneOf,
   vrtCatalog: () => vrtCatalog,
+  webMercatorQuad: () => webMercatorQuad,
   wildtilesCatalog: () => wildtilesCatalog,
-  wktEpsg: () => wktEpsg
+  wktEpsg: () => wktEpsg,
+  wmtsSource: () => wmtsSource
 });
 
 // lib/geo.js
@@ -1081,6 +1132,430 @@ async function cogInfo(href) {
   };
 }
 
+// lib/tiles.js
+var MERC = 20037508342789244e-9;
+var DEG_M = 2 * Math.PI * 6378137 / 360;
+function webMercatorQuad(maxzoom, tileSize) {
+  maxzoom = maxzoom == null ? 22 : maxzoom;
+  tileSize = tileSize || 256;
+  var levels2 = [];
+  for (var z = 0; z <= maxzoom; z++) {
+    levels2.push({
+      id: String(z),
+      z,
+      cell: 2 * MERC / tileSize / Math.pow(2, z),
+      origin: [-MERC, MERC],
+      tileWidth: tileSize,
+      tileHeight: tileSize,
+      matrixWidth: Math.pow(2, z),
+      matrixHeight: Math.pow(2, z)
+    });
+  }
+  return { id: "WebMercatorQuad", crs: "EPSG:3857", levels: levels2 };
+}
+function tileExtent(level, col, row) {
+  var w = level.tileWidth * level.cell, h = level.tileHeight * level.cell;
+  var x0 = level.origin[0] + col * w, y1 = level.origin[1] - row * h;
+  return [x0, y1 - h, x0 + w, y1];
+}
+function quadkey(z, x, y) {
+  var q = "";
+  for (var i = z; i > 0; i--) {
+    var d = 0, m = 1 << i - 1;
+    if (x & m) d += 1;
+    if (y & m) d += 2;
+    q += d;
+  }
+  return q;
+}
+function tileUrl(src, level, col, row) {
+  var z = level.z !== void 0 ? level.z : level.id;
+  var subs = src.subdomains || "abc";
+  var s = typeof subs === "string" ? subs[(col + row) % subs.length] : subs[(col + row) % subs.length];
+  return src.template.replace(/\{z\}/g, z).replace(/\{x\}/g, col).replace(/\{y\}/g, row).replace(/\{-y\}/g, level.matrixHeight - 1 - row).replace(/\{q\}/g, quadkey(+z, col, row)).replace(/\{s\}/g, s).replace(/\{TileMatrix\}/gi, level.id).replace(/\{TileRow\}/gi, row).replace(/\{TileCol\}/gi, col).replace(/\{TileMatrixSet\}/gi, src.tms.id).replace(/\{Time\}/gi, src.time || "").replace(/\{Style\}/gi, src.style || "default");
+}
+var tileCache = /* @__PURE__ */ new Map();
+var TILE_CACHE_MAX = 1024;
+function fnv(buf) {
+  var h = 2166136261, b = new Uint8Array(buf);
+  for (var i = 0; i < b.length; i++) {
+    h ^= b[i];
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+async function decode(blob) {
+  var bmp = await createImageBitmap(blob);
+  var cv = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(bmp.width, bmp.height) : Object.assign(
+    document.createElement("canvas"),
+    { width: bmp.width, height: bmp.height }
+  );
+  var g = cv.getContext("2d");
+  g.drawImage(bmp, 0, 0);
+  if (bmp.close) bmp.close();
+  return g.getImageData(0, 0, cv.width, cv.height);
+}
+function fetchTile(url, signal) {
+  var hit2 = tileCache.get(url);
+  if (hit2) {
+    tileCache.delete(url);
+    tileCache.set(url, hit2);
+    return hit2;
+  }
+  var p = (async function() {
+    var t0 = performance.now(), out = {
+      url,
+      status: 0,
+      ok: false,
+      bytes: 0,
+      type: "",
+      ms: 0,
+      hash: null,
+      image: null,
+      error: null
+    };
+    try {
+      var r = await fetch(url, { signal, mode: "cors" });
+      out.status = r.status;
+      out.type = r.headers.get("content-type") || "";
+      var buf = await r.arrayBuffer();
+      out.bytes = buf.byteLength;
+      out.ms = Math.round(performance.now() - t0);
+      if (r.ok && buf.byteLength) {
+        out.hash = fnv(buf);
+        out.blob = new Blob([buf], { type: out.type || "image/png" });
+        try {
+          out.image = await decode(out.blob);
+          out.ok = true;
+        } catch (e) {
+          out.error = "not an image (" + (out.type || "unknown type") + ")";
+        }
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") throw e;
+      out.ms = Math.round(performance.now() - t0);
+      out.error = "network or CORS failure";
+    }
+    return out;
+  })();
+  p.catch(function() {
+    tileCache.delete(url);
+  });
+  tileCache.set(url, p);
+  if (tileCache.size > TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
+  return p;
+}
+var DECODERS = {
+  terrarium: function(r, g, b) {
+    return r * 256 + g + b / 256 - 32768;
+  },
+  mapbox: function(r, g, b) {
+    return -1e4 + (r * 65536 + g * 256 + b) * 0.1;
+  }
+};
+async function pool(items, n, fn) {
+  var next = 0, out = new Array(items.length);
+  async function worker() {
+    while (next < items.length) {
+      var i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  var ws = [];
+  for (var k = 0; k < Math.min(n, items.length); k++) ws.push(worker());
+  await Promise.all(ws);
+  return out;
+}
+function levelRange(src) {
+  var n = src.tms.levels.length;
+  var lo = Math.max(0, src.minzoom || 0);
+  var hi = Math.min(n - 1, src.maxzoom === void 0 || src.maxzoom === null ? n - 1 : src.maxzoom);
+  return [lo, hi];
+}
+function chooseLevel(src, grid) {
+  var tms = src.tms, L0 = tms.levels[0];
+  var toSrc = globalThis.proj4(ensureCrs(grid.crs), ensureCrs(tms.crs));
+  var lat = gridLattice(grid, toSrc, L0.origin, [L0.cell, -L0.cell]);
+  var gridCell = latticeScale(lat) * L0.cell;
+  var r = levelRange(src), pick2 = r[1];
+  for (var i = r[0]; i <= r[1]; i++) {
+    if (tms.levels[i].cell <= gridCell * 1.05) {
+      pick2 = i;
+      break;
+    }
+  }
+  return { index: pick2, gridCell, overzoom: tms.levels[pick2].cell > gridCell * 1.05 };
+}
+function gridTiles(src, grid, index) {
+  var L2 = src.tms.levels[index];
+  var toSrc = globalThis.proj4(ensureCrs(grid.crs), ensureCrs(src.tms.crs));
+  var lat = gridLattice(grid, toSrc, L2.origin, [L2.cell, -L2.cell]);
+  var win = latticeWindow(lat, L2.matrixWidth * L2.tileWidth, L2.matrixHeight * L2.tileHeight);
+  if (!win) return null;
+  var c0 = Math.floor(win[0] / L2.tileWidth), c1 = Math.ceil(win[2] / L2.tileWidth) - 1;
+  var r0 = Math.floor(win[1] / L2.tileHeight), r1 = Math.ceil(win[3] / L2.tileHeight) - 1;
+  if (L2.limits) {
+    c0 = Math.max(c0, L2.limits[0]);
+    r0 = Math.max(r0, L2.limits[1]);
+    c1 = Math.min(c1, L2.limits[2]);
+    r1 = Math.min(r1, L2.limits[3]);
+    if (c1 < c0 || r1 < r0) return null;
+  }
+  return { level: L2, index, cols: [c0, c1], rows: [r0, r1], lat };
+}
+async function readTilesWarped(src, grid, opts) {
+  opts = opts || {};
+  var maxTiles = opts.maxTiles || 300;
+  var ch = chooseLevel(src, grid), idx = ch.index, gt = null;
+  for (; idx >= levelRange(src)[0]; idx--) {
+    gt = gridTiles(src, grid, idx);
+    if (!gt) return null;
+    var n = (gt.cols[1] - gt.cols[0] + 1) * (gt.rows[1] - gt.rows[0] + 1);
+    if (n <= maxTiles) break;
+  }
+  if (!gt) return null;
+  var L2 = gt.level, tw = L2.tileWidth, th = L2.tileHeight;
+  var nx = gt.cols[1] - gt.cols[0] + 1, ny = gt.rows[1] - gt.rows[0] + 1;
+  var ww = nx * tw, wh = ny * th;
+  var R = new Uint8Array(ww * wh), G = new Uint8Array(ww * wh), B = new Uint8Array(ww * wh);
+  var A = new Uint8Array(ww * wh);
+  var jobs = [];
+  for (var r = gt.rows[0]; r <= gt.rows[1]; r++) {
+    for (var c = gt.cols[0]; c <= gt.cols[1]; c++) jobs.push([c, r]);
+  }
+  var log = [];
+  await pool(jobs, opts.concurrency || 8, async function(j) {
+    var url = tileUrl(src, L2, j[0], j[1]);
+    var t = await fetchTile(url, opts.signal);
+    log.push({
+      z: L2.id,
+      x: j[0],
+      y: j[1],
+      url,
+      status: t.status,
+      bytes: t.bytes,
+      ms: t.ms,
+      hash: t.hash,
+      ok: t.ok,
+      error: t.error
+    });
+    if (!t.ok) return;
+    var im = t.image, ox = (j[0] - gt.cols[0]) * tw, oy = (j[1] - gt.rows[0]) * th;
+    var w = Math.min(im.width, tw), h = Math.min(im.height, th), d = im.data;
+    for (var y = 0; y < h; y++) {
+      var so = y * im.width * 4, dp = (oy + y) * ww + ox;
+      for (var x = 0; x < w; x++, so += 4, dp++) {
+        R[dp] = d[so];
+        G[dp] = d[so + 1];
+        B[dp] = d[so + 2];
+        A[dp] = d[so + 3];
+      }
+    }
+  });
+  var bands = [R, G, B];
+  var dec = DECODERS[src.format];
+  if (dec) {
+    var E = new Float32Array(ww * wh);
+    for (var i = 0; i < E.length; i++) E[i] = A[i] ? dec(R[i], G[i], B[i]) : NaN;
+    bands = [E];
+  }
+  var res = resampleWindow(
+    gt.lat,
+    grid,
+    bands,
+    ww,
+    wh,
+    gt.cols[0] * tw,
+    gt.rows[0] * th,
+    1,
+    1,
+    dec ? NaN : null,
+    A
+  );
+  if (!res.any) {
+    var bad = log.filter(function(t) {
+      return t.error;
+    })[0];
+    if (bad && log.every(function(t) {
+      return !t.ok;
+    })) {
+      throw new Error("no tile could be read (" + bad.error + "), e.g. " + bad.url);
+    }
+    return null;
+  }
+  return {
+    bands: res.bands,
+    valid: res.valid,
+    level: gt.index,
+    levelId: L2.id,
+    overzoom: ch.overzoom && gt.index === ch.index,
+    log
+  };
+}
+function kids(el, name) {
+  return Array.prototype.filter.call(el.children, function(c) {
+    return c.localName === name;
+  });
+}
+function kid(el, name) {
+  return kids(el, name)[0] || null;
+}
+function text(el, name) {
+  var k = el && kid(el, name);
+  return k ? k.textContent.trim() : null;
+}
+function latFirst(crsText) {
+  return /EPSG(::|:|\/0\/)4326$/i.test(crsText) && !/CRS84/i.test(crsText);
+}
+function parseWmtsCapabilities(xml, url) {
+  var doc = typeof xml === "string" ? new DOMParser().parseFromString(xml, "application/xml") : xml;
+  var root = doc.documentElement;
+  if (!root || root.localName !== "Capabilities") throw new Error("not WMTS capabilities");
+  var contents = kid(root, "Contents");
+  if (!contents) throw new Error("WMTS capabilities without Contents");
+  var sets = {};
+  kids(contents, "TileMatrixSet").forEach(function(s) {
+    var id = text(s, "Identifier"), crsText = text(s, "SupportedCRS") || "";
+    var crs = crsCode(crsText), swap = latFirst(crsText);
+    var mpu = crs === "EPSG:4326" || /longlat/.test(crs) ? DEG_M : 1;
+    var levels2 = kids(s, "TileMatrix").map(function(m) {
+      var tl = text(m, "TopLeftCorner").split(/\s+/).map(Number);
+      if (swap) tl = [tl[1], tl[0]];
+      return {
+        id: text(m, "Identifier"),
+        cell: +text(m, "ScaleDenominator") * 28e-5 / mpu,
+        origin: tl,
+        tileWidth: +text(m, "TileWidth"),
+        tileHeight: +text(m, "TileHeight"),
+        matrixWidth: +text(m, "MatrixWidth"),
+        matrixHeight: +text(m, "MatrixHeight")
+      };
+    });
+    levels2.sort(function(a, b) {
+      return b.cell - a.cell;
+    });
+    sets[id] = { id, crs, crsText, levels: levels2 };
+  });
+  var kvp = null;
+  Array.prototype.forEach.call(root.getElementsByTagNameNS("*", "Operation"), function(op) {
+    if (op.getAttribute("name") !== "GetTile") return;
+    Array.prototype.forEach.call(op.getElementsByTagNameNS("*", "Get"), function(g) {
+      var href = g.getAttributeNS("http://www.w3.org/1999/xlink", "href") || g.getAttribute("xlink:href");
+      var enc = g.getElementsByTagNameNS("*", "Value")[0];
+      if (href && (!enc || /KVP/i.test(enc.textContent)) && !kvp) kvp = href;
+    });
+  });
+  var layers = kids(contents, "Layer").map(function(l) {
+    var wb = kid(l, "WGS84BoundingBox"), bbox = null;
+    if (wb) {
+      var lc = text(wb, "LowerCorner").split(/\s+/).map(Number);
+      var uc = text(wb, "UpperCorner").split(/\s+/).map(Number);
+      bbox = [lc[0], lc[1], uc[0], uc[1]];
+    }
+    var times = null, timeDefault = null;
+    kids(l, "Dimension").forEach(function(d) {
+      if (!/^time$/i.test(text(d, "Identifier") || "")) return;
+      timeDefault = text(d, "Default");
+      times = expandTimes(kids(d, "Value").map(function(v) {
+        return v.textContent.trim();
+      }));
+    });
+    var links = kids(l, "TileMatrixSetLink").map(function(k) {
+      var lim = {};
+      var limsEl = kid(k, "TileMatrixSetLimits");
+      if (limsEl) kids(limsEl, "TileMatrixLimits").forEach(function(m) {
+        lim[text(m, "TileMatrix")] = [
+          +text(m, "MinTileCol"),
+          +text(m, "MinTileRow"),
+          +text(m, "MaxTileCol"),
+          +text(m, "MaxTileRow")
+        ];
+      });
+      return { set: text(k, "TileMatrixSet"), limits: lim };
+    });
+    return {
+      id: text(l, "Identifier"),
+      title: text(l, "Title") || text(l, "Identifier"),
+      formats: kids(l, "Format").map(function(f) {
+        return f.textContent.trim();
+      }),
+      styles: kids(l, "Style").map(function(st) {
+        return { id: text(st, "Identifier"), isDefault: st.getAttribute("isDefault") === "true" };
+      }),
+      bbox,
+      links,
+      times,
+      timeDefault,
+      kvp,
+      templates: kids(l, "ResourceURL").filter(function(r) {
+        return (r.getAttribute("resourceType") || "tile") === "tile";
+      }).map(function(r) {
+        return { format: r.getAttribute("format"), template: absTemplate(r.getAttribute("template"), url) };
+      })
+    };
+  });
+  return { title: text(kid(root, "ServiceIdentification") || root, "Title"), layers, sets };
+}
+function absTemplate(t, base) {
+  if (/^https?:\/\//i.test(t) || !base) return t;
+  return new URL(t, base).href.replace(/%7B/gi, "{").replace(/%7D/gi, "}");
+}
+function expandTimes(vals) {
+  var out = [];
+  vals.forEach(function(v) {
+    v.split(",").forEach(function(one) {
+      var m = /^(\d{4}-\d\d-\d\d)[^/]*\/(\d{4}-\d\d-\d\d)[^/]*\/P(\d+)D$/.exec(one.trim());
+      if (!m) {
+        if (one.trim()) out.push(one.trim());
+        return;
+      }
+      var t = Date.parse(m[1] + "T00:00:00Z"), t1 = Date.parse(m[2] + "T00:00:00Z"), step = +m[3] * 864e5;
+      var n = Math.floor((t1 - t) / step);
+      if (n > 4e3) t += (n - 4e3) * step;
+      for (; t <= t1; t += step) out.push(new Date(t).toISOString().slice(0, 10));
+    });
+  });
+  return out;
+}
+function wmtsSource(caps, layerId, o) {
+  o = o || {};
+  var layer = caps.layers.filter(function(l) {
+    return l.id === layerId;
+  })[0];
+  if (!layer) throw new Error("no layer " + layerId);
+  var link = layer.links.filter(function(k) {
+    return !o.set || k.set === o.set;
+  })[0];
+  if (!link) throw new Error("layer " + layerId + " has no tile matrix set " + o.set);
+  var base = caps.sets[link.set];
+  if (!base) throw new Error("unknown tile matrix set " + link.set);
+  var tms = { id: base.id, crs: base.crs, levels: base.levels.map(function(L2) {
+    return Object.assign({}, L2, link.limits[L2.id] ? { limits: link.limits[L2.id] } : {});
+  }) };
+  var fmt = o.format || layer.templates[0] && layer.templates[0].format || layer.formats[0] || "image/png";
+  var t = layer.templates.filter(function(x) {
+    return x.format === fmt;
+  })[0] || layer.templates[0];
+  var style = o.style || (layer.styles.filter(function(s) {
+    return s.isDefault;
+  })[0] || layer.styles[0] || {}).id || "default";
+  var template;
+  if (t) template = t.template;
+  else if (layer.kvp) {
+    template = layer.kvp + (layer.kvp.indexOf("?") >= 0 ? "&" : "?") + "SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=" + encodeURIComponent(layer.id) + "&STYLE={Style}&FORMAT=" + encodeURIComponent(fmt) + "&TILEMATRIXSET={TileMatrixSet}&TILEMATRIX={TileMatrix}&TILEROW={TileRow}&TILECOL={TileCol}" + (layer.times ? "&TIME={Time}" : "");
+  } else throw new Error("layer " + layerId + " has neither a ResourceURL nor a KVP GetTile");
+  return {
+    kind: "tiles",
+    template,
+    tms,
+    style,
+    format: o.decode || "rgb",
+    time: o.time || layer.timeDefault || "",
+    label: layer.title,
+    bbox: layer.bbox
+  };
+}
+
 // lib/sources/cog.js
 var UNDATED = "undated";
 function sceneOf(info, i) {
@@ -1171,6 +1646,132 @@ function cogCatalog(opts) {
   };
 }
 
+// lib/sources/tiles.js
+function isCapabilitiesUrl(u) {
+  return !/\{(z|q|TileMatrix)\}/i.test(u || "") && /request=getcapabilities|capabilities\.xml|\.xml(\?|$)|\/wmts\/?(\?|$)/i.test(u || "");
+}
+function guessDecode(u) {
+  if (/terrarium/i.test(u)) return "terrarium";
+  if (/terrain-rgb|terrain-dem/i.test(u)) return "mapbox";
+  return "rgb";
+}
+function tileCatalog(opts) {
+  var url = String(opts.url || "").trim();
+  var wmts = isCapabilitiesUrl(url);
+  var caps = null;
+  function readCaps() {
+    if (!caps) {
+      caps = fetch(url).then(function(r) {
+        if (!r.ok) throw new Error("capabilities " + r.status + " " + url);
+        return r.text();
+      }).then(function(t) {
+        return parseWmtsCapabilities(t, url);
+      });
+      caps.catch(function() {
+        caps = null;
+      });
+    }
+    return caps;
+  }
+  async function source(time) {
+    var src;
+    if (wmts) {
+      var c = await readCaps();
+      var layer = opts.layer || c.layers[0] && c.layers[0].id;
+      src = wmtsSource(c, layer, {
+        set: opts.set,
+        style: opts.style,
+        format: opts.format,
+        decode: opts.decode,
+        time
+      });
+    } else {
+      if (!/\{z\}|\{q\}/.test(url)) throw new Error("an XYZ template needs {z}/{x}/{y} (or {q})");
+      src = {
+        kind: "tiles",
+        template: url,
+        tms: webMercatorQuad(opts.maxzoom == null || opts.maxzoom === "" ? 22 : +opts.maxzoom),
+        format: opts.decode || guessDecode(url),
+        label: url,
+        bbox: null
+      };
+    }
+    if (opts.subdomains) src.subdomains = opts.subdomains;
+    if (opts.minzoom !== void 0 && opts.minzoom !== null && opts.minzoom !== "") src.minzoom = +opts.minzoom;
+    if (opts.maxzoom !== void 0 && opts.maxzoom !== null && opts.maxzoom !== "") src.maxzoom = +opts.maxzoom;
+    return src;
+  }
+  var elev = function(src) {
+    return src.format === "terrarium" || src.format === "mapbox";
+  };
+  var cat = {
+    kind: "tiles",
+    label: wmts ? "WMTS " + url.split("?")[0] : url,
+    capabilities: { cloud: false, time: wmts },
+    maxScenes: 1,
+    presets: [],
+    // WMTS: the parsed capabilities, for the layer / set / time pickers
+    info: async function() {
+      return wmts ? readCaps() : null;
+    },
+    source,
+    search: async function(q) {
+      var base = await source(null);
+      var key = elev(base) ? "elevation" : "visual";
+      cat.presets = elev(base) ? [{
+        keys: [key],
+        mode: "single",
+        label: "elevation (decoded " + base.format + ")",
+        ramp: "terrain",
+        hillshade: 0.6
+      }] : [{ keys: [key], mode: "rgb", label: "tiles as served" }];
+      var times = [null];
+      if (wmts) {
+        var c = await readCaps();
+        var layer = c.layers.filter(function(l) {
+          return l.id === (opts.layer || c.layers[0].id);
+        })[0];
+        if (layer && layer.times && layer.times.length) {
+          var range = (q.datetime || "../..").split("/");
+          var lo = range[0] && range[0] !== ".." ? range[0] : "0000", hi = range[1] && range[1] !== ".." ? range[1] : "9999";
+          times = layer.times.filter(function(t) {
+            return t.slice(0, 10) >= lo && t.slice(0, 10) <= hi;
+          });
+          if (!times.length) return [];
+          times = times.slice(-(q.maxItems || 300));
+        }
+      }
+      if (base.bbox && q.bbox && !bboxIntersects(base.bbox, q.bbox)) return [];
+      return times.map(function(t) {
+        var src = Object.assign({}, base, { time: t || base.time });
+        var assets = {}, meta = {};
+        assets[key] = src;
+        meta[key] = elev(base) ? { elevation: true } : { rgb: true };
+        var b = base.bbox || [-180, -85.06, 180, 85.06];
+        return {
+          id: (base.label || "tiles") + (t ? " " + t : ""),
+          day: t ? t.slice(0, 10) : UNDATED,
+          datetime: t,
+          bbox: base.bbox,
+          cloud: null,
+          crs: base.tms.crs,
+          geometry: base.bbox ? { type: "Polygon", coordinates: [[
+            [b[0], b[1]],
+            [b[2], b[1]],
+            [b[2], b[3]],
+            [b[0], b[3]],
+            [b[0], b[1]]
+          ]] } : null,
+          assets,
+          assetMeta: meta,
+          meta: {}
+        };
+      });
+    }
+  };
+  return cat;
+}
+
 // lib/sources/vrt.js
 function vsiToHttps(name, vrtUrl, relative) {
   var n = String(name).trim();
@@ -1193,8 +1794,8 @@ function num(el, name, dflt) {
   var v = el && el.getAttribute(name);
   return v === null || v === void 0 || v === "" ? dflt : +v;
 }
-function parseVrt(text, vrtUrl) {
-  var doc = new DOMParser().parseFromString(text, "application/xml");
+function parseVrt(text2, vrtUrl) {
+  var doc = new DOMParser().parseFromString(text2, "application/xml");
   var root = doc.documentElement;
   if (!root || root.nodeName !== "VRTDataset") throw new Error("not a GDAL VRT (no VRTDataset)");
   var srs = root.getElementsByTagName("SRS")[0];
@@ -1611,7 +2212,7 @@ function cached(cache, key, make) {
   }
   return cache.get(key);
 }
-async function pool(items, n, fn) {
+async function pool2(items, n, fn) {
   var out = new Array(items.length), next = 0;
   async function worker() {
     while (next < items.length) {
@@ -1736,14 +2337,14 @@ function readFile(f, want) {
       return have.indexOf(c) >= 0;
     });
     var rows = await hp.parquetReadObjects({ file, metadata: md, columns: cols, utf8: false });
-    var text = cols.filter(function(c) {
+    var text2 = cols.filter(function(c) {
       return c !== "footprint_wkb";
     });
     var dec = new TextDecoder();
     rows.forEach(function(r) {
-      for (var i = 0; i < text.length; i++) {
-        var v = r[text[i]];
-        if (v instanceof Uint8Array) r[text[i]] = dec.decode(v);
+      for (var i = 0; i < text2.length; i++) {
+        var v = r[text2[i]];
+        if (v instanceof Uint8Array) r[text2[i]] = dec.decode(v);
       }
     });
     Object.keys(f.part).forEach(function(k) {
@@ -1756,7 +2357,7 @@ function readFile(f, want) {
 }
 async function readAll(files, want, onFile) {
   var done = 0;
-  var parts = await pool(files, 6, async function(f) {
+  var parts = await pool2(files, 6, async function(f) {
     var rows = await readFile(f, want);
     done++;
     if (onFile) onFile(done, files.length);
@@ -2088,13 +2689,13 @@ function makeTileId(t) {
   };
   return String(t.zone).padStart(2, "0") + "S_R" + p(t.res) + "_" + p(t.col) + "_" + p(t.row);
 }
-function tileExtent(t) {
+function tileExtent2(t) {
   var ts = NPIX * t.res;
   return [OX + t.col * ts, OY + t.row * ts, OX + (t.col + 1) * ts, OY + (t.row + 1) * ts];
 }
 function tileLonLatBbox(t, pad) {
   pad = pad || 0;
-  var e = tileExtent(t), ts = NPIX * t.res;
+  var e = tileExtent2(t), ts = NPIX * t.res;
   return transformBbox(
     [e[0] - pad * ts, e[1] - pad * ts, e[2] + pad * ts, e[3] + pad * ts],
     utmCode(t.zone, true),
@@ -2175,7 +2776,7 @@ function wildtilesCatalog(opts) {
         t = null;
       }
       var ext = [r.xmin, r.ymin, r.xmax, r.ymax].map(Number);
-      if (!ext.every(isFinite) && t) ext = tileExtent(t);
+      if (!ext.every(isFinite) && t) ext = tileExtent2(t);
       var crs = epsg ? "EPSG:" + epsg : t ? utmCode(t.zone, true) : null;
       if (!crs || !ext.every(isFinite)) return;
       m.set(r.tile_id, {
@@ -2276,7 +2877,7 @@ function wildtilesCatalog(opts) {
             region: null,
             crs: utmCode(t.zone, true),
             res,
-            extent: tileExtent(t),
+            extent: tileExtent2(t),
             bbox: null
           };
         });
@@ -2343,7 +2944,7 @@ function groupByDay(scenes) {
     };
   });
 }
-async function pool2(tasks, n) {
+async function pool3(tasks, n) {
   var out = new Array(tasks.length), next = 0;
   async function worker() {
     while (next < tasks.length) {
@@ -2367,6 +2968,7 @@ function assetMeta(scene, key) {
   return scene.assetMeta && scene.assetMeta[key] || {};
 }
 function readAsset(a, grid, opts) {
+  if (a && typeof a === "object" && a.kind === "tiles") return readTilesWarped(a, grid, opts);
   return readWarped(assetHref(a), grid, opts);
 }
 async function loadComposite(o) {
@@ -2420,7 +3022,7 @@ async function loadComposite(o) {
       };
     };
   });
-  var results = await pool2(tasks, o.concurrency || 4);
+  var results = await pool3(tasks, o.concurrency || 4);
   var layers = [], errors = [], levels2 = [];
   results.forEach(function(r, i) {
     if (!r.ok) {
@@ -2638,7 +3240,21 @@ $("wtBucket").value = WILDTILES_BUCKET;
 var today = /* @__PURE__ */ new Date();
 $("to").value = isoDay(today);
 $("from").value = isoDay(new Date(today.getTime() - 60 * 864e5));
+function tileOpts() {
+  return {
+    url: $("tileUrl").value.trim(),
+    layer: $("tileLayer").value || null,
+    set: $("tileSet").value || null,
+    format: $("tileFmt").value || null,
+    decode: $("tileDecode").value || guessDecode($("tileUrl").value),
+    maxzoom: $("tileMax").value === "" ? null : +$("tileMax").value
+  };
+}
 function makeCatalog() {
+  if ($("src").value === "tiles") {
+    if (!$("tileUrl").value.trim()) throw new Error("enter a tile URL template or WMTS capabilities URL");
+    return tileCatalog(tileOpts());
+  }
   if ($("src").value === "vrt") {
     if (!$("vrtUrl").value.trim()) throw new Error("enter the VRT URL");
     return vrtCatalog({ url: $("vrtUrl").value.trim() });
@@ -2663,6 +3279,7 @@ function sourceChanged() {
   $("wtbox").classList.toggle("hide", src !== "wildtiles");
   $("vrtbox").classList.toggle("hide", src !== "vrt");
   $("cogbox").classList.toggle("hide", src !== "cog");
+  $("tilebox").classList.toggle("hide", src !== "tiles");
   coverLayer.clearLayers();
   state.catalog = null;
   capabilitiesChanged(null);
@@ -2670,7 +3287,10 @@ function sourceChanged() {
 }
 function capabilitiesChanged(cat) {
   var src = $("src").value;
-  var caps = cat && cat.capabilities || { cloud: src === "stac" || src === "starc", time: src !== "vrt" && src !== "cog" };
+  var caps = cat && cat.capabilities || {
+    cloud: src === "stac" || src === "starc",
+    time: src !== "vrt" && src !== "cog" && !(src === "tiles" && !isCapabilitiesUrl($("tileUrl").value))
+  };
   $("cloudBox").classList.toggle("hide", !caps.cloud);
   $("from").parentNode.parentNode.classList.toggle("hide", !caps.time);
   $("dateNote").classList.toggle("hide", !caps.time);
@@ -2678,8 +3298,23 @@ function capabilitiesChanged(cat) {
 $("src").addEventListener("change", function() {
   sourceChanged();
   if ($("src").value === "wildtiles") readCube(false).catch(fail);
+  if ($("src").value === "tiles") readTiles().catch(fail);
 });
-["stacUrl", "coll", "wtBucket", "wtRes", "starcColl", "vrtUrl", "cogUrls"].forEach(function(id) {
+[
+  "stacUrl",
+  "coll",
+  "wtBucket",
+  "wtRes",
+  "starcColl",
+  "vrtUrl",
+  "cogUrls",
+  "tileUrl",
+  "tileLayer",
+  "tileSet",
+  "tileFmt",
+  "tileDecode",
+  "tileMax"
+].forEach(function(id) {
   $(id).addEventListener("change", clearScenes);
 });
 $("starcUrl").addEventListener("change", function() {
@@ -2822,6 +3457,71 @@ async function readCogs(fit) {
 }
 $("readCogs").addEventListener("click", function() {
   readCogs(true).catch(fail);
+});
+var tileCaps = null;
+function fillSelect(sel, items, want) {
+  sel.innerHTML = "";
+  items.forEach(function(it) {
+    var o = document.createElement("option");
+    o.value = it[0];
+    o.textContent = it[1];
+    sel.appendChild(o);
+  });
+  if (want && items.some(function(it) {
+    return it[0] === want;
+  })) sel.value = want;
+}
+function tileLayerChanged(wantSet, wantFmt) {
+  var l = tileCaps && tileCaps.layers.filter(function(x) {
+    return x.id === $("tileLayer").value;
+  })[0];
+  if (!l) return;
+  fillSelect($("tileSet"), l.links.map(function(k) {
+    var ts = tileCaps.sets[k.set];
+    return [k.set, k.set + (ts ? " (" + ts.crs + ", " + ts.levels.length + " levels)" : "")];
+  }), wantSet);
+  fillSelect($("tileFmt"), (l.templates.length ? l.templates.map(function(t) {
+    return t.format;
+  }) : l.formats).map(function(f) {
+    return [f, f];
+  }), wantFmt);
+  $("tileInfo").textContent = l.title + ": " + (l.times ? l.times.length + " times, " + l.times[0] + " to " + l.times[l.times.length - 1] + "; " : "") + "bbox " + (l.bbox ? l.bbox.map(function(v) {
+    return v.toFixed(1);
+  }).join(", ") : "not given");
+  if (l.times && l.times.length) {
+    var last = l.times[l.times.length - 1].slice(0, 10);
+    $("to").value = last;
+    $("from").value = isoDay(new Date(Date.parse(last) - 60 * 864e5));
+  }
+}
+async function readTiles(want) {
+  want = want || {};
+  var url = $("tileUrl").value.trim();
+  $("wmtsBox").classList.toggle("hide", !isCapabilitiesUrl(url));
+  capabilitiesChanged(null);
+  if (!isCapabilitiesUrl(url)) {
+    tileCaps = null;
+    var dec = $("tileDecode").value || guessDecode(url);
+    $("tileInfo").textContent = "XYZ, Web Mercator, 256 px tiles; pixels read as " + (dec === "rgb" ? "an image" : dec + " elevation") + ". Draw a region and search.";
+    return null;
+  }
+  setStatus("reading WMTS capabilities ...");
+  tileCaps = await makeCatalog().info();
+  fillSelect($("tileLayer"), tileCaps.layers.map(function(l) {
+    return [l.id, l.title];
+  }), want.layer);
+  tileLayerChanged(want.set, want.format);
+  setStatus(tileCaps.layers.length + " layers in " + (tileCaps.title || "the capabilities") + ": pick one, draw a region and search");
+  return tileCaps;
+}
+$("readTiles").addEventListener("click", function() {
+  readTiles().catch(fail);
+});
+$("tileLayer").addEventListener("change", function() {
+  tileLayerChanged();
+});
+$("tileUrl").addEventListener("change", function() {
+  readTiles().catch(fail);
 });
 $("readStore").addEventListener("click", function() {
   readStore(true).then(function(info) {
@@ -3074,7 +3774,7 @@ function drawTimeline() {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
   var css = getComputedStyle(document.documentElement);
-  var muted = css.getPropertyValue("--muted").trim(), text = css.getPropertyValue("--text").trim();
+  var muted = css.getPropertyValue("--muted").trim(), text2 = css.getPropertyValue("--text").trim();
   var accent = css.getPropertyValue("--accent").trim(), edge = css.getPropertyValue("--edge").trim();
   var r = tlRange(), base = h - TL.axis, top = 3;
   g.strokeStyle = edge;
@@ -3100,7 +3800,7 @@ function drawTimeline() {
     var x2 = tlX(dayTime(d.day), w, r);
     var clear = d.cloudMin === null ? 0.6 : 1 - Math.min(100, d.cloudMin) / 100;
     var bh = 4 + clear * (base - top - 4);
-    g.fillStyle = cachedDay(i) ? text : muted;
+    g.fillStyle = cachedDay(i) ? text2 : muted;
     g.globalAlpha = i === state.dayIndex ? 1 : 0.75;
     g.fillRect(x2 - bw / 2, base - bh, bw, bh);
   });
@@ -3543,9 +4243,17 @@ async function loadImagery() {
       return;
     }
     state.comp = r.composite;
+    state.lastLog = s.log;
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + s.files + " files, " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m, overview " + lv + ", " + s.ms + " ms" + (cached2 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    var what = s.files + " files";
+    if (s.log.length) {
+      var got = s.log.filter(function(t) {
+        return t.ok;
+      }).length;
+      what = s.log.length + " tiles at level " + s.log[0].z + " (" + got + " with data, " + (s.log.length - got) + " missing or failed)";
+    }
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (s.log.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached2 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) {
@@ -3645,7 +4353,14 @@ function writeHash() {
     if ($("starcColl").value.trim()) h.set("scoll", $("starcColl").value.trim());
   } else if ($("src").value === "vrt") h.set("vrt", $("vrtUrl").value.trim());
   else if ($("src").value === "cog") h.set("cogs", $("cogUrls").value.trim().split(/\s+/).join(" "));
-  else {
+  else if ($("src").value === "tiles") {
+    h.set("tiles", $("tileUrl").value.trim());
+    if ($("tileLayer").value) h.set("tlayer", $("tileLayer").value);
+    if ($("tileSet").value) h.set("tset", $("tileSet").value);
+    if ($("tileFmt").value) h.set("tfmt", $("tileFmt").value);
+    if ($("tileDecode").value) h.set("tdec", $("tileDecode").value);
+    if ($("tileMax").value !== "") h.set("tmax", $("tileMax").value);
+  } else {
     h.set("bucket", $("wtBucket").value.trim());
     h.set("res", $("wtRes").value);
   }
@@ -3686,6 +4401,12 @@ async function readHash() {
   if (h.get("res")) $("wtRes").value = h.get("res");
   if (h.get("vrt")) $("vrtUrl").value = h.get("vrt");
   if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
+  if (h.get("tiles")) {
+    $("tileUrl").value = h.get("tiles");
+    if (h.get("tdec")) $("tileDecode").value = h.get("tdec");
+    if (h.get("tmax")) $("tileMax").value = h.get("tmax");
+    await readTiles({ layer: h.get("tlayer"), set: h.get("tset"), format: h.get("tfmt") });
+  }
   if (!h.has("roi")) {
     if (h.get("src") === "vrt" && h.get("vrt")) await readVrt(true);
     if (h.get("src") === "cog" && h.get("cogs")) await readCogs(true);
