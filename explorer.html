@@ -337,7 +337,7 @@
         <select id="maxpx"><option>1024</option><option selected>1536</option>
           <option>2048</option><option>3072</option></select></div>
       <div><label for="maxScenes">max scenes</label>
-        <input id="maxScenes" type="number" value="6" min="1" max="40"></div>
+        <input id="maxScenes" type="number" value="6" min="1" max="100"></div>
     </div>
     <button id="load">Load imagery</button>
 
@@ -2804,7 +2804,7 @@ function vrtCatalog(opts) {
     label: url.split("/").pop(),
     capabilities: { cloud: false, time: false },
     // most mosaics need more files than a satellite day has scenes
-    maxScenes: 24,
+    maxScenes: 64,
     // { crs, files, bands, dataType, res, bbox, footprints: [GeoJSON] }
     info: async function() {
       var v = await read();
