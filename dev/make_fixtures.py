@@ -3,7 +3,8 @@
 items.json: real Earth Search v1 items (stored next to each scene) for a few
 MGRS squares in Tasmania (Jan 2025) and across the UTM 54/55 seam in
 Victoria (Feb 2025). wt/: a 2x2 block of wildtiles-format tiles cut from two
-55GEN scenes plus index/inventory.parquet, registry/tiles.parquet and
+55GEN scenes, one 60 m tile over the same place (two resolutions in one
+region, like the Heard pilot), plus index/inventory.parquet, registry/tiles.parquet and
 registry/BANDS.txt (the bucket's three well-known keys), to exercise the
 wildtiles binding. The registry also lists a 1x2 block in zone 54 with no
 inventory rows, standing in for a second region.
@@ -17,6 +18,7 @@ import pyarrow as pa, pyarrow.parquet as pq
 import rasterio
 from rasterio.transform import from_origin
 from rasterio.warp import transform
+from rasterio.enums import Resampling
 from rasterio.windows import from_bounds
 
 B = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/"
@@ -39,6 +41,9 @@ def wildtiles():
     OX, OY, TS = 140000, 20000, 7200
     xs, ys = transform("EPSG:4326", "EPSG:32755", [147.45], [-42.9])
     c0, r0 = int((xs[0] - OX) // TS), int((ys[0] - OY) // TS)
+    T60 = 720 * 60
+    c6, r6 = int((xs[0] - OX) // T60), int((ys[0] - OY) // T60)
+    t60 = "55S_R0060_%04d_%04d" % (c6, r6)
     src_dir = "/vsicurl/" + B + "sentinel-s2-l2a-cogs/55/G/EN/2025/1/"
     scenes = {"2025-01-03": "S2A_55GEN_20250103_0_L2A", "2025-01-08": "S2B_55GEN_20250108_0_L2A"}
     bands = {"visual": "TCI", "red": "B04", "green": "B03", "blue": "B02"}
@@ -62,6 +67,19 @@ def wildtiles():
                         with rasterio.open(os.path.join(d, day + ".tif"), "w", **prof) as dst:
                             dst.write(a)
                         rows.append((tid, key, day))
+                xmin, ymin = OX + c6 * T60, OY + r6 * T60
+                a = src.read(window=from_bounds(xmin, ymin, xmin + T60, ymin + T60, src.transform),
+                             out_shape=(src.count, 720, 720), resampling=Resampling.average,
+                             boundless=True, fill_value=0)
+                d = os.path.join(HERE, "wt/cube", t60, key)
+                os.makedirs(d, exist_ok=True)
+                prof = dict(driver="GTiff", width=720, height=720, count=a.shape[0],
+                            dtype=a.dtype, crs="EPSG:32755", nodata=0,
+                            transform=from_origin(xmin, ymin + T60, 60, 60),
+                            compress="deflate", tiled=True, blockxsize=256, blockysize=256)
+                with rasterio.open(os.path.join(d, day + ".tif"), "w", **prof) as dst:
+                    dst.write(a)
+                rows.append((t60, key, day))
     os.makedirs(os.path.join(HERE, "wt/index"), exist_ok=True)
     pq.write_table(pa.table({
         "tile_id": [r[0] for r in rows], "band": [r[1] for r in rows],
@@ -70,18 +88,19 @@ def wildtiles():
     reg = []
     for c in (c0, c0 + 1):
         for r in (r0, r0 + 1):
-            reg.append(("55S_R0010_%04d_%04d" % (c, r), "hobart", 32755, OX + c * TS, OY + r * TS))
+            reg.append(("55S_R0010_%04d_%04d" % (c, r), "hobart", 32755, OX + c * TS, OY + r * TS, 10))
+    reg.append((t60, "hobart", 32755, OX + c6 * T60, OY + r6 * T60, 60))
     xs, ys = transform("EPSG:4326", "EPSG:32754", [143.9], [-36.5])
     c1, r1 = int((xs[0] - OX) // TS), int((ys[0] - OY) // TS)
     for c in (c1, c1 + 1):
-        reg.append(("54S_R0010_%04d_%04d" % (c, r1), "vic_seam", 32754, OX + c * TS, OY + r1 * TS))
+        reg.append(("54S_R0010_%04d_%04d" % (c, r1), "vic_seam", 32754, OX + c * TS, OY + r1 * TS, 10))
     os.makedirs(os.path.join(HERE, "wt/registry"), exist_ok=True)
     pq.write_table(pa.table({
         "tile_id": [t[0] for t in reg], "region_id": [t[1] for t in reg],
         "zone_epsg": pa.array([t[2] for t in reg], type=pa.int32()),
-        "res": pa.array([10] * len(reg), type=pa.int32()),
-        "xmin": [float(t[3]) for t in reg], "xmax": [float(t[3] + TS) for t in reg],
-        "ymin": [float(t[4]) for t in reg], "ymax": [float(t[4] + TS) for t in reg]}),
+        "res": pa.array([t[5] for t in reg], type=pa.int32()),
+        "xmin": [float(t[3]) for t in reg], "xmax": [float(t[3] + 720 * t[5]) for t in reg],
+        "ymin": [float(t[4]) for t in reg], "ymax": [float(t[4] + 720 * t[5]) for t in reg]}),
         os.path.join(HERE, "wt/registry/tiles.parquet"))
     open(os.path.join(HERE, "wt/registry/BANDS.txt"), "w").write(
         "\n".join(["visual", "red", "green", "blue", "nir", "swir16", "scl", "cloud", "snow"]) + "\n")

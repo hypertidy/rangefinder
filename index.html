@@ -146,15 +146,11 @@
       <input id="wtBucket" spellcheck="false">
       <div class="row">
         <div><label for="wtRes">resolution (m)</label>
-          <select id="wtRes"><option>10</option><option>60</option></select></div>
+          <select id="wtRes"><option>10</option></select></div>
         <div><label for="wtTile">jump to tile</label>
           <input id="wtTile" placeholder="41S_R0010_0055_0347" list="tiles" spellcheck="false"></div>
       </div>
-      <datalist id="tiles">
-        <option value="41S_R0010_0055_0347">auster center</option>
-        <option value="43S_R0060_0005_0094">heard (60m)</option>
-        <option value="57S_R0010_0049_0547">macquarie station</option>
-      </datalist>
+      <datalist id="tiles"></datalist>
       <label for="wtRegion">region</label>
       <div class="row">
         <select id="wtRegion"><option value="">(read the index first)</option></select>
@@ -479,6 +475,18 @@ function isoDay(d) { return d.toISOString().slice(0, 10); }
   sel.value = ["red", "green", "blue"][i];
 });
 
+// the wildtiles resolution picker is filled from the bucket (readCube); a
+// permalink or a typed tile id can name one before that has happened
+function setRes(r) {
+  var rs = $("wtRes"), v = String(+r);
+  if (!Array.prototype.some.call(rs.options, function (o) { return o.value === v; })) {
+    var op = document.createElement("option");
+    op.value = v; op.textContent = v;
+    rs.appendChild(op);
+  }
+  rs.value = v;
+}
+
 // bands a source lists beyond the usual names (wildtiles BANDS.txt: cloud, snow ...)
 function addBands(list) {
   ["bR", "bG", "bB"].forEach(function (id) {
@@ -615,25 +623,42 @@ async function readCube(quiet) {
   var info = await cat.info();
   addBands(info.bands);
   cubeRegions = info.regions;
+  // resolutions come from the bucket, not a fixed list
+  var rs = $("wtRes"), keep = rs.value;
+  rs.innerHTML = "";
+  (info.resolutions.length ? info.resolutions : [10]).forEach(function (r) {
+    var op = document.createElement("option");
+    op.value = String(r); op.textContent = String(r);
+    rs.appendChild(op);
+  });
+  if (info.resolutions.indexOf(+keep) >= 0) rs.value = keep;
   var sel = $("wtRegion");
   sel.innerHTML = "";
   var o = document.createElement("option");
   o.value = ""; o.textContent = info.regions.length ? "pick a region (" + info.regions.length + ")"
                                                     : "(no registry: draw a region)";
   sel.appendChild(o);
+  var dl = $("tiles");
+  dl.innerHTML = "";
   info.regions.forEach(function (r, i) {
     var op = document.createElement("option");
-    op.value = String(i); op.textContent = r.id + " (" + r.n + " tiles)";
+    op.value = String(i);
+    op.textContent = r.id + " (" + Object.keys(r.res).map(function (k) {
+      return k + " m: " + r.res[k];
+    }).join(", ") + ")";
     sel.appendChild(op);
+    var ex = document.createElement("option");   // one example tile per region
+    ex.value = r.example; ex.textContent = r.id;
+    dl.appendChild(ex);
   });
   coverLayer.clearLayers();
   info.regions.forEach(function (r) {
     L.rectangle(roiLatLngBounds(r.bbox), { color: "#b39ddb", weight: 1, fill: false, opacity: 0.7,
       interactive: false }).addTo(coverLayer);
   });
-  $("wtInfo").textContent = info.tiles + " tiles with data at " + $("wtRes").value + " m in " +
-    info.regions.length + " regions, " + info.days + " days from " + (info.dayMin || "?") +
-    " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") +
+  $("wtInfo").textContent = info.tiles + " tiles with data at " + info.resolutions.join(" and ") +
+    " m in " + info.regions.length + " regions, " + info.days + " days from " +
+    (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") +
     (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic");
   if (!quiet) setStatus("index read: pick a region or draw one, then search");
   return info;
@@ -646,11 +671,11 @@ $("readCube").addEventListener("click", function () {
 $("wtRegion").addEventListener("change", function () {
   var r = cubeRegions[+this.value];
   if (!r || this.value === "") return;
+  // keep the current resolution if the region has it, else its finest
+  var have = Object.keys(r.res).map(Number).sort(function (a, b) { return a - b; });
+  if (have.length && have.indexOf(+$("wtRes").value) < 0) $("wtRes").value = String(have[0]);
   setRoi(r.bbox);
   fitLonLat(r.bbox, 0.1);
-});
-$("wtRes").addEventListener("change", function () {
-  if (cubeRegions.length) readCube(true).catch(fail);
 });
 
 // Where a source's CRS came from. "[assumed]" marks a CRS nothing in the
@@ -913,7 +938,7 @@ $("listColl").addEventListener("click", function () {
 $("wtTile").addEventListener("change", function () {
   try {
     var t = X.parseTileId(this.value);
-    $("wtRes").value = String(t.res);
+    setRes(t.res);
     setRoi(X.tileLonLatBbox(t, 1));
     fitLonLat(state.roi, 0.1);
   } catch (e) { fail(e); }
@@ -1987,7 +2012,7 @@ async function readHash() {
   if (h.get("store")) $("starcUrl").value = h.get("store");
   if (h.get("scoll")) $("starcColl").value = h.get("scoll");
   if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
-  if (h.get("res")) $("wtRes").value = h.get("res");
+  if (h.get("res")) setRes(h.get("res"));
   if (h.get("vrt")) $("vrtUrl").value = h.get("vrt");
   if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
   if (h.get("src") === "zarr") {

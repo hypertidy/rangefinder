@@ -316,8 +316,11 @@ yet), and STAC search responses are not cached.
 - A starc store without `footprint_wkb` matches scenes by their full MGRS
   tile, so a partial-swath scene can be listed for a region its data does
   not reach (that day then loads as "no pixels in the region").
-- The wildtiles region picker lists regions with data at the chosen
-  resolution; without `registry/tiles.parquet` the binding falls back to
+- Nothing about the wildtiles cube is baked in: regions, resolutions,
+  bands and days all come from the bucket's index and registry when the
+  source is chosen. A region with several resolutions (Heard: the 60 m
+  pilot and 10 m) lists them all; picking it keeps the current resolution
+  if the region has it, else its finest. Without `registry/tiles.parquet` the binding falls back to
   computing tiles from the aatgrid id (UTM south, one zone per region).
 - Zarr chunk shapes vary a lot (checked 2026-10):
   - MUR SST (`mur-sst/zarr-v1`, CORS open) is chunked 5 days x 1799 x 3600
