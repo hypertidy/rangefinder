@@ -151,3 +151,7 @@ Example permalink against the mock server:
 ```
 http://localhost:8765/#src=stac&url=http%3A%2F%2Flocalhost%3A8765%2Fstac&coll=sentinel-2-l2a&roi=146.6,-42.8,147.4,-42.2&from=2025-01-01&to=2025-01-31&cloud=40&preset=red%2Cgreen%2Cblue&day=2025-01-03
 ```
+
+## Licence
+
+MIT, see `LICENSE`.
