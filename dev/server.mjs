@@ -53,7 +53,9 @@ function tileFor(setId, z, x, y, time) {
     if (X < c[0] || X > c[2] || Y < c[1] || Y > c[3]) continue;
     // the value depends only on the native cell, so deeper levels are exact upsamples
     const i = Math.floor((X - S.origin[0]) / nCell), j = Math.floor((S.origin[1] - Y) / nCell);
-    buf[o] = 128 + 100 * Math.sin(i / 40); buf[o + 1] = 128 + 100 * Math.cos(j / 55);
+    // plus per-cell noise, so each native cell differs from its neighbours
+    const nz = (((i * 73856093) ^ (j * 19349663)) >>> 0) % 48 - 24;
+    buf[o] = 128 + 90 * Math.sin(i / 40) + nz; buf[o + 1] = 128 + 90 * Math.cos(j / 55) - nz;
     buf[o + 2] = (((i + shift) >> 6) ^ (j >> 6)) & 1 ? 210 : 50; buf[o + 3] = 255;
   }
   return { status: 200, body: png(256, 256, buf) };

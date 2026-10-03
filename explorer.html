@@ -84,6 +84,10 @@
   table.lims th.cR { color: #ff8a80; }
   table.lims th.cG { color: #b9f6ca; }
   table.lims th.cB { color: #82b1ff; }
+  .tlabel { background: rgba(16,20,26,0.75); color: var(--text); border: none; box-shadow: none;
+            font: 10px ui-monospace, monospace; padding: 0 3px; }
+  .tlabel::before { display: none; }
+  .ikey { display: inline-block; width: 9px; height: 9px; margin: 0 3px 0 8px; border-radius: 2px; }
   .foot { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--edge);
           font-size: 11px; color: var(--muted); }
   .foot code { color: var(--text); }
@@ -98,7 +102,7 @@
 <div id="app">
   <div id="panel">
     <h1>rangefinder</h1>
-    <div class="sub">search a catalogue, draw a region, compose from the raw COGs</div>
+    <div class="sub">search a catalogue or a tile server, draw a region, compose from the raw pixels</div>
 
     <h2>source</h2>
     <select id="src">
@@ -319,15 +323,43 @@
 
     <div id="status">ready</div>
 
+    <h2>inspect tiles</h2>
+    <div id="inspTiles" class="hide">
+      <div class="row">
+        <div><label for="inspLevel">level</label><select id="inspLevel"></select></div>
+        <div><label for="inspBudget">max requests</label>
+          <input id="inspBudget" type="number" value="200" min="10" max="3000"></div>
+      </div>
+      <div class="row">
+        <button id="inspGrid" class="minor" title="draw the tile grid of this level over the map view, no requests">grid</button>
+        <button id="inspProbe" class="minor" title="request every tile of this level in the map view and colour each by what came back">probe</button>
+        <button id="inspWalk" class="minor" title="from this level down, request only the children of tiles that have data">walk</button>
+      </div>
+    </div>
+    <div class="row">
+      <button id="inspLast" class="minor" title="the tiles (or COG internal tiles) the last load read">last read</button>
+      <button id="inspClear" class="minor">clear</button>
+    </div>
+    <label class="row" style="margin-top:8px">
+      <input type="checkbox" id="inspLabels"> <span>label tiles (z/x/y)</span>
+    </label>
+    <div id="inspInfo" class="note">tile sources: grid, probe and walk work on the current map
+      view; any source: "last read" shows what a load fetched</div>
+    <div id="peek" class="hide">
+      <img id="peekImg" alt="" style="display:block;margin-top:8px;max-width:100%;image-rendering:pixelated;background:repeating-conic-gradient(#333 0 25%,#222 0 50%) 0 0/16px 16px">
+      <div id="peekText" class="note" style="word-break:break-all"></div>
+    </div>
+
     <div class="foot">
-      Scenes come from a STAC <code>/search</code> (default Earth Search,
-      Sentinel-2 L2A on AWS Open Data), a published starc store or the
-      wildtiles inventory. The timeline under the map scrubs the days
-      (drag it, or the arrow keys); days already read come back instantly. Pixels
-      are read straight from the COGs by HTTP range request at the overview
-      level that suits the region, warped onto one Web Mercator grid and
-      mosaicked least-cloudy-first. Stretch and composition happen here on
-      the raw numbers. The URL hash is a permalink.
+      Sources: a STAC <code>/search</code> (default Earth Search, Sentinel-2
+      L2A on AWS Open Data), a published starc store, the wildtiles inventory,
+      a GDAL VRT mosaic, pasted COG URLs, or an XYZ / WMTS tile server. The
+      timeline under the map scrubs the days (drag it, or the arrow keys);
+      days already read come back instantly. Pixels are read straight from
+      the COGs (or tiles) by HTTP range request at the overview level that
+      suits the region, warped onto one Web Mercator grid and mosaicked
+      least-cloudy-first. Stretch, ramps, hillshade and composition happen
+      here on the raw numbers. The URL hash is a permalink.
     </div>
   </div>
   <div id="mapwrap">
@@ -359,6 +391,7 @@ __export(explorer_exports, {
   BAND_ALIASES: () => BAND_ALIASES,
   DECODERS: () => DECODERS,
   HARMONISED_ARCHIVES: () => HARMONISED_ARCHIVES,
+  KIND_COLORS: () => KIND_COLORS,
   KNOWN_CLASSES: () => KNOWN_CLASSES,
   KNOWN_CRS: () => KNOWN_CRS,
   L2A_OFFSET: () => L2A_OFFSET,
@@ -374,6 +407,8 @@ __export(explorer_exports, {
   classPalette: () => classPalette,
   cogCatalog: () => cogCatalog,
   cogInfo: () => cogInfo,
+  cogReadTiles: () => cogReadTiles,
+  coverageWalk: () => coverageWalk,
   crsCode: () => crsCode,
   crsFromWkt: () => crsFromWkt,
   ensureCrs: () => ensureCrs,
@@ -391,9 +426,11 @@ __export(explorer_exports, {
   loadComposite: () => loadComposite,
   makeGrid: () => makeGrid,
   makeTileId: () => makeTileId,
+  markRepeats: () => markRepeats,
   mgrsExtent: () => mgrsExtent,
   mosaic: () => mosaic,
   openCog: () => openCog,
+  parentDiff: () => parentDiff,
   parsePresetId: () => parsePresetId,
   parseTileId: () => parseTileId,
   parseVrt: () => parseVrt,
@@ -401,6 +438,7 @@ __export(explorer_exports, {
   percentiles: () => percentiles,
   presetId: () => presetId,
   presetsFor: () => presetsFor,
+  probeTiles: () => probeTiles,
   rampTable: () => rampTable,
   readAsset: () => readAsset,
   readTilesWarped: () => readTilesWarped,
@@ -418,6 +456,7 @@ __export(explorer_exports, {
   tileLonLatBbox: () => tileLonLatBbox,
   tileUrl: () => tileUrl,
   tilesForBbox: () => tilesForBbox,
+  tilesInBox: () => tilesInBox,
   transform: () => transform,
   transformBbox: () => transformBbox,
   utmCode: () => utmCode,
@@ -1100,7 +1139,18 @@ async function readWarped(href, grid, opts) {
     valid: r.valid,
     nodata: nd,
     level: lv.indexOf(im),
-    window: [wx0, wy0, wx1, wy1]
+    window: [wx0, wy0, wx1, wy1],
+    // what was read, for the inspector's "last read" view
+    log: [{
+      kind: "cog",
+      href,
+      level: lv.indexOf(im),
+      window: [wx0, wy0, wx1, wy1],
+      tileSize: im.getTileWidth ? [im.getTileWidth(), im.getTileHeight()] : null,
+      origin,
+      res: [res[0] * fx, res[1] * fy],
+      crs
+    }]
   };
 }
 async function cogInfo(href) {
@@ -1328,6 +1378,7 @@ async function readTilesWarped(src, grid, opts) {
     var url = tileUrl(src, L2, j[0], j[1]);
     var t = await fetchTile(url, opts.signal);
     log.push({
+      kind: "tile",
       z: L2.id,
       x: j[0],
       y: j[1],
@@ -1337,7 +1388,9 @@ async function readTilesWarped(src, grid, opts) {
       ms: t.ms,
       hash: t.hash,
       ok: t.ok,
-      error: t.error
+      error: t.error,
+      extent: tileExtent(L2, j[0], j[1]),
+      crs: src.tms.crs
     });
     if (!t.ok) return;
     var im = t.image, ox = (j[0] - gt.cols[0]) * tw, oy = (j[1] - gt.rows[0]) * th;
@@ -1554,6 +1607,243 @@ function wmtsSource(caps, layerId, o) {
     label: layer.title,
     bbox: layer.bbox
   };
+}
+
+// lib/inspect.js
+var KIND_COLORS = {
+  data: "#66bb6a",
+  partial: "#c0ca33",
+  empty: "#78909c",
+  blank: "#90a4ae",
+  missing: "#ef5350",
+  error: "#ff7043",
+  placeholder: "#ab47bc",
+  upsampled: "#ffa726",
+  grid: "#4fc3f7"
+};
+function tilesInBox(src, index, lonlat, max) {
+  var tms = src.tms, L2 = tms.levels[index];
+  var crs = ensureCrs(tms.crs);
+  var e = transformBbox(lonlat, "EPSG:4326", crs, 32);
+  var tw = L2.tileWidth * L2.cell, th = L2.tileHeight * L2.cell;
+  var c0 = Math.max(0, Math.floor((e[0] - L2.origin[0]) / tw));
+  var c1 = Math.min(L2.matrixWidth - 1, Math.floor((e[2] - L2.origin[0]) / tw));
+  var r0 = Math.max(0, Math.floor((L2.origin[1] - e[3]) / th));
+  var r1 = Math.min(L2.matrixHeight - 1, Math.floor((L2.origin[1] - e[1]) / th));
+  if (L2.limits) {
+    c0 = Math.max(c0, L2.limits[0]);
+    r0 = Math.max(r0, L2.limits[1]);
+    c1 = Math.min(c1, L2.limits[2]);
+    r1 = Math.min(r1, L2.limits[3]);
+  }
+  if (c1 < c0 || r1 < r0) return [];
+  var n = (c1 - c0 + 1) * (r1 - r0 + 1);
+  if (n > (max || 1024)) {
+    throw new Error(n + " tiles at level " + L2.id + " in this view: zoom in or pick a coarser level");
+  }
+  var out = [];
+  for (var r = r0; r <= r1; r++) {
+    for (var c = c0; c <= c1; c++) out.push(makeTile(src, index, c, r));
+  }
+  return out;
+}
+function makeTile(src, index, col, row) {
+  var L2 = src.tms.levels[index], ext = tileExtent(L2, col, row);
+  return {
+    level: index,
+    z: L2.id,
+    col,
+    row,
+    extent: ext,
+    polygon: boxPolygon(ext, ensureCrs(src.tms.crs), 4),
+    url: tileUrl(src, L2, col, row),
+    kind: "grid"
+  };
+}
+function look(image) {
+  var d = image.data, n = d.length / 4, clear = 0, same = true;
+  var r0 = d[0], g0 = d[1], b0 = d[2], a0 = d[3];
+  for (var i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) clear++;
+    if (same && (d[i] !== r0 || d[i + 1] !== g0 || d[i + 2] !== b0 || d[i + 3] !== a0)) same = false;
+  }
+  return { clear: clear / n, single: same };
+}
+function classify(tile, t) {
+  tile.status = t.status;
+  tile.bytes = t.bytes;
+  tile.ms = t.ms;
+  tile.type = t.type;
+  tile.hash = t.hash;
+  tile.image = t.image;
+  tile.blob = t.blob;
+  if (t.ok) {
+    var lk = look(t.image);
+    tile.clear = lk.clear;
+    tile.kind = lk.clear === 1 ? "empty" : lk.single ? "blank" : lk.clear > 0 ? "partial" : "data";
+    tile.note = lk.single && lk.clear < 1 ? "one colour: rgba(" + Array.prototype.slice.call(t.image.data, 0, 4).join(",") + ")" : null;
+  } else if (t.error && !t.status) {
+    tile.kind = "error";
+    tile.note = t.error;
+  } else if (t.error) {
+    tile.kind = "error";
+    tile.note = t.error;
+  } else {
+    tile.kind = "missing";
+  }
+  return tile;
+}
+function markRepeats(tiles) {
+  var count = /* @__PURE__ */ new Map();
+  tiles.forEach(function(t) {
+    if (t.hash) count.set(t.hash, (count.get(t.hash) || 0) + 1);
+  });
+  tiles.forEach(function(t) {
+    var n = t.hash ? count.get(t.hash) : 0;
+    if (n >= 3 && t.kind !== "upsampled" && (t.kind !== "data" || n >= Math.max(3, tiles.length * 0.2))) {
+      t.repeats = n;
+      t.note = (t.note ? t.note + "; " : "") + "same bytes as " + (n - 1) + " other tile(s)";
+      t.kind = "placeholder";
+    }
+  });
+  return tiles;
+}
+async function pool2(items, n, fn) {
+  var next = 0;
+  async function worker() {
+    while (next < items.length) {
+      var i = next++;
+      await fn(items[i], i);
+    }
+  }
+  var ws = [];
+  for (var k = 0; k < Math.min(n, items.length); k++) ws.push(worker());
+  await Promise.all(ws);
+}
+async function probeTiles(src, index, lonlat, opts) {
+  opts = opts || {};
+  var tiles = tilesInBox(src, index, lonlat, opts.max || 400), done = 0;
+  await pool2(tiles, opts.concurrency || 8, async function(tile) {
+    classify(tile, await fetchTile(tile.url, opts.signal));
+    done++;
+    if (opts.onProgress) opts.onProgress(done, tiles.length);
+  });
+  return markRepeats(tiles);
+}
+function parentDiff(child, parent) {
+  var ci = child.image, pi = parent.image;
+  if (!ci || !pi) return NaN;
+  var ce = child.extent, pe = parent.extent;
+  var pw = (pe[2] - pe[0]) / pi.width, ph = (pe[3] - pe[1]) / pi.height;
+  var cw = (ce[2] - ce[0]) / ci.width, chh = (ce[3] - ce[1]) / ci.height;
+  var sum = 0, n = 0, step = Math.max(1, Math.floor(ci.width / 128));
+  for (var y = 0; y < ci.height; y += step) {
+    var Y = ce[3] - (y + 0.5) * chh, py = Math.floor((pe[3] - Y) / ph);
+    if (py < 0 || py >= pi.height) continue;
+    for (var x = 0; x < ci.width; x += step) {
+      var X = ce[0] + (x + 0.5) * cw, px = Math.floor((X - pe[0]) / pw);
+      if (px < 0 || px >= pi.width) continue;
+      var a = (y * ci.width + x) * 4, b = (py * pi.width + px) * 4;
+      if (!ci.data[a + 3] || !pi.data[b + 3]) continue;
+      sum += Math.abs(ci.data[a] - pi.data[b]) + Math.abs(ci.data[a + 1] - pi.data[b + 1]) + Math.abs(ci.data[a + 2] - pi.data[b + 2]);
+      n += 3;
+    }
+  }
+  return n ? sum / n : NaN;
+}
+function children(src, tile, box) {
+  var next = tile.level + 1, L2 = src.tms.levels[next];
+  if (!L2) return [];
+  var e = tile.extent, tw = L2.tileWidth * L2.cell, th = L2.tileHeight * L2.cell, eps = L2.cell * 0.5;
+  var lo = [Math.max(e[0], box[0]), Math.max(e[1], box[1])], hi = [Math.min(e[2], box[2]), Math.min(e[3], box[3])];
+  if (hi[0] <= lo[0] || hi[1] <= lo[1]) return [];
+  var c0 = Math.floor((lo[0] + eps - L2.origin[0]) / tw), c1 = Math.floor((hi[0] - eps - L2.origin[0]) / tw);
+  var r0 = Math.floor((L2.origin[1] - hi[1] + eps) / th), r1 = Math.floor((L2.origin[1] - lo[1] - eps) / th);
+  if (L2.limits) {
+    c0 = Math.max(c0, L2.limits[0]);
+    r0 = Math.max(r0, L2.limits[1]);
+    c1 = Math.min(c1, L2.limits[2]);
+    r1 = Math.min(r1, L2.limits[3]);
+  }
+  var out = [];
+  for (var r = Math.max(0, r0); r <= Math.min(L2.matrixHeight - 1, r1); r++) {
+    for (var c = Math.max(0, c0); c <= Math.min(L2.matrixWidth - 1, c1); c++) {
+      var t = makeTile(src, next, c, r);
+      t.parent = tile;
+      out.push(t);
+    }
+  }
+  return out;
+}
+async function coverageWalk(src, startIndex, lonlat, opts) {
+  opts = opts || {};
+  var budget = opts.budget || 300, tol = opts.tolerance === void 0 ? 2 : opts.tolerance;
+  var box = transformBbox(lonlat, "EPSG:4326", ensureCrs(src.tms.crs), 32);
+  var maxLevel = levelRange(src)[1];
+  var frontier = tilesInBox(src, startIndex, lonlat, budget), all = [], requests = 0, stopped = null;
+  while (frontier.length) {
+    if (requests + frontier.length > budget) {
+      frontier = frontier.slice(0, Math.max(0, budget - requests));
+      stopped = "budget";
+      if (!frontier.length) break;
+    }
+    await pool2(frontier, opts.concurrency || 8, async function(tile) {
+      classify(tile, await fetchTile(tile.url, opts.signal));
+      if (tile.parent && (tile.kind === "data" || tile.kind === "partial") && tile.parent.image) {
+        var d = parentDiff(tile, tile.parent);
+        tile.parentDiff = d;
+        if (d === d && d < tol) {
+          tile.kind = "upsampled";
+          tile.note = "parent upsampled (mean diff " + d.toFixed(2) + ")";
+        }
+      }
+    });
+    requests += frontier.length;
+    all = all.concat(frontier);
+    if (opts.onProgress) opts.onProgress(requests, budget, frontier[0] && frontier[0].z);
+    if (stopped) break;
+    var next = [];
+    frontier.forEach(function(t) {
+      if ((t.kind === "data" || t.kind === "partial") && t.level < maxLevel) next = next.concat(children(src, t, box));
+    });
+    all.forEach(function(t) {
+      if (t.level < (frontier[0] ? frontier[0].level : 0)) t.image = null;
+    });
+    frontier = next;
+  }
+  markRepeats(all);
+  var deepest = {}, nativeMax = -1;
+  all.forEach(function(t) {
+    deepest[t.z] = (deepest[t.z] || 0) + 1;
+    if ((t.kind === "data" || t.kind === "partial") && t.level > nativeMax) nativeMax = t.level;
+  });
+  return { tiles: all, requests, deepest, nativeMax, stopped };
+}
+function cogReadTiles(log, max) {
+  var out = [];
+  (log || []).forEach(function(e) {
+    if (!e.window || !e.tileSize) return;
+    var tw = e.tileSize[0], th = e.tileSize[1], w = e.window;
+    for (var r = Math.floor(w[1] / th); r <= Math.floor((w[3] - 1) / th); r++) {
+      for (var c = Math.floor(w[0] / tw); c <= Math.floor((w[2] - 1) / tw); c++) {
+        if (out.length >= (max || 4e3)) return;
+        var x0 = e.origin[0] + c * tw * e.res[0], y0 = e.origin[1] + r * th * e.res[1];
+        var x1 = x0 + tw * e.res[0], y1 = y0 + th * e.res[1];
+        var ext = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+        out.push({
+          z: e.level,
+          col: c,
+          row: r,
+          extent: ext,
+          url: e.href,
+          kind: "data",
+          polygon: boxPolygon(ext, ensureCrs(e.crs), 4),
+          note: e.href.split("/").pop() + ", overview " + e.level + ", tile " + tw + "x" + th
+        });
+      }
+    }
+  });
+  return out;
 }
 
 // lib/sources/cog.js
@@ -2212,7 +2502,7 @@ function cached(cache, key, make) {
   }
   return cache.get(key);
 }
-async function pool2(items, n, fn) {
+async function pool3(items, n, fn) {
   var out = new Array(items.length), next = 0;
   async function worker() {
     while (next < items.length) {
@@ -2225,7 +2515,7 @@ async function pool2(items, n, fn) {
   await Promise.all(ws);
   return out;
 }
-function classify(root, path) {
+function classify2(root, path) {
   var url = /^https?:\/\//.test(path) ? path : root + "/" + path.replace(/^\/+/, "");
   var rel = url.indexOf(root + "/") === 0 ? url.slice(root.length + 1) : path;
   if (!/\.parquet$/i.test(rel)) return null;
@@ -2299,7 +2589,7 @@ async function findFiles(root) {
   }
   var byTable = { acquisitions: [], products: [], assets: [], queries: [] };
   list.forEach(function(p) {
-    var f = classify(root, p);
+    var f = classify2(root, p);
     if (f) byTable[f.table].push(f);
   });
   if (!byTable.acquisitions.length || !byTable.products.length) {
@@ -2357,7 +2647,7 @@ function readFile(f, want) {
 }
 async function readAll(files, want, onFile) {
   var done = 0;
-  var parts = await pool2(files, 6, async function(f) {
+  var parts = await pool3(files, 6, async function(f) {
     var rows = await readFile(f, want);
     done++;
     if (onFile) onFile(done, files.length);
@@ -2944,7 +3234,7 @@ function groupByDay(scenes) {
     };
   });
 }
-async function pool3(tasks, n) {
+async function pool4(tasks, n) {
   var out = new Array(tasks.length), next = 0;
   async function worker() {
     while (next < tasks.length) {
@@ -3022,7 +3312,7 @@ async function loadComposite(o) {
       };
     };
   });
-  var results = await pool3(tasks, o.concurrency || 4);
+  var results = await pool4(tasks, o.concurrency || 4);
   var layers = [], errors = [], levels2 = [];
   results.forEach(function(r, i) {
     if (!r.ok) {
@@ -3280,6 +3570,7 @@ function sourceChanged() {
   $("vrtbox").classList.toggle("hide", src !== "vrt");
   $("cogbox").classList.toggle("hide", src !== "cog");
   $("tilebox").classList.toggle("hide", src !== "tiles");
+  $("inspTiles").classList.toggle("hide", src !== "tiles");
   coverLayer.clearLayers();
   state.catalog = null;
   capabilitiesChanged(null);
@@ -3496,6 +3787,7 @@ function tileLayerChanged(wantSet, wantFmt) {
 }
 async function readTiles(want) {
   want = want || {};
+  insp.src = null;
   var url = $("tileUrl").value.trim();
   $("wmtsBox").classList.toggle("hide", !isCapabilitiesUrl(url));
   capabilitiesChanged(null);
@@ -3503,6 +3795,7 @@ async function readTiles(want) {
     tileCaps = null;
     var dec = $("tileDecode").value || guessDecode(url);
     $("tileInfo").textContent = "XYZ, Web Mercator, 256 px tiles; pixels read as " + (dec === "rgb" ? "an image" : dec + " elevation") + ". Draw a region and search.";
+    inspLevels().catch(fail);
     return null;
   }
   setStatus("reading WMTS capabilities ...");
@@ -3512,6 +3805,7 @@ async function readTiles(want) {
   }), want.layer);
   tileLayerChanged(want.set, want.format);
   setStatus(tileCaps.layers.length + " layers in " + (tileCaps.title || "the capabilities") + ": pick one, draw a region and search");
+  inspLevels().catch(fail);
   return tileCaps;
 }
 $("readTiles").addEventListener("click", function() {
@@ -3519,6 +3813,14 @@ $("readTiles").addEventListener("click", function() {
 });
 $("tileLayer").addEventListener("change", function() {
   tileLayerChanged();
+  insp.src = null;
+  inspLevels().catch(fail);
+});
+["tileSet", "tileMax", "tileDecode"].forEach(function(id) {
+  $(id).addEventListener("change", function() {
+    insp.src = null;
+    inspLevels().catch(fail);
+  });
 });
 $("tileUrl").addEventListener("change", function() {
   readTiles().catch(fail);
@@ -4247,13 +4549,16 @@ async function loadImagery() {
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
     var what = s.files + " files";
-    if (s.log.length) {
-      var got = s.log.filter(function(t) {
+    var tl = s.log.filter(function(t) {
+      return t.kind === "tile";
+    });
+    if (tl.length) {
+      var got = tl.filter(function(t) {
         return t.ok;
       }).length;
-      what = s.log.length + " tiles at level " + s.log[0].z + " (" + got + " with data, " + (s.log.length - got) + " missing or failed)";
+      what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " + (tl.length - got) + " missing or failed)";
     }
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (s.log.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached2 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached2 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) {
@@ -4262,6 +4567,219 @@ async function loadImagery() {
     }
   }
 }
+var inspLayer = L.layerGroup().addTo(map);
+var inspRenderer = L.canvas({ padding: 0.2 });
+var insp = { src: null, ctl: null, tiles: [] };
+async function inspSource() {
+  if ($("src").value !== "tiles") return null;
+  insp.src = await tileCatalog(tileOpts()).source(null);
+  return insp.src;
+}
+async function inspLevels(prefer) {
+  var src = await inspSource();
+  $("inspTiles").classList.toggle("hide", !src);
+  if (!src) return;
+  var sel = $("inspLevel"), r = levelRange(src), unit = /3857|326|327|3031|3413|3976/.test(src.tms.crs) ? " m" : "";
+  var b = map.getBounds(), view = [b.getWest(), Math.max(-85, b.getSouth()), b.getEast(), Math.min(85, b.getNorth())];
+  var fit = chooseLevel(src, makeGrid(view, { maxDim: Math.max(map.getSize().x, map.getSize().y) })).index;
+  sel.innerHTML = "";
+  for (var i = r[0]; i <= r[1]; i++) {
+    var Lv = src.tms.levels[i], o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = Lv.id + " (" + (Lv.cell >= 100 ? Math.round(Lv.cell) : +Lv.cell.toPrecision(3)) + unit + "/px)" + (i === fit ? " fits view" : "");
+    sel.appendChild(o);
+  }
+  sel.value = String(prefer !== void 0 && prefer !== null ? prefer : fit);
+}
+function inspTip(t) {
+  var lines = ["level " + t.z + "  col " + t.col + "  row " + t.row];
+  if (t.kind !== "grid") lines.push(t.kind + (t.status ? "  HTTP " + t.status : "") + (t.bytes ? "  " + (t.bytes / 1024).toFixed(1) + " kB" : "") + (t.ms ? "  " + t.ms + " ms" : ""));
+  if (t.note) lines.push(t.note);
+  return lines.join("<br>");
+}
+function inspDraw(tiles, colorBy) {
+  inspLayer.clearLayers();
+  insp.tiles = tiles;
+  var labels2 = $("inspLabels").checked && tiles.length <= 300;
+  var lv = tiles.map(function(t) {
+    return t.level || 0;
+  });
+  var lo = Math.min.apply(null, lv), hi = Math.max.apply(null, lv), ramp = rampTable("viridis");
+  tiles.forEach(function(t) {
+    var col = KIND_COLORS[t.kind] || "#fff", fill = col, fo = t.kind === "grid" ? 0 : 0.28;
+    if (colorBy === "level" && hi > lo) {
+      var k = Math.round(((t.level || 0) - lo) / (hi - lo) * 255) * 3;
+      fill = "rgb(" + ramp[k] + "," + ramp[k + 1] + "," + ramp[k + 2] + ")";
+      fo = t.kind === "data" || t.kind === "partial" ? 0.45 : 0.12;
+    }
+    var lay = L.geoJSON(t.polygon, {
+      renderer: inspRenderer,
+      style: { color: col, weight: 1, opacity: 0.9, fillColor: fill, fillOpacity: fo }
+    });
+    lay.bindTooltip(inspTip(t), { sticky: true });
+    if (labels2) {
+      L.marker(lay.getBounds().getCenter(), { interactive: false, icon: L.divIcon({
+        className: "tlabel",
+        html: t.z + "/" + t.col + "/" + t.row,
+        iconSize: null
+      }) }).addTo(inspLayer);
+    }
+    lay.on("click", function() {
+      peek(t);
+    });
+    lay.addTo(inspLayer);
+  });
+}
+function kindSummary(tiles) {
+  var n = {};
+  tiles.forEach(function(t) {
+    n[t.kind] = (n[t.kind] || 0) + 1;
+  });
+  var box = document.createElement("div");
+  Object.keys(n).forEach(function(k) {
+    var sw = document.createElement("span");
+    sw.className = "ikey";
+    sw.style.background = KIND_COLORS[k] || "#fff";
+    box.appendChild(sw);
+    box.appendChild(document.createTextNode(k + " " + n[k]));
+  });
+  return box;
+}
+var peekUrl = null;
+async function peek(t) {
+  $("peek").classList.remove("hide");
+  if (peekUrl) {
+    URL.revokeObjectURL(peekUrl);
+    peekUrl = null;
+  }
+  var blob = t.blob;
+  if (!blob && t.url && (t.status || t.kind === "grid")) {
+    var got = await fetchTile(t.url);
+    blob = got.blob;
+    if (t.kind === "grid") t.status = got.status;
+  }
+  $("peekImg").removeAttribute("src");
+  if (blob) {
+    peekUrl = URL.createObjectURL(blob);
+    $("peekImg").src = peekUrl;
+  }
+  var info = [inspTip(t).replace(/<br>/g, "\n")];
+  if (t.image) info.push(t.image.width + " x " + t.image.height + " px" + (t.clear ? ", " + Math.round(t.clear * 100) + "% transparent" : ""));
+  if (t.type) info.push(t.type);
+  if (t.hash) info.push("hash " + t.hash);
+  if (t.url) info.push(t.url);
+  $("peekText").textContent = info.join("\n");
+  $("peekText").style.whiteSpace = "pre-wrap";
+}
+function viewBox() {
+  var b = map.getBounds();
+  return [Math.max(-180, b.getWest()), Math.max(-90, b.getSouth()), Math.min(180, b.getEast()), Math.min(90, b.getNorth())];
+}
+function inspInfo(text2, extra) {
+  var box = $("inspInfo");
+  box.textContent = text2;
+  if (extra) box.appendChild(extra);
+}
+async function inspRun(what) {
+  if (insp.ctl) insp.ctl.abort();
+  var ctl = insp.ctl = new AbortController();
+  var src = insp.src || await inspSource();
+  if (!src) throw new Error("grid, probe and walk need a tile server source");
+  var idx = +$("inspLevel").value, budget = +$("inspBudget").value || 200, Lv = src.tms.levels[idx];
+  if (what === "grid") {
+    var g = tilesInBox(src, idx, viewBox(), 4e3);
+    inspDraw(g);
+    inspInfo(g.length + " tiles at level " + Lv.id + " in view, " + Lv.tileWidth + " px, " + Lv.matrixWidth + " x " + Lv.matrixHeight + " in the matrix (" + src.tms.id + ", " + src.tms.crs + ")");
+    return;
+  }
+  if (what === "probe") {
+    inspInfo("probing level " + Lv.id + " ...");
+    var p = await probeTiles(src, idx, viewBox(), {
+      max: budget,
+      signal: ctl.signal,
+      onProgress: function(n, of) {
+        if (insp.ctl === ctl) inspInfo("probing level " + Lv.id + ": " + n + "/" + of);
+      }
+    });
+    if (insp.ctl !== ctl) return;
+    inspDraw(p);
+    var bytes = p.reduce(function(a, t) {
+      return a + (t.bytes || 0);
+    }, 0);
+    inspInfo(p.length + " tiles at level " + Lv.id + ", " + (bytes / 1e6).toFixed(2) + " MB:", kindSummary(p));
+    return;
+  }
+  inspInfo("walking down from level " + Lv.id + " ...");
+  var w = await coverageWalk(src, idx, viewBox(), {
+    budget,
+    signal: ctl.signal,
+    onProgress: function(n, of, z) {
+      if (insp.ctl === ctl) inspInfo("walking: level " + z + ", " + n + "/" + of + " requests");
+    }
+  });
+  if (insp.ctl !== ctl) return;
+  inspDraw(w.tiles, "level");
+  var nat = w.nativeMax >= 0 ? src.tms.levels[w.nativeMax].id : "none";
+  var up = w.tiles.filter(function(t) {
+    return t.kind === "upsampled";
+  });
+  inspInfo(w.requests + " requests; per level " + Object.keys(w.deepest).map(function(z) {
+    return z + ":" + w.deepest[z];
+  }).join(" ") + "; deepest native data at level " + nat + (up.length ? " (" + up.length + " tiles below it are their parent upsampled)" : "") + (w.stopped ? "; stopped at the request budget" : "") + ". Fill = level, outline = kind:", kindSummary(w.tiles));
+}
+["grid", "probe", "walk"].forEach(function(w) {
+  $("insp" + w[0].toUpperCase() + w.slice(1)).addEventListener("click", function() {
+    inspRun(w).catch(function(e) {
+      if (e && e.name === "AbortError") return;
+      inspInfo(String(e && e.message || e));
+    });
+  });
+});
+$("inspLast").addEventListener("click", function() {
+  var log = state.lastLog || [];
+  if (!log.length) {
+    inspInfo("load something first");
+    return;
+  }
+  var tiles = log.filter(function(e) {
+    return e.kind === "tile";
+  }).map(function(e) {
+    var t = {
+      z: e.z,
+      col: e.x,
+      row: e.y,
+      url: e.url,
+      status: e.status,
+      bytes: e.bytes,
+      ms: e.ms,
+      hash: e.hash,
+      extent: e.extent,
+      kind: e.ok ? "data" : e.error ? "error" : "missing",
+      note: e.error,
+      polygon: boxPolygon(e.extent, ensureCrs(e.crs), 4)
+    };
+    return t;
+  });
+  if (tiles.length) markRepeats(tiles);
+  var cog = cogReadTiles(log.filter(function(e) {
+    return e.kind === "cog";
+  }));
+  inspDraw(tiles.concat(cog));
+  var files = log.filter(function(e) {
+    return e.kind === "cog";
+  }).length;
+  inspInfo(tiles.length ? tiles.length + " map tiles read:" : cog.length + " internal COG tiles read from " + files + " file read(s) (whole tiles are fetched, so this is the read amplification)", tiles.length ? kindSummary(tiles) : null);
+});
+$("inspClear").addEventListener("click", function() {
+  if (insp.ctl) insp.ctl.abort();
+  inspLayer.clearLayers();
+  insp.tiles = [];
+  $("peek").classList.add("hide");
+  inspInfo("");
+});
+$("inspLabels").addEventListener("change", function() {
+  if (insp.tiles.length) inspDraw(insp.tiles);
+});
 $("search").addEventListener("click", function() {
   searchScenes().catch(fail);
 });

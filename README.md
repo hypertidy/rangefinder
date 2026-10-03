@@ -66,7 +66,21 @@ Two ways to open it locally:
    log), gamma, and the L2A -1000 offset (auto from scene metadata, always,
    or off). Everything re-renders the cached pixels without refetching, and
    "show imagery" (key `i`) toggles the overlay.
-6. **Output size** caps the longer side of the output grid; it is also never
+6. **Inspect tiles.** For a tile server: `grid` draws the tile grid of the
+   chosen level over the map view in the server's own CRS (a polar
+   pyramid shows as the curved lattice it is), with no requests; `probe`
+   requests every tile of that level in view and colours each by what came
+   back (data, partial, empty, blank, missing, error, or placeholder: the
+   same bytes repeated, which is how many servers answer outside their
+   coverage); `walk` descends from that level requesting only the children
+   of tiles that have data, within the request budget, and flags a tile
+   that is just its parent upsampled, so it finds where native resolution
+   really ends on a patchy server. For any source, `last read` draws what
+   the last load fetched: the map tiles, or each COG's internal tiles at the
+   overview it was read at (whole tiles are fetched, so this is the read
+   amplification). Click a cell to see the tile as served, with its HTTP
+   status, size, type and hash.
+7. **Output size** caps the longer side of the output grid; it is also never
    finer than the data (the scenes' own resolution when they say, else 10 m). **Max scenes** caps how many scenes one load reads.
 
 The URL hash is a permalink (source, region, dates, composite, day).
@@ -89,6 +103,8 @@ lib/sources/tiles.js     layers 1+2: XYZ template or WMTS capabilities (layers, 
 lib/cog.js               layer 3: windowed overview reads warped to the grid
 lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/decode,
                          the same warp for tile pyramids, WMTS capabilities parsing
+lib/inspect.js           the tile inspector: tile grids, probes, coverage walk,
+                         overzoom check, COG read tiles
 lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma, ramps,
                          hillshade, class palettes -> RGBA
 dev/                     mock STAC server, headless test, fixture and standalone builders
@@ -241,6 +257,8 @@ explorer itself has no dependencies to install).
   (`python3 make_fixtures.py wildtiles` rebuilds just those).
   `make_starc_fixture.py` builds the starc stores from `items.json`
   (`pip install pyarrow`); those are committed.
+- `test-inspect.mjs` drives the tile inspector headless (grid, probe,
+  walk, last read) from a permalink and a map view.
 - `test.mjs` drives the page headless from a permalink hash and prints the
   status line and bytes read; pixels always come from the real
   sentinel-cogs bucket.
