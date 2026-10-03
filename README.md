@@ -6,7 +6,10 @@ Earth Search v1, `sentinel-2-l2a`) or at the wildtiles cube, draw a region on
 the map, search scenes, pick a day, and the page reads the COGs directly by
 HTTP range request and composes the image in the browser.
 
-Two ways to open it:
+Live: https://hypertidy.github.io/rangefinder/ (deployed from `main` by
+`.github/workflows/pages.yml`).
+
+Two ways to open it locally:
 
 - `explorer.html`: a single self-contained file. Double-click it or open it
   from disk; it needs only network access to the CDNs, the catalogue and
