@@ -633,6 +633,12 @@ $("wtRes").addEventListener("change", function () {
   if (cubeRegions.length) readCube(true).catch(fail);
 });
 
+// Where a source's CRS came from. "[assumed]" marks a CRS nothing in the
+// data states (a convention, a guess from coordinate names, or typed in).
+function crsLine(crs, from, assumed) {
+  return "CRS " + crs + (assumed ? " [assumed]" : "") + (from ? " (from " + from + ")" : "");
+}
+
 // A VRT is its own index: read it once, outline every file, report the grid.
 async function readVrt(fit, quiet) {
   var cat = makeCatalog();
@@ -643,7 +649,7 @@ async function readVrt(fit, quiet) {
   L.geoJSON({ type: "GeometryCollection", geometries: info.footprints },
             { style: style, interactive: false }).addTo(coverLayer);
   $("vrtInfo").textContent = info.files + " files, " + info.bands + " band(s) of " + info.dataType +
-    " at " + info.res + " (" + info.crs + ")";
+    " at " + info.res + "; " + crsLine(info.crs, info.crsFrom);
   if (fit && !state.roi) map.fitBounds(roiLatLngBounds(info.bbox));
   if (!quiet) setStatus("VRT read: " + info.files + " files\ndraw a region over the purple tiles, then search");
   return info;
@@ -659,7 +665,7 @@ async function readCogs(fit) {
     L.rectangle(roiLatLngBounds(f.bbox), { color: "#b39ddb", weight: 1, fill: false,
       interactive: false }).addTo(coverLayer);
     return f.href.split("/").pop() + ": " + f.width + "x" + f.height + ", " + f.bands + " x " +
-      f.dataType + ", " + f.crs + ", " + f.levels + " level(s)" +
+      f.dataType + ", " + crsLine(f.crs, f.crsFrom, f.crsAssumed) + ", " + f.levels + " level(s)" +
       (f.tileSize ? ", " + f.tileSize.join("x") + " tiles" : "") +
       (f.nodata !== null ? ", nodata " + f.nodata : "") + (f.date ? ", " + f.date : "");
   });
@@ -770,7 +776,8 @@ async function describeZarr(fit, keepDates) {
   capabilitiesChanged(null);
   $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " +
     d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") +
-    " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + d.crs + ", cell " +
+    " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " +
+    crsLine(d.crs, d.crsFrom, d.crsAssumed) + ", cell " +
     d.res.map(function (r) { return +Math.abs(r).toPrecision(4); }).join(" x ") +
     (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
   coverLayer.clearLayers();
@@ -811,7 +818,8 @@ function tileLayerChanged(wantSet, wantFmt) {
     .map(function (f) { return [f, f]; }), wantFmt);
   $("tileInfo").textContent = l.title + ": " + (l.times ? l.times.length + " times, " + l.times[0] +
     " to " + l.times[l.times.length - 1] + "; " : "") + "bbox " +
-    (l.bbox ? l.bbox.map(function (v) { return v.toFixed(1); }).join(", ") : "not given");
+    (l.bbox ? l.bbox.map(function (v) { return v.toFixed(1); }).join(", ") : "not given") +
+    "; CRS from each TileMatrixSet's SupportedCRS";
   if (l.times && l.times.length) {   // a daily layer: show the last 60 days
     var last = l.times[l.times.length - 1].slice(0, 10);
     $("to").value = last;
@@ -827,7 +835,8 @@ async function readTiles(want) {
   if (!X.isCapabilitiesUrl(url)) {
     tileCaps = null;
     var dec = $("tileDecode").value || X.guessDecode(url);
-    $("tileInfo").textContent = "XYZ, Web Mercator, 256 px tiles; pixels read as " +
+    $("tileInfo").textContent = "XYZ, 256 px tiles; CRS EPSG:3857 [assumed] (XYZ templates are " +
+      "Web Mercator by convention); pixels read as " +
       (dec === "rgb" ? "an image" : dec + " elevation") + ". Draw a region and search.";
     inspLevels().catch(fail);
     return null;

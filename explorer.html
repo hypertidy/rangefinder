@@ -423,6 +423,7 @@ __export(explorer_exports, {
   coverageWalk: () => coverageWalk,
   crsCode: () => crsCode,
   crsFromWkt: () => crsFromWkt,
+  crsProvenance: () => crsProvenance,
   ensureCrs: () => ensureCrs,
   fetchTile: () => fetchTile,
   geometryBbox: () => geometryBbox,
@@ -433,9 +434,11 @@ __export(explorer_exports, {
   guessDecode: () => guessDecode,
   hillshade: () => hillshade,
   isCapabilitiesUrl: () => isCapabilitiesUrl,
+  isGeographic: () => isGeographic,
   levelRange: () => levelRange,
   listCollections: () => listCollections,
   loadComposite: () => loadComposite,
+  lonLatBounds: () => lonLatBounds,
   makeGrid: () => makeGrid,
   makeTileId: () => makeTileId,
   markRepeats: () => markRepeats,
@@ -458,6 +461,7 @@ __export(explorer_exports, {
   readZarrWarped: () => readZarrWarped,
   renderRGBA: () => renderRGBA,
   resolveAssets: () => resolveAssets,
+  resolveCrs: () => resolveCrs,
   rgbaToCanvas: () => rgbaToCanvas,
   sceneOffset: () => sceneOffset,
   scenesOffset: () => scenesOffset,
@@ -489,17 +493,68 @@ function proj() {
   if (!p) throw new Error("proj4 is not loaded");
   return p;
 }
+var GRS80 = "+ellps=GRS80 +towgs84=0,0,0,0,0,0,0";
 var KNOWN_CRS = {
-  "EPSG:3031": "+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
-  "EPSG:3976": "+proj=stere +lat_0=-90 +lat_ts=-70 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
-  "EPSG:3413": "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
-  "EPSG:3995": "+proj=stere +lat_0=90 +lat_ts=71 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
-  "EPSG:3577": "+proj=aea +lat_0=0 +lon_0=132 +lat_1=-18 +lat_2=-36 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs",
-  "EPSG:4283": "+proj=longlat +ellps=GRS80 +no_defs",
-  "EPSG:7844": "+proj=longlat +ellps=GRS80 +no_defs",
-  "EPSG:4269": "+proj=longlat +datum=NAD83 +no_defs",
-  "EPSG:6933": "+proj=cea +lat_ts=30 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+  // geographic
+  "EPSG:4269": "+proj=longlat " + GRS80 + " +no_defs",
+  "EPSG:4283": "+proj=longlat " + GRS80 + " +no_defs",
+  "EPSG:7844": "+proj=longlat " + GRS80 + " +no_defs",
+  "EPSG:3395": "+proj=merc +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  // polar
+  "EPSG:3031": "+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3995": "+proj=stere +lat_0=90 +lat_ts=71 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:9354": "+proj=stere +lat_0=-90 +lat_ts=-65 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3032": "+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=70 +k=1 +x_0=6000000 +y_0=6000000 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3033": "+proj=lcc +lat_0=-50 +lon_0=70 +lat_1=-68.5 +lat_2=-74.5 +x_0=6000000 +y_0=6000000 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3413": "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3976": "+proj=stere +lat_0=-90 +lat_ts=-70 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3411": "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +a=6378273 +b=6356889.449 +units=m +no_defs",
+  "EPSG:3412": "+proj=stere +lat_0=-90 +lat_ts=-70 +lon_0=0 +k=1 +x_0=0 +y_0=0 +a=6378273 +b=6356889.449 +units=m +no_defs",
+  "EPSG:5041": "+proj=stere +lat_0=90 +lat_ts=90 +lon_0=0 +k=0.994 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs",
+  "EPSG:5042": "+proj=stere +lat_0=-90 +lat_ts=-90 +lon_0=0 +k=0.994 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs",
+  "EPSG:32661": "+proj=stere +lat_0=90 +lat_ts=90 +lon_0=0 +k=0.994 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs",
+  "EPSG:32761": "+proj=stere +lat_0=-90 +lat_ts=-90 +lon_0=0 +k=0.994 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs",
+  // EASE-Grid 2.0
+  "EPSG:6931": "+proj=laea +lat_0=90 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:6932": "+proj=laea +lat_0=-90 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:6933": "+proj=cea +lat_ts=30 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  // Australia
+  "EPSG:3577": "+proj=aea +lat_0=0 +lon_0=132 +lat_1=-18 +lat_2=-36 +x_0=0 +y_0=0 " + GRS80 + " +units=m +no_defs",
+  "EPSG:9473": "+proj=aea +lat_0=0 +lon_0=132 +lat_1=-18 +lat_2=-36 +x_0=0 +y_0=0 " + GRS80 + " +units=m +no_defs",
+  "EPSG:3112": "+proj=lcc +lat_0=0 +lon_0=134 +lat_1=-18 +lat_2=-36 +x_0=0 +y_0=0 " + GRS80 + " +units=m +no_defs",
+  "EPSG:7845": "+proj=lcc +lat_0=0 +lon_0=134 +lat_1=-18 +lat_2=-36 +x_0=0 +y_0=0 " + GRS80 + " +units=m +no_defs",
+  "EPSG:7899": "+proj=lcc +lat_0=-37 +lon_0=145 +lat_1=-36 +lat_2=-38 +x_0=2500000 +y_0=2500000 " + GRS80 + " +units=m +no_defs",
+  // elsewhere
+  "EPSG:2193": "+proj=tmerc +lat_0=0 +lon_0=173 +k=0.9996 +x_0=1600000 +y_0=10000000 " + GRS80 + " +units=m +no_defs",
+  "EPSG:27700": "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +towgs84=446.448,-125.157,542.06,0.15,0.247,0.842,-20.489 +units=m +no_defs",
+  "EPSG:3035": "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 " + GRS80 + " +units=m +no_defs"
 };
+var ZONE_FAMILIES = [
+  [32601, 32660, 32600, false, "+datum=WGS84"],
+  // WGS 84 / UTM north
+  [32701, 32760, 32700, true, "+datum=WGS84"],
+  // WGS 84 / UTM south
+  [28348, 28358, 28300, true, GRS80],
+  // GDA94 / MGA
+  [7846, 7859, 7800, true, GRS80],
+  // GDA2020 / MGA
+  [26901, 26923, 26900, false, GRS80],
+  // NAD83 / UTM north
+  [25828, 25838, 25800, false, GRS80]
+  // ETRS89 / UTM north
+];
+function zoneDef(code) {
+  var m = /^EPSG:(\d+)$/.exec(code);
+  if (!m) return null;
+  var n = +m[1];
+  for (var i = 0; i < ZONE_FAMILIES.length; i++) {
+    var f = ZONE_FAMILIES[i];
+    if (n >= f[0] && n <= f[1]) {
+      return "+proj=utm +zone=" + (n - f[2]) + (f[3] ? " +south" : "") + " " + f[4] + " +units=m +no_defs";
+    }
+  }
+  return null;
+}
 function crsCode(c) {
   if (c === null || c === void 0) return null;
   var s = String(c).trim();
@@ -515,20 +570,63 @@ function wktEpsg(wkt) {
   while (m = re.exec(wkt || "")) last = m[1];
   return last ? "EPSG:" + last : null;
 }
+var how = /* @__PURE__ */ new Map();
+function crsProvenance(code) {
+  code = crsCode(code);
+  if (how.has(code)) return how.get(code);
+  return proj().defs(code) ? "proj4's own definition" : "unknown";
+}
 function ensureCrs(code) {
   var p = proj();
   code = crsCode(code);
   if (p.defs(code)) return code;
-  if (KNOWN_CRS[code]) {
-    p.defs(code, KNOWN_CRS[code]);
+  var def = KNOWN_CRS[code], from = "rangefinder's built-in table";
+  if (!def && (def = zoneDef(code))) from = "UTM zone arithmetic from the code";
+  if (!def && /^\s*\+proj=/.test(code)) {
+    def = code;
+    from = "a proj string as given";
+  }
+  if (def) {
+    p.defs(code, def);
+    how.set(code, from);
     return code;
   }
-  var m = /^EPSG:(32[67])(\d{2})$/.exec(code);
-  if (m) {
-    p.defs(code, "+proj=utm +zone=" + +m[2] + (m[1] === "327" ? " +south" : "") + " +datum=WGS84 +units=m +no_defs");
-    return code;
+  throw new Error("unknown CRS " + code + " (not built in, and not looked up yet)");
+}
+var looked = /* @__PURE__ */ new Map();
+function resolveCrs(code) {
+  try {
+    return Promise.resolve(ensureCrs(code));
+  } catch (e) {
   }
-  throw new Error("unknown CRS " + code + " (register it with proj4.defs)");
+  code = crsCode(code);
+  var m = /^EPSG:(\d+)$/.exec(code);
+  if (!m) return Promise.reject(new Error("unknown CRS " + code));
+  if (!looked.has(code)) {
+    var p = (async function() {
+      var base = "https://spatialreference.org/ref/epsg/" + m[1] + "/";
+      var forms = [base + "proj4.txt", base + "ogcwkt.txt"];
+      for (var i = 0; i < forms.length; i++) {
+        try {
+          var r = await fetch(forms[i]);
+          if (!r.ok) continue;
+          var t = (await r.text()).trim();
+          if (!t || /<html/i.test(t)) continue;
+          proj().defs(code, t);
+          proj()(code, "EPSG:4326");
+          how.set(code, "looked up on spatialreference.org");
+          return code;
+        } catch (e) {
+        }
+      }
+      throw new Error("unknown CRS " + code + " (not built in, and spatialreference.org did not answer)");
+    })();
+    p.catch(function() {
+      looked.delete(code);
+    });
+    looked.set(code, p);
+  }
+  return looked.get(code);
 }
 var wktCount = 0;
 function crsFromWkt(wkt) {
@@ -541,6 +639,7 @@ function crsFromWkt(wkt) {
   }
   var name = "WKT:" + ++wktCount;
   proj().defs(name, wkt);
+  how.set(name, "the WKT itself (no EPSG code in it)");
   return name;
 }
 function secureUrl(u) {
@@ -603,30 +702,50 @@ function geometryBbox(g) {
 }
 function makeGrid(lonlatBbox, opts) {
   opts = opts || {};
-  var bb = transformBbox(lonlatBbox, "EPSG:4326", "EPSG:3857", 8);
+  var crs = ensureCrs(opts.crs || "EPSG:3857");
+  var bb = opts.extent || transformBbox(lonlatBbox, "EPSG:4326", crs, 16);
   var w = bb[2] - bb[0], h = bb[3] - bb[1];
   var maxDim = opts.maxDim || 1536;
   var size = Math.max(opts.pixelSize || 0, Math.max(w, h) / maxDim);
   if (opts.minGroundRes) {
     var lat = (lonlatBbox[1] + lonlatBbox[3]) / 2 * Math.PI / 180;
-    size = Math.max(size, opts.minGroundRes / Math.cos(lat));
+    var perUnit = crs === "EPSG:3857" ? Math.cos(lat) : isGeographic(crs) ? 111320 * Math.cos(lat) : 1;
+    size = Math.max(size, opts.minGroundRes / perUnit);
   }
   return {
-    crs: "EPSG:3857",
+    crs,
     bbox: bb,
     width: Math.max(1, Math.round(w / size)),
     height: Math.max(1, Math.round(h / size))
   };
 }
+function isGeographic(crs) {
+  var d = proj().defs(ensureCrs(crs));
+  return !!d && (d.projName === "longlat" || d.projName === "lonlat" || /longlat|lonlat/.test(d.projName || ""));
+}
+function lonLatBounds(extent, crs) {
+  crs = ensureCrs(crs);
+  if (crs === "EPSG:4326") return extent.slice();
+  var b = transformBbox(extent, crs, "EPSG:4326", 32);
+  var f = proj()("EPSG:4326", crs);
+  [[0, -90], [0, 90]].forEach(function(pole) {
+    var p = f.forward(pole);
+    if (isFinite(p[0]) && isFinite(p[1]) && p[0] > extent[0] && p[0] < extent[2] && p[1] > extent[1] && p[1] < extent[3]) {
+      b = [-180, pole[1] < 0 ? -90 : b[1], 180, pole[1] > 0 ? 90 : b[3]];
+    }
+  });
+  return [Math.max(-180, b[0]), Math.max(-90, b[1]), Math.min(180, b[2]), Math.min(90, b[3])];
+}
 function gridLonLatBounds(grid) {
-  var sw = transform(grid.crs, "EPSG:4326", [grid.bbox[0], grid.bbox[1]]);
-  var ne = transform(grid.crs, "EPSG:4326", [grid.bbox[2], grid.bbox[3]]);
-  return [sw[0], sw[1], ne[0], ne[1]];
+  return lonLatBounds(grid.bbox, grid.crs);
 }
 function gridGroundRes(grid) {
   var c = gridLonLatBounds(grid);
   var lat = (c[1] + c[3]) / 2 * Math.PI / 180;
-  return (grid.bbox[2] - grid.bbox[0]) / grid.width * Math.cos(lat);
+  var px = (grid.bbox[2] - grid.bbox[0]) / grid.width;
+  if (grid.crs === "EPSG:3857") return px * Math.cos(lat);
+  if (isGeographic(grid.crs)) return px * 111320 * Math.cos(lat);
+  return px;
 }
 function solarDay(datetime, lon) {
   var t = Date.parse(datetime);
@@ -990,7 +1109,7 @@ function crsFromKeys(image) {
   if (k.GeographicTypeGeoKey && k.GeographicTypeGeoKey !== 32767) {
     return "EPSG:" + k.GeographicTypeGeoKey;
   }
-  throw new Error("no EPSG code in GeoTIFF keys; pass opts.crs");
+  throw new Error("no EPSG code in the GeoTIFF keys; give one with the URL, e.g. file.tif#crs=EPSG:3031");
 }
 async function levels(tiff) {
   var n = await tiff.getImageCount();
@@ -1116,7 +1235,7 @@ async function readWarped(href, grid, opts) {
   var base = lv[0];
   var W0 = base.getWidth(), H0 = base.getHeight();
   var origin = base.getOrigin(), res = base.getResolution();
-  var crs = ensureCrs(opts.crs || crsFromKeys(base));
+  var crs = await resolveCrs(opts.crs || crsFromKeys(base));
   var toSrc = globalThis.proj4(ensureCrs(grid.crs), crs);
   var lat = gridLattice(grid, toSrc, origin, res);
   var win = latticeWindow(lat, W0, H0);
@@ -1175,12 +1294,19 @@ async function readWarped(href, grid, opts) {
     }]
   };
 }
-async function cogInfo(href) {
+async function cogInfo(href, crsGiven) {
   var tiff = await openCog(href);
   var lv = await levels(tiff);
   var base = lv[0];
   var fd = base.fileDirectory;
-  var crs = ensureCrs(crsFromKeys(base));
+  var keys = null;
+  try {
+    keys = crsFromKeys(base);
+  } catch (e) {
+    if (!crsGiven) throw e;
+  }
+  var crs = await resolveCrs(crsGiven || keys);
+  var crsFrom = (crsGiven ? "the URL's #crs=" + (keys && keys !== crsGiven ? " (the file says " + keys + ")" : "") : "the file's GeoKeys") + "; definition: " + crsProvenance(crs);
   var b = base.getBoundingBox();
   var fmt = fd.SampleFormat && fd.SampleFormat[0] || 1;
   var bits = fd.BitsPerSample && fd.BitsPerSample[0] || 8;
@@ -1190,6 +1316,8 @@ async function cogInfo(href) {
   return {
     href,
     crs,
+    crsFrom,
+    crsAssumed: !!crsGiven && !keys,
     extent: b,
     bbox: transformBbox(b, crs, "EPSG:4326"),
     width: base.getWidth(),
@@ -1909,7 +2037,8 @@ function cogCatalog(opts) {
   function read() {
     if (!infos) {
       infos = Promise.all(urls.map(function(u) {
-        return cogInfo(u).then(function(x) {
+        var m = /#crs=([^#]+)$/.exec(u), href = m ? u.slice(0, m.index) : u;
+        return cogInfo(href, m ? decodeURIComponent(m[1]) : null).then(function(x) {
           return x;
         }, function(e) {
           return { href: u, error: String(e && e.message || e) };
@@ -2006,6 +2135,9 @@ function tileCatalog(opts) {
         bbox: null
       };
     }
+    src.tms.crs = await resolveCrs(src.tms.crs);
+    src.crsFrom = (wmts ? "the TileMatrixSet's SupportedCRS" : "assumed: XYZ templates are Web Mercator by convention") + "; definition: " + crsProvenance(src.tms.crs);
+    src.crsAssumed = !wmts;
     if (opts.subdomains) src.subdomains = opts.subdomains;
     if (opts.minzoom !== void 0 && opts.minzoom !== null && opts.minzoom !== "") src.minzoom = +opts.minzoom;
     if (opts.maxzoom !== void 0 && opts.maxzoom !== null && opts.maxzoom !== "") src.maxzoom = +opts.maxzoom;
@@ -2023,6 +2155,10 @@ function tileCatalog(opts) {
     // WMTS: the parsed capabilities, for the layer / set / time pickers
     info: async function() {
       return wmts ? readCaps() : null;
+    },
+    // the tile source itself (CRS and where it came from, levels)
+    describe: function() {
+      return source(null);
     },
     source,
     search: async function(q) {
@@ -2221,6 +2357,7 @@ function vrtCatalog(opts) {
       );
       return {
         crs: v.crs,
+        crsFrom: "the VRT's SRS; definition: " + crsProvenance(v.crs),
         files: v.files.length,
         bands: v.bands.length,
         dataType: v.bands.length ? v.bands[0].dataType : "?",
@@ -2427,16 +2564,22 @@ async function timeValues(ds, arr) {
   return all;
 }
 async function variableCrs(ds, arr, xName, xAttrs, opts) {
-  if (opts.crs) return ensureCrs(opts.crs);
-  if (isLonLat(xName, xAttrs)) return "EPSG:4326";
+  if (opts.crs) return { crs: await resolveCrs(opts.crs), from: "entered on the page", assumed: true };
+  if (isLonLat(xName, xAttrs)) {
+    return {
+      crs: "EPSG:4326",
+      assumed: true,
+      from: "the lon/lat coordinate " + (xAttrs && xAttrs.units ? "units" : "names") + ", WGS84 taken as the datum"
+    };
+  }
   var a = arr.attrs || {};
   var gm = a.grid_mapping && String(a.grid_mapping).split(/[\s:]+/)[0];
   if (gm) {
     try {
       var g = await arrayAt(ds, gm), ga = g.attrs || {};
       var wkt = ga.crs_wkt || ga.spatial_ref;
-      if (wkt) return crsFromWkt(wkt);
-      if (ga.epsg_code) return ensureCrs(ga.epsg_code);
+      if (wkt) return { crs: crsFromWkt(wkt), from: 'grid_mapping "' + gm + '" WKT' };
+      if (ga.epsg_code) return { crs: await resolveCrs(ga.epsg_code), from: 'grid_mapping "' + gm + '" epsg_code' };
     } catch (e) {
     }
   }
@@ -2452,7 +2595,10 @@ async function variableCrs(ds, arr, xName, xAttrs, opts) {
   for (var i = 0; i < cands.length; i++) {
     if (cands[i] !== void 0 && cands[i] !== null && cands[i] !== "") {
       var c = String(cands[i]);
-      return /^\s*(PROJCS|GEOGCS|PROJCRS|GEOGCRS)/.test(c) ? crsFromWkt(c) : ensureCrs(c);
+      return {
+        crs: /^\s*(PROJCS|GEOGCS|PROJCRS|GEOGCRS)/.test(c) ? crsFromWkt(c) : await resolveCrs(c),
+        from: "a CRS attribute (" + (i < 3 ? "variable" : "root group") + ")"
+      };
     }
   }
   throw new Error("no CRS found for " + arr.path + " (no grid_mapping); enter one, e.g. EPSG:3031");
@@ -2491,7 +2637,7 @@ function describe(ds, name, opts) {
       var xv = toNumbers((await ds.z.get(coords[xi])).data);
       var yv = toNumbers((await ds.z.get(coords[yi])).data);
       var xa = regularAxis(xv, dims[xi]), ya = regularAxis(yv, dims[yi]);
-      var crs = await variableCrs(ds, arr, dims[xi], coords[xi].attrs, opts);
+      var cs = await variableCrs(ds, arr, dims[xi], coords[xi].attrs, opts), crs = cs.crs;
       var origin = [xa.first - xa.step / 2, ya.first - ya.step / 2];
       var res = [xa.step, ya.step];
       var W = arr.shape[xi], H = arr.shape[yi];
@@ -2528,6 +2674,8 @@ function describe(ds, name, opts) {
         origin,
         res,
         crs,
+        crsFrom: cs.from + "; definition: " + crsProvenance(crs),
+        crsAssumed: !!cs.assumed,
         wrap,
         extent: ext,
         bbox,
@@ -2811,6 +2959,8 @@ function zarrCatalog(opts) {
         chunks: a.chunks,
         dtype: a.dtype,
         crs: v.crs,
+        crsFrom: v.crsFrom,
+        crsAssumed: v.crsAssumed,
         bbox: v.bbox,
         res: v.res,
         units: v.units,
@@ -3231,14 +3381,14 @@ async function fromListing(root) {
   });
 }
 async function findFiles(root) {
-  var how = "manifest.json", list = null;
+  var how2 = "manifest.json", list = null;
   try {
     list = await fromManifest(root);
   } catch (e) {
     list = null;
   }
   if (!list) {
-    how = "bucket listing";
+    how2 = "bucket listing";
     try {
       list = await fromListing(root);
     } catch (e) {
@@ -3246,7 +3396,7 @@ async function findFiles(root) {
     }
   }
   if (!list || !list.length) {
-    how = "consolidated tables";
+    how2 = "consolidated tables";
     list = ["acquisitions.parquet", "products.parquet", "assets.parquet"];
   }
   var byTable = { acquisitions: [], products: [], assets: [], queries: [] };
@@ -3257,7 +3407,7 @@ async function findFiles(root) {
   if (!byTable.acquisitions.length || !byTable.products.length) {
     throw new Error("starc store " + root + ": no acquisitions/products files found (tried manifest.json, a bucket listing and consolidated tables)");
   }
-  return { how, files: byTable };
+  return { how: how2, files: byTable };
 }
 var fileCache = /* @__PURE__ */ new Map();
 var storeCache = /* @__PURE__ */ new Map();
@@ -4376,6 +4526,9 @@ $("wtRegion").addEventListener("change", function() {
 $("wtRes").addEventListener("change", function() {
   if (cubeRegions.length) readCube(true).catch(fail);
 });
+function crsLine(crs, from, assumed) {
+  return "CRS " + crs + (assumed ? " [assumed]" : "") + (from ? " (from " + from + ")" : "");
+}
 async function readVrt(fit, quiet) {
   var cat = makeCatalog();
   if (!quiet) setStatus("reading " + cat.label + " ...");
@@ -4386,7 +4539,7 @@ async function readVrt(fit, quiet) {
     { type: "GeometryCollection", geometries: info.footprints },
     { style, interactive: false }
   ).addTo(coverLayer);
-  $("vrtInfo").textContent = info.files + " files, " + info.bands + " band(s) of " + info.dataType + " at " + info.res + " (" + info.crs + ")";
+  $("vrtInfo").textContent = info.files + " files, " + info.bands + " band(s) of " + info.dataType + " at " + info.res + "; " + crsLine(info.crs, info.crsFrom);
   if (fit && !state.roi) map.fitBounds(roiLatLngBounds(info.bbox));
   if (!quiet) setStatus("VRT read: " + info.files + " files\ndraw a region over the purple tiles, then search");
   return info;
@@ -4407,7 +4560,7 @@ async function readCogs(fit) {
       fill: false,
       interactive: false
     }).addTo(coverLayer);
-    return f.href.split("/").pop() + ": " + f.width + "x" + f.height + ", " + f.bands + " x " + f.dataType + ", " + f.crs + ", " + f.levels + " level(s)" + (f.tileSize ? ", " + f.tileSize.join("x") + " tiles" : "") + (f.nodata !== null ? ", nodata " + f.nodata : "") + (f.date ? ", " + f.date : "");
+    return f.href.split("/").pop() + ": " + f.width + "x" + f.height + ", " + f.bands + " x " + f.dataType + ", " + crsLine(f.crs, f.crsFrom, f.crsAssumed) + ", " + f.levels + " level(s)" + (f.tileSize ? ", " + f.tileSize.join("x") + " tiles" : "") + (f.nodata !== null ? ", nodata " + f.nodata : "") + (f.date ? ", " + f.date : "");
   });
   $("cogInfo").textContent = lines.join("\n");
   $("cogInfo").style.whiteSpace = "pre-wrap";
@@ -4535,7 +4688,7 @@ async function describeZarr(fit, keepDates) {
   zarrNoTime = !d.times;
   zarrCatalog2().capabilities = { cloud: false, time: !!d.times };
   capabilitiesChanged(null);
-  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + d.crs + ", cell " + d.res.map(function(r) {
+  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + ", cell " + d.res.map(function(r) {
     return +Math.abs(r).toPrecision(4);
   }).join(" x ") + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
   coverLayer.clearLayers();
@@ -4592,7 +4745,7 @@ function tileLayerChanged(wantSet, wantFmt) {
   }), wantFmt);
   $("tileInfo").textContent = l.title + ": " + (l.times ? l.times.length + " times, " + l.times[0] + " to " + l.times[l.times.length - 1] + "; " : "") + "bbox " + (l.bbox ? l.bbox.map(function(v) {
     return v.toFixed(1);
-  }).join(", ") : "not given");
+  }).join(", ") : "not given") + "; CRS from each TileMatrixSet's SupportedCRS";
   if (l.times && l.times.length) {
     var last = l.times[l.times.length - 1].slice(0, 10);
     $("to").value = last;
@@ -4608,7 +4761,7 @@ async function readTiles(want) {
   if (!isCapabilitiesUrl(url)) {
     tileCaps = null;
     var dec = $("tileDecode").value || guessDecode(url);
-    $("tileInfo").textContent = "XYZ, Web Mercator, 256 px tiles; pixels read as " + (dec === "rgb" ? "an image" : dec + " elevation") + ". Draw a region and search.";
+    $("tileInfo").textContent = "XYZ, 256 px tiles; CRS EPSG:3857 [assumed] (XYZ templates are Web Mercator by convention); pixels read as " + (dec === "rgb" ? "an image" : dec + " elevation") + ". Draw a region and search.";
     inspLevels().catch(fail);
     return null;
   }

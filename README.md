@@ -272,6 +272,20 @@ Extension points left for the next pieces of work:
     `grid_mapping`) are chunked for time series (all times x 10 x 10
     cells). A map view there means many small chunks, so draw a small
     region.
+- CRS definitions: proj4js has no EPSG database, so a code is resolved
+  in this order:
+  1. a built-in table (polar stereographics, EASE-Grid, Australian and a
+     few other national grids, from ortho-cog-viewer's checked list);
+  2. zone arithmetic for WGS84 UTM, GDA94 and GDA2020 MGA, NAD83 and
+     ETRS89 UTM;
+  3. a lookup on spatialreference.org (PROJ's database as static files).
+
+  Each source's info line says where its CRS came from, for example the
+  GeoTIFF keys, a WMTS SupportedCRS, a VRT SRS or a Zarr `grid_mapping`.
+  It also says how the definition was obtained. A CRS nothing in the data
+  states is marked `[assumed]`: XYZ templates are taken as Web Mercator,
+  and Zarr lon/lat axes as WGS84. A COG with no EPSG code in its keys can
+  be given one in its URL as `file.tif#crs=EPSG:3031`.
 - Drawing a region uses mouse events; on touch devices use `use view`.
 
 ## Working on it
