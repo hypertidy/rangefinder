@@ -668,6 +668,8 @@ function crsFromWkt(wkt) {
 }
 function secureUrl(u) {
   u = String(u || "").trim();
+  var gh = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:raw|blob)\/(.+)$/.exec(u);
+  if (gh) u = "https://raw.githubusercontent.com/" + gh[1] + "/" + gh[2] + "/" + gh[3].replace(/\?raw=true$/, "");
   if (typeof location !== "undefined" && location.protocol === "https:" && /^http:\/\//i.test(u) && !/^http:\/\/(localhost|127\.|\[::1\])/i.test(u)) {
     return "https://" + u.slice(7);
   }
@@ -1221,6 +1223,17 @@ function geotiff() {
   if (!g) throw new Error("geotiff.js is not loaded");
   return g;
 }
+async function lfsFallback(href, err) {
+  if (!/^https:\/\/raw\.githubusercontent\.com\//.test(href)) throw err;
+  var head = "";
+  try {
+    head = await (await fetch(href, { headers: { Range: "bytes=0-63" } })).text();
+  } catch (e) {
+    throw err;
+  }
+  if (!/^version https:\/\/git-lfs/.test(head)) throw err;
+  throw new Error(href.split("/").pop() + " is stored in Git LFS, which GitHub does not serve to web pages; host it elsewhere (S3, source.coop) to read it here");
+}
 function openCog(href) {
   var hit2 = tiffCache.get(href);
   if (hit2) {
@@ -1228,7 +1241,9 @@ function openCog(href) {
     tiffCache.set(href, hit2);
     return hit2;
   }
-  var p = geotiff().fromUrl(href, { allowFullFile: false });
+  var p = geotiff().fromUrl(href, { allowFullFile: false }).catch(function(e) {
+    return lfsFallback(href, e);
+  });
   p.catch(function() {
     tiffCache.delete(href);
   });
@@ -2638,7 +2653,7 @@ function vsiToHttps(name, vrtUrl, relative) {
   var n = String(name).trim();
   if (relative) return new URL(n, vrtUrl).href;
   var m;
-  if (m = /^\/vsicurl(?:_streaming)?\/(.*)$/.exec(n)) return m[1];
+  if (m = /^\/vsicurl(?:_streaming)?\/(.*)$/.exec(n)) return secureUrl(m[1]);
   if (m = /^\/vsis3(?:_streaming)?\/([^/]+)\/(.*)$/.exec(n)) {
     var u = new URL(vrtUrl, location.href);
     if (u.hostname.indexOf(m[1] + ".s3") === 0) return u.origin + "/" + m[2];
@@ -2699,17 +2714,40 @@ function parseVrt(text2, vrtUrl) {
       f.bands[bandNo] = sb ? +sb.textContent : 1;
     });
   });
+  var overviews = [];
+  var b1 = root.getElementsByTagName("VRTRasterBand")[0];
+  if (b1) Array.prototype.forEach.call(b1.children, function(ov) {
+    if (ov.nodeName !== "Overview") return;
+    var fn = ov.getElementsByTagName("SourceFilename")[0];
+    if (fn) overviews.push({ href: vsiToHttps(fn.textContent, vrtUrl, fn.getAttribute("relativeToVRT") === "1") });
+  });
   return {
     crs,
     gt,
     width: num(root, "rasterXSize", 0),
     height: num(root, "rasterYSize", 0),
     bands,
-    files: Array.from(files.values())
+    files: Array.from(files.values()),
+    overviews
   };
 }
 function hit(a, b) {
   return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
+}
+async function overviewRes(v, ov) {
+  if (ov.res) return ov.res;
+  var w;
+  if (/\.vrt(\?|$)/i.test(ov.href)) {
+    var r = await fetch(ov.href, { headers: { Range: "bytes=0-4095" } });
+    if (!r.ok) throw new Error("overview " + r.status + " " + ov.href);
+    var m = /rasterXSize="(\d+)"/.exec(await r.text());
+    if (!m) throw new Error("no rasterXSize in " + ov.href);
+    w = +m[1];
+  } else {
+    w = (await cogInfo(ov.href)).width;
+  }
+  ov.res = Math.abs(v.gt[1]) * v.width / w;
+  return ov.res;
 }
 function vrtCatalog(opts) {
   var url = secureUrl(opts.url);
@@ -2756,7 +2794,7 @@ function vrtCatalog(opts) {
       meta: { res: Math.abs(v.gt[1]), order: f.order }
     };
   }
-  return {
+  var cat = {
     kind: "vrt",
     label: url.split("/").pop(),
     capabilities: { cloud: false, time: false },
@@ -2783,8 +2821,62 @@ function vrtCatalog(opts) {
         })
       };
     },
+    // q.res (ground metres per output pixel, optional) picks an overview:
+    // the coarsest no coarser than the output, the same rule as COG
+    // overviews. A VRT overview is searched in turn; a single raster
+    // overview is one scene covering the mosaic.
     search: async function(q) {
       var v = await read();
+      cat.note = null;
+      if (q.res && v.overviews.length && q.res > Math.abs(v.gt[1]) * 1.05) {
+        var pick2 = null, skipped = [];
+        for (var i = v.overviews.length - 1; i >= 0; i--) {
+          var res;
+          try {
+            res = await overviewRes(v, v.overviews[i]);
+          } catch (e) {
+            var nm = decodeURIComponent(v.overviews[i].href.split("/").pop());
+            skipped.push(/Git LFS/.test(e.message || "") ? nm + " (in Git LFS, which GitHub does not serve to web pages)" : nm + " (" + (e.message || e) + ")");
+            continue;
+          }
+          if (res <= q.res * 1.05) {
+            pick2 = v.overviews[i];
+            break;
+          }
+        }
+        if (pick2) {
+          var name = decodeURIComponent(pick2.href.split("/").pop());
+          cat.note = "read from overview " + name + " (" + +pick2.res.toPrecision(3) + " m) for this region's pixel size; a smaller region reads finer data";
+        }
+        if (skipped.length) {
+          cat.note = (cat.note ? cat.note + "\n" : "") + "skipped overview(s): " + skipped.join("; ");
+        }
+        if (pick2) {
+          if (/\.vrt(\?|$)/i.test(pick2.href)) {
+            var sub = vrtCatalog({ url: pick2.href });
+            return sub.search(Object.assign({}, q, { res: null }));
+          }
+          var b = transformBbox(
+            [v.gt[0], v.gt[3] + v.height * v.gt[5], v.gt[0] + v.width * v.gt[1], v.gt[3]],
+            v.crs,
+            "EPSG:4326"
+          );
+          var meta = { b1: { band: 0, dataType: v.bands.length ? v.bands[0].dataType : "Float32" } };
+          if (v.bands.length && v.bands[0].nodata !== null) meta.b1.nodata = v.bands[0].nodata;
+          return [{
+            id: name,
+            day: UNDATED,
+            datetime: null,
+            bbox: b,
+            cloud: null,
+            crs: v.crs,
+            geometry: boxPolygon([v.gt[0], v.gt[3] + v.height * v.gt[5], v.gt[0] + v.width * v.gt[1], v.gt[3]], v.crs, 8),
+            assets: { b1: pick2.href },
+            assetMeta: meta,
+            meta: { res: pick2.res }
+          }];
+        }
+      }
       var roi = q.bbox ? transformBbox(q.bbox, "EPSG:4326", v.crs, 32) : null;
       var keep = v.files.filter(function(f) {
         return !roi || hit(f.extent, roi);
@@ -2794,6 +2886,7 @@ function vrtCatalog(opts) {
       });
     }
   };
+  return cat;
 }
 
 // lib/sources/zarr.js
@@ -4995,6 +5088,10 @@ var EXAMPLES = {
     ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"]
   ],
   vrt: [
+    [
+      "REMA 2 m with overviews to 1 km (Antarctica; the level follows the region size)",
+      "https://raw.githubusercontent.com/mdsumner/rema-ovr/main/REMA-2m_dem_ovr.vrt"
+    ],
     ["REMA v2 32 m (Antarctica)", PGC + "rema/mosaics/v2.0/32m_dem_tiles.vrt"],
     ["REMA v2 10 m", PGC + "rema/mosaics/v2.0/10m_dem_tiles.vrt"],
     ["ArcticDEM v4.1 32 m", PGC + "arcticdem/mosaics/v4.1/32m_dem_tiles.vrt"]
@@ -5409,7 +5506,13 @@ async function searchScenes(wantPreset) {
       bbox: state.roi,
       datetime: ($("from").value || "..") + "/" + ($("to").value || ".."),
       cloudMax: +$("cloud").value,
-      maxItems: +$("maxItems").value || 300
+      maxItems: +$("maxItems").value || 300,
+      // the output pixel size, for sources with overviews to pick a level
+      res: gridGroundRes(makeGrid(state.roi, {
+        crs: state.mapCrs,
+        extent: state.roiExt,
+        maxDim: +$("maxpx").value
+      }))
     });
     state.scenes = scenes;
     state.days = groupByDay(scenes);
@@ -5422,7 +5525,7 @@ async function searchScenes(wantPreset) {
     }
     renderDays();
     var ms = Math.round(performance.now() - t0);
-    setStatus(scenes.length + " scenes on " + state.days.length + " days in " + ms + " ms" + (scenes.length >= (+$("maxItems").value || 300) ? " (hit max items; narrow the dates)" : "") + (state.days.length ? "\nclick a day to load it" : ""));
+    setStatus(scenes.length + " scenes on " + state.days.length + " days in " + ms + " ms" + (scenes.length >= (+$("maxItems").value || 300) ? " (hit max items; narrow the dates)" : "") + (state.catalog.note ? "\n" + state.catalog.note : "") + (state.days.length ? "\nclick a day to load it" : ""));
   } finally {
     btn.disabled = false;
   }
@@ -6056,7 +6159,7 @@ async function loadImagery() {
       }).length;
       what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " + (tl.length - got) + " missing or failed" + (th ? ", " + th + " from cache" : "") + ")";
     }
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + ", chunk cache " + cacheMB() + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + ", chunk cache " + cacheMB() + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") + (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) {

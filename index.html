@@ -718,6 +718,8 @@ var EXAMPLES = {
     ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"]
   ],
   vrt: [
+    ["REMA 2 m with overviews to 1 km (Antarctica; the level follows the region size)",
+     "https://raw.githubusercontent.com/mdsumner/rema-ovr/main/REMA-2m_dem_ovr.vrt"],
     ["REMA v2 32 m (Antarctica)", PGC + "rema/mosaics/v2.0/32m_dem_tiles.vrt"],
     ["REMA v2 10 m", PGC + "rema/mosaics/v2.0/10m_dem_tiles.vrt"],
     ["ArcticDEM v4.1 32 m", PGC + "arcticdem/mosaics/v4.1/32m_dem_tiles.vrt"]
@@ -1073,7 +1075,10 @@ async function searchScenes(wantPreset) {
       bbox: state.roi,
       datetime: ($("from").value || "..") + "/" + ($("to").value || ".."),
       cloudMax: +$("cloud").value,
-      maxItems: +$("maxItems").value || 300
+      maxItems: +$("maxItems").value || 300,
+      // the output pixel size, for sources with overviews to pick a level
+      res: X.gridGroundRes(X.makeGrid(state.roi, { crs: state.mapCrs, extent: state.roiExt,
+                                                   maxDim: +$("maxpx").value }))
     });
     state.scenes = scenes;
     state.days = X.groupByDay(scenes);
@@ -1086,6 +1091,7 @@ async function searchScenes(wantPreset) {
     var ms = Math.round(performance.now() - t0);
     setStatus(scenes.length + " scenes on " + state.days.length + " days in " + ms + " ms" +
       (scenes.length >= (+$("maxItems").value || 300) ? " (hit max items; narrow the dates)" : "") +
+      (state.catalog.note ? "\n" + state.catalog.note : "") +
       (state.days.length ? "\nclick a day to load it" : ""));
   } finally {
     btn.disabled = false;
@@ -1663,7 +1669,8 @@ async function loadImagery() {
       grid.width + "x" + grid.height + " px at " + X.gridGroundRes(grid).toFixed(0) +
       " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached ? " (cached)" : "") +
       ", chunk cache " + cacheMB() +
-      (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+      (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") +
+      (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) { state.loading = null; $("load").disabled = false; }

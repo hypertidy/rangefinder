@@ -34,7 +34,12 @@ Two ways to open it locally:
    region picker and are outlined on the map, and extra bands such as
    `cloud` and `snow` join the band pickers. A **GDAL VRT mosaic** (default:
    REMA v2 32 m, Antarctica) is read once as the index of every file it
-   mosaics, and the files are outlined; **COG files** takes pasted URLs and
+   mosaics, and the files are outlined. A VRT's GDAL `<Overview>` elements
+   (nested VRTs or COGs) are used too: a search picks the coarsest overview
+   no coarser than the output pixel, so a whole-continent region reads a
+   coarse mosaic and a small one reads the full-resolution tiles (files in
+   Git LFS are skipped, since GitHub does not serve them to web pages);
+   **COG files** takes pasted URLs and
    reads only their headers to place them. Neither has a time axis or cloud
    cover, so those controls hide, and a search loads straight away. A **tile
    server** is an XYZ template (`{z}/{x}/{y}`, `{-y}`, `{q}`, `{s}`) or a
