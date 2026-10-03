@@ -1,0 +1,1661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!-- GENERATED from index.html + lib/ by dev/build_standalone.py; edit those, not this file. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rangefinder</title>
+<!--
+  rangefinder: point at a STAC API (or the wildtiles cube), draw a
+  region on the map, search scenes, and compose imagery client-side from
+  the raw COGs with windowed overview reads. No server, no credentials,
+  no build step. The layers live in lib/ (see README.md).
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.11.0/proj4.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.min.js"></script>
+<style>
+  :root { --bg: #10141a; --panel: #1a212b; --text: #d8e0ea; --muted: #8696a8;
+          --accent: #4fc3f7; --edge: #2a3542; --sel: #24425a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px/1.45 system-ui, sans-serif; }
+  #app { display: flex; height: 100%; }
+  #panel { width: 320px; min-width: 320px; padding: 14px 16px; background: var(--panel);
+           border-right: 1px solid var(--edge); overflow-y: auto; box-sizing: border-box; }
+  #map { flex: 1; background: #000; }
+  #map.drawing, #map.drawing .leaflet-interactive { cursor: crosshair; }
+  .coords { background: rgba(16,20,26,0.8); color: var(--text); padding: 2px 6px;
+            border-radius: 4px; font: 12px ui-monospace, monospace; }
+  h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: 0.4px; }
+  h2 { font-size: 11px; margin: 16px 0 2px; color: var(--accent); text-transform: uppercase;
+       letter-spacing: 0.8px; border-top: 1px solid var(--edge); padding-top: 10px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  label { display: block; margin: 9px 0 3px; color: var(--muted); font-size: 11px;
+          text-transform: uppercase; letter-spacing: 0.6px; }
+  input, select, button { width: 100%; box-sizing: border-box; padding: 6px 9px;
+          background: var(--bg); color: var(--text); border: 1px solid var(--edge);
+          border-radius: 6px; font: inherit; }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  button { margin-top: 10px; background: var(--accent); color: #06222e; border: none;
+           font-weight: 600; cursor: pointer; }
+  button.minor { background: var(--bg); color: var(--text); border: 1px solid var(--edge);
+                 font-weight: 400; }
+  button.minor.on { border-color: var(--accent); color: var(--accent); }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; min-width: 0; }
+  .row input[type=checkbox] { flex: 0 0 auto; width: auto; }
+  .row span { font-size: 13px; }
+  .hide { display: none; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  #days { margin-top: 8px; max-height: 210px; overflow-y: auto; border: 1px solid var(--edge);
+          border-radius: 6px; }
+  #days:empty { display: none; }
+  .day { display: flex; justify-content: space-between; padding: 4px 9px; font-size: 13px;
+         cursor: pointer; border-bottom: 1px solid var(--edge); }
+  .day:last-child { border-bottom: none; }
+  .day:hover { background: var(--bg); }
+  .day.sel { background: var(--sel); }
+  .day .n { color: var(--muted); font-size: 12px; }
+  #status { margin-top: 10px; font-size: 12px; color: var(--muted);
+            white-space: pre-wrap; min-height: 2.5em; }
+  #status .err { color: #ff8a80; }
+  input[type=range] { padding: 0; accent-color: var(--accent); }
+  table.lims { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  table.lims th { font-size: 11px; color: var(--muted); font-weight: 400; text-align: left;
+                  padding: 0 4px 2px 0; }
+  table.lims td { padding: 2px 4px 2px 0; }
+  table.lims th.cR { color: #ff8a80; }
+  table.lims th.cG { color: #b9f6ca; }
+  table.lims th.cB { color: #82b1ff; }
+  .foot { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--edge);
+          font-size: 11px; color: var(--muted); }
+  .foot code { color: var(--text); }
+  @media (max-width: 700px) {
+    #app { flex-direction: column-reverse; }
+    #panel { width: 100%; min-width: 0; height: 55%; border-right: none;
+             border-top: 1px solid var(--edge); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="panel">
+    <h1>rangefinder</h1>
+    <div class="sub">search a catalogue, draw a region, compose from the raw COGs</div>
+
+    <h2>source</h2>
+    <select id="src">
+      <option value="stac">STAC API</option>
+      <option value="wildtiles">wildtiles cube</option>
+    </select>
+    <div id="stacbox">
+      <label for="stacUrl">STAC API URL</label>
+      <input id="stacUrl" value="https://earth-search.aws.element84.com/v1" spellcheck="false">
+      <label for="coll">collection</label>
+      <div class="row">
+        <input id="coll" value="sentinel-2-l2a" list="colls" spellcheck="false">
+        <button id="listColl" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">list</button>
+      </div>
+      <datalist id="colls"></datalist>
+    </div>
+    <div id="wtbox" class="hide">
+      <label for="wtBucket">bucket</label>
+      <input id="wtBucket" spellcheck="false">
+      <div class="row">
+        <div><label for="wtRes">resolution (m)</label>
+          <select id="wtRes"><option>10</option><option>60</option></select></div>
+        <div><label for="wtTile">jump to tile</label>
+          <input id="wtTile" placeholder="41S_R0010_0055_0347" list="tiles" spellcheck="false"></div>
+      </div>
+      <datalist id="tiles">
+        <option value="41S_R0010_0055_0347">auster center</option>
+        <option value="43S_R0060_0005_0094">heard (60m)</option>
+        <option value="57S_R0010_0049_0547">macquarie station</option>
+      </datalist>
+    </div>
+
+    <h2>region</h2>
+    <div class="row">
+      <button id="draw" class="minor">draw on map</button>
+      <button id="useView" class="minor">use view</button>
+    </div>
+    <div id="roiInfo" class="note">no region yet: drag a box after "draw on map"</div>
+
+    <h2>scenes</h2>
+    <div class="row">
+      <div><label for="from">from</label><input id="from" type="date"></div>
+      <div><label for="to">to</label><input id="to" type="date"></div>
+    </div>
+    <div class="row">
+      <div><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
+      <div><label for="maxItems">max items</label><input id="maxItems" type="number" value="300" min="1"></div>
+    </div>
+    <button id="search">Search scenes</button>
+    <div id="days"></div>
+
+    <h2>composite</h2>
+    <select id="preset">
+      <option value="visual">TCI (baked true color, fast)</option>
+      <option value="red,green,blue">true color (raw bands)</option>
+      <option value="nir,red,green">false color IR (vegetation)</option>
+      <option value="swir16,nir,red">SWIR (snow/ice vs cloud)</option>
+      <option value="swir22,swir16,nir">geology</option>
+      <option value="custom">custom...</option>
+    </select>
+    <div id="bands" class="hide">
+      <div class="row">
+        <div><label>R</label><select id="bR"></select></div>
+        <div><label>G</label><select id="bG"></select></div>
+        <div><label>B</label><select id="bB"></select></div>
+      </div>
+    </div>
+    <div id="stretchbox" class="hide">
+      <div class="row">
+        <div><label for="limits">limits</label>
+          <select id="limits">
+            <option value="pct">percentile</option>
+            <option value="man">manual</option>
+          </select></div>
+        <div><label for="curve">stretch curve</label>
+          <select id="curve">
+            <option value="linear">linear</option>
+            <option value="sqrt">sqrt</option>
+            <option value="log">log</option>
+          </select></div>
+      </div>
+      <div class="row">
+        <div><label for="plo">low %</label><input id="plo" type="number" value="2" min="0" max="50" step="0.5"></div>
+        <div><label for="phi">high %</label><input id="phi" type="number" value="98" min="50" max="100" step="0.5"></div>
+      </div>
+      <label class="row" style="margin-top:8px" title="one pair of limits from all three bands pooled, which keeps the colour balance">
+        <input type="checkbox" id="joint"> <span>same limits for all bands</span>
+      </label>
+      <table class="lims">
+        <tr><th></th><th>min</th><th>max</th></tr>
+        <tr><th class="cR">R</th><td><input id="minR" spellcheck="false"></td><td><input id="maxR" spellcheck="false"></td></tr>
+        <tr><th class="cG">G</th><td><input id="minG" spellcheck="false"></td><td><input id="maxG" spellcheck="false"></td></tr>
+        <tr><th class="cB">B</th><td><input id="minB" spellcheck="false"></td><td><input id="maxB" spellcheck="false"></td></tr>
+      </table>
+      <div class="note">limits fill in from the percentiles; typing one switches to manual</div>
+      <label for="gamma">gamma <span id="gval">1.0</span></label>
+      <input type="range" id="gamma" min="30" max="300" value="100">
+      <label for="offset">L2A offset</label>
+      <select id="offset">
+        <option value="auto">auto (from scene metadata)</option>
+        <option value="-1000">always -1000</option>
+        <option value="0">off (stored DN)</option>
+      </select>
+      <div class="note" id="offNote"></div>
+      <button id="resetStretch" class="minor">reset to 2-98% auto</button>
+    </div>
+    <div class="row">
+      <div><label for="maxpx">output size (px)</label>
+        <select id="maxpx"><option>1024</option><option selected>1536</option>
+          <option>2048</option><option>3072</option></select></div>
+      <div><label for="maxScenes">max scenes</label>
+        <input id="maxScenes" type="number" value="6" min="1" max="40"></div>
+    </div>
+    <button id="load">Load imagery</button>
+
+    <label for="opacity">overlay opacity</label>
+    <input type="range" id="opacity" min="0" max="100" value="100">
+    <label class="row" style="margin-top:8px">
+      <input type="checkbox" id="showImg" checked> <span>show imagery (key: i)</span>
+    </label>
+    <label class="row" style="margin-top:4px">
+      <input type="checkbox" id="showFoot" checked> <span>show scene footprints</span>
+    </label>
+
+    <div id="status">ready</div>
+
+    <div class="foot">
+      Scenes come from a STAC <code>/search</code> (default Earth Search,
+      Sentinel-2 L2A on AWS Open Data) or the wildtiles inventory. Pixels
+      are read straight from the COGs by HTTP range request at the overview
+      level that suits the region, warped onto one Web Mercator grid and
+      mosaicked least-cloudy-first. Stretch and composition happen here on
+      the raw numbers. The URL hash is a permalink.
+    </div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script type="module">
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+
+// lib/explorer.js
+var explorer_exports = {};
+__export(explorer_exports, {
+  BAND_ALIASES: () => BAND_ALIASES,
+  HARMONISED_ARCHIVES: () => HARMONISED_ARCHIVES,
+  L2A_OFFSET: () => L2A_OFFSET,
+  TRANSFERS: () => TRANSFERS,
+  WILDTILES_BUCKET: () => WILDTILES_BUCKET,
+  autoStretch: () => autoStretch,
+  bboxIntersects: () => bboxIntersects,
+  ensureCrs: () => ensureCrs,
+  geometryBbox: () => geometryBbox,
+  gridGroundRes: () => gridGroundRes,
+  gridLonLatBounds: () => gridLonLatBounds,
+  groupByDay: () => groupByDay,
+  listCollections: () => listCollections,
+  loadComposite: () => loadComposite,
+  makeGrid: () => makeGrid,
+  makeTileId: () => makeTileId,
+  mosaic: () => mosaic,
+  openCog: () => openCog,
+  parseTileId: () => parseTileId,
+  percentiles: () => percentiles,
+  readWarped: () => readWarped,
+  renderRGBA: () => renderRGBA,
+  rgbaToCanvas: () => rgbaToCanvas,
+  sceneOffset: () => sceneOffset,
+  scenesOffset: () => scenesOffset,
+  solarDay: () => solarDay,
+  stacCatalog: () => stacCatalog,
+  tileLonLatBbox: () => tileLonLatBbox,
+  tilesForBbox: () => tilesForBbox,
+  transform: () => transform,
+  transformBbox: () => transformBbox,
+  utmCode: () => utmCode,
+  utmZoneOf: () => utmZoneOf,
+  wildtilesCatalog: () => wildtilesCatalog
+});
+
+// lib/geo.js
+function proj() {
+  var p = globalThis.proj4;
+  if (!p) throw new Error("proj4 is not loaded");
+  return p;
+}
+function ensureCrs(code) {
+  var p = proj();
+  if (p.defs(code)) return code;
+  var m = /^EPSG:(32[67])(\d{2})$/.exec(code);
+  if (m) {
+    p.defs(code, "+proj=utm +zone=" + +m[2] + (m[1] === "327" ? " +south" : "") + " +datum=WGS84 +units=m +no_defs");
+    return code;
+  }
+  throw new Error("unknown CRS " + code + " (register it with proj4.defs)");
+}
+function utmCode(zone, south) {
+  return "EPSG:" + (south ? "327" : "326") + String(zone).padStart(2, "0");
+}
+function utmZoneOf(lon) {
+  return Math.min(60, Math.max(1, Math.floor((lon + 180) / 6) + 1));
+}
+function transform(from, to, xy) {
+  return proj()(ensureCrs(from), ensureCrs(to), xy);
+}
+function transformBbox(bbox, from, to, n) {
+  n = n || 16;
+  var f = proj()(ensureCrs(from), ensureCrs(to));
+  var xs = [], ys = [];
+  for (var i = 0; i <= n; i++) {
+    var fx = bbox[0] + (bbox[2] - bbox[0]) * i / n;
+    var fy = bbox[1] + (bbox[3] - bbox[1]) * i / n;
+    [[fx, bbox[1]], [fx, bbox[3]], [bbox[0], fy], [bbox[2], fy]].forEach(function(pt) {
+      var q = f.forward(pt);
+      if (isFinite(q[0]) && isFinite(q[1])) {
+        xs.push(q[0]);
+        ys.push(q[1]);
+      }
+    });
+  }
+  return [
+    Math.min.apply(null, xs),
+    Math.min.apply(null, ys),
+    Math.max.apply(null, xs),
+    Math.max.apply(null, ys)
+  ];
+}
+function bboxIntersects(a, b) {
+  return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
+}
+function geometryBbox(g) {
+  var xs = [], ys = [];
+  (function walk(c) {
+    if (typeof c[0] === "number") {
+      xs.push(c[0]);
+      ys.push(c[1]);
+      return;
+    }
+    c.forEach(walk);
+  })(g.coordinates);
+  return [
+    Math.min.apply(null, xs),
+    Math.min.apply(null, ys),
+    Math.max.apply(null, xs),
+    Math.max.apply(null, ys)
+  ];
+}
+function makeGrid(lonlatBbox, opts) {
+  opts = opts || {};
+  var bb = transformBbox(lonlatBbox, "EPSG:4326", "EPSG:3857", 8);
+  var w = bb[2] - bb[0], h = bb[3] - bb[1];
+  var maxDim = opts.maxDim || 1536;
+  var size = Math.max(opts.pixelSize || 0, Math.max(w, h) / maxDim);
+  if (opts.minGroundRes) {
+    var lat = (lonlatBbox[1] + lonlatBbox[3]) / 2 * Math.PI / 180;
+    size = Math.max(size, opts.minGroundRes / Math.cos(lat));
+  }
+  return {
+    crs: "EPSG:3857",
+    bbox: bb,
+    width: Math.max(1, Math.round(w / size)),
+    height: Math.max(1, Math.round(h / size))
+  };
+}
+function gridLonLatBounds(grid) {
+  var sw = transform(grid.crs, "EPSG:4326", [grid.bbox[0], grid.bbox[1]]);
+  var ne = transform(grid.crs, "EPSG:4326", [grid.bbox[2], grid.bbox[3]]);
+  return [sw[0], sw[1], ne[0], ne[1]];
+}
+function gridGroundRes(grid) {
+  var c = gridLonLatBounds(grid);
+  var lat = (c[1] + c[3]) / 2 * Math.PI / 180;
+  return (grid.bbox[2] - grid.bbox[0]) / grid.width * Math.cos(lat);
+}
+function solarDay(datetime, lon) {
+  var t = Date.parse(datetime);
+  if (!isFinite(t)) return String(datetime).slice(0, 10);
+  return new Date(t + (lon || 0) / 15 * 36e5).toISOString().slice(0, 10);
+}
+
+// lib/render.js
+var LOG_K = 100;
+var TRANSFERS = {
+  linear: function(x) {
+    return x;
+  },
+  sqrt: function(x) {
+    return Math.sqrt(x);
+  },
+  log: function(x) {
+    return Math.log(1 + LOG_K * x) / Math.log(1 + LOG_K);
+  }
+};
+var L2A_OFFSET = -1e3;
+var HARMONISED_ARCHIVES = [/\/sentinel-s2-l2a-cogs\//];
+function baselineNumber(b) {
+  if (b === null || b === void 0) return null;
+  var n = parseFloat(String(b));
+  return isFinite(n) ? n : null;
+}
+function sceneOffset(scene) {
+  var m = scene && scene.meta || {};
+  if (m.dnOffset !== void 0 && m.dnOffset !== null) return m.dnOffset;
+  var b = baselineNumber(m.processingBaseline);
+  if (b === null) return null;
+  if (b < 4) return 0;
+  var hrefs = Object.keys(scene.assets || {}).map(function(k) {
+    return scene.assets[k];
+  });
+  var harmonised = hrefs.some(function(h) {
+    return HARMONISED_ARCHIVES.some(function(re) {
+      return re.test(h);
+    });
+  });
+  return harmonised ? 0 : L2A_OFFSET;
+}
+function scenesOffset(scenes) {
+  var counts = /* @__PURE__ */ new Map(), known = 0;
+  (scenes || []).forEach(function(s) {
+    var o = sceneOffset(s);
+    if (o === null) return;
+    known++;
+    counts.set(o, (counts.get(o) || 0) + 1);
+  });
+  var best = 0, n = -1;
+  counts.forEach(function(c, o) {
+    if (c > n) {
+      best = o;
+      n = c;
+    }
+  });
+  return { offset: best, mixed: counts.size > 1, known };
+}
+function offsets3(o) {
+  if (o === void 0 || o === null) return [0, 0, 0];
+  if (typeof o === "number") return [o, o, o];
+  return [o[0] || 0, o[1] || 0, o[2] || 0];
+}
+function mosaic(grid, layers, kind, keys) {
+  var npx = grid.width * grid.height;
+  var first = layers[0];
+  var Ctor = first.bands[0].constructor;
+  var ch = [new Ctor(npx), new Ctor(npx), new Ctor(npx)];
+  var valid = new Uint8Array(npx);
+  layers.forEach(function(L2) {
+    var v = L2.valid, b = L2.bands;
+    for (var i = 0; i < npx; i++) {
+      if (valid[i] || !v[i]) continue;
+      ch[0][i] = b[0][i];
+      ch[1][i] = b[1][i];
+      ch[2][i] = b[2][i];
+      valid[i] = 1;
+    }
+  });
+  return { grid, kind, channels: ch, valid, keys: keys || [] };
+}
+function sample(channels, valid) {
+  var n = channels[0].length;
+  var stride = Math.max(1, Math.floor(n * channels.length / 25e4));
+  var buf = new Float64Array(Math.ceil(n / stride) * channels.length);
+  var m = 0;
+  channels.forEach(function(channel) {
+    for (var i = 0; i < n; i += stride) {
+      var v = channel[i];
+      if (valid[i] && v > 0 && v === v) buf[m++] = v;
+    }
+  });
+  return buf.subarray(0, m).sort();
+}
+function pick(s, lo, hi) {
+  var m = s.length;
+  if (m === 0) return [0, 1];
+  var a = s[Math.floor((m - 1) * lo)], b = s[Math.ceil((m - 1) * hi)];
+  if (b <= a) b = a + 1;
+  return [a, b];
+}
+function percentiles(channel, valid, lo, hi) {
+  return pick(sample([channel], valid), lo, hi);
+}
+function autoStretch(comp, lo, hi, opts) {
+  lo = lo === void 0 ? 0.02 : lo;
+  hi = hi === void 0 ? 0.98 : hi;
+  opts = opts || {};
+  var off = offsets3(opts.offset);
+  var st;
+  if (opts.joint) {
+    var j = pick(sample(comp.channels, comp.valid), lo, hi);
+    st = [j.slice(), j.slice(), j.slice()];
+  } else {
+    st = comp.channels.map(function(c) {
+      return percentiles(c, comp.valid, lo, hi);
+    });
+  }
+  return st.map(function(s, c) {
+    return [s[0] + off[c], s[1] + off[c]];
+  });
+}
+function renderRGBA(comp, params) {
+  params = params || {};
+  var npx = comp.grid.width * comp.grid.height;
+  var out = new Uint8ClampedArray(npx * 4);
+  var ch = comp.channels, valid = comp.valid;
+  if (comp.kind === "rgb8" && !params.stretch) {
+    for (var i = 0; i < npx; i++) {
+      var o = i * 4;
+      out[o] = ch[0][i];
+      out[o + 1] = ch[1][i];
+      out[o + 2] = ch[2][i];
+      out[o + 3] = valid[i] ? 255 : 0;
+    }
+    return out;
+  }
+  var st = params.stretch || [[0, 255], [0, 255], [0, 255]];
+  var off = offsets3(params.offset);
+  var inv = 1 / (params.gamma || 1);
+  var tf = TRANSFERS[params.transfer || "linear"] || TRANSFERS.linear;
+  var N = 4096;
+  var lut = new Uint8ClampedArray(N + 1);
+  for (var k = 0; k <= N; k++) lut[k] = Math.round(255 * Math.pow(tf(k / N), inv));
+  var A = [], B = [];
+  for (var c = 0; c < 3; c++) {
+    var lo = st[c][0], hi = st[c][1];
+    var span = hi - lo || 1;
+    A.push(N / span);
+    B.push((off[c] - lo) * N / span);
+  }
+  for (var j = 0; j < npx; j++) {
+    var p = j * 4;
+    if (!valid[j]) {
+      out[p + 3] = 0;
+      continue;
+    }
+    for (var c2 = 0; c2 < 3; c2++) {
+      var x = ch[c2][j] * A[c2] + B[c2];
+      x = x < 0 ? 0 : x > N ? N : x;
+      out[p + c2] = lut[Math.round(x)];
+    }
+    out[p + 3] = 255;
+  }
+  return out;
+}
+function rgbaToCanvas(rgba, width, height) {
+  var cv = document.createElement("canvas");
+  cv.width = width;
+  cv.height = height;
+  cv.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
+  return cv;
+}
+
+// lib/cog.js
+var LATTICE = 16;
+var tiffCache = /* @__PURE__ */ new Map();
+var TIFF_CACHE_MAX = 96;
+function geotiff() {
+  var g = globalThis.GeoTIFF;
+  if (!g) throw new Error("geotiff.js is not loaded");
+  return g;
+}
+function openCog(href) {
+  var hit = tiffCache.get(href);
+  if (hit) {
+    tiffCache.delete(href);
+    tiffCache.set(href, hit);
+    return hit;
+  }
+  var p = geotiff().fromUrl(href, { allowFullFile: false });
+  p.catch(function() {
+    tiffCache.delete(href);
+  });
+  tiffCache.set(href, p);
+  if (tiffCache.size > TIFF_CACHE_MAX) tiffCache.delete(tiffCache.keys().next().value);
+  return p;
+}
+function crsFromKeys(image) {
+  var k = image.getGeoKeys() || {};
+  if (k.ProjectedCSTypeGeoKey && k.ProjectedCSTypeGeoKey !== 32767) {
+    return "EPSG:" + k.ProjectedCSTypeGeoKey;
+  }
+  if (k.GeographicTypeGeoKey && k.GeographicTypeGeoKey !== 32767) {
+    return "EPSG:" + k.GeographicTypeGeoKey;
+  }
+  throw new Error("no EPSG code in GeoTIFF keys; pass opts.crs");
+}
+async function levels(tiff) {
+  var n = await tiff.getImageCount();
+  var out = [];
+  for (var i = 0; i < n; i++) {
+    var im = await tiff.getImage(i);
+    var sub = im.fileDirectory.NewSubfileType || 0;
+    if (i > 0 && sub & 4) continue;
+    out.push(im);
+  }
+  return out;
+}
+function lattice(grid, toSrc, origin, res) {
+  var W = grid.width, H = grid.height;
+  var xs = [], ys = [];
+  for (var px = 0; ; px += LATTICE) {
+    xs.push(Math.min(px, W - 1));
+    if (px >= W - 1) break;
+  }
+  for (var py = 0; ; py += LATTICE) {
+    ys.push(Math.min(py, H - 1));
+    if (py >= H - 1) break;
+  }
+  var dx = (grid.bbox[2] - grid.bbox[0]) / W, dy = (grid.bbox[3] - grid.bbox[1]) / H;
+  var nx = xs.length, ny = ys.length;
+  var col = new Float64Array(nx * ny), row = new Float64Array(nx * ny);
+  for (var j = 0; j < ny; j++) {
+    for (var i = 0; i < nx; i++) {
+      var X = grid.bbox[0] + (xs[i] + 0.5) * dx;
+      var Y = grid.bbox[3] - (ys[j] + 0.5) * dy;
+      var s = toSrc.forward([X, Y]);
+      var k = j * nx + i;
+      col[k] = (s[0] - origin[0]) / res[0];
+      row[k] = (s[1] - origin[1]) / res[1];
+    }
+  }
+  return { xs, ys, col, row };
+}
+async function readWarped(href, grid, opts) {
+  opts = opts || {};
+  var tiff = await openCog(href);
+  var lv = await levels(tiff);
+  var base = lv[0];
+  var W0 = base.getWidth(), H0 = base.getHeight();
+  var origin = base.getOrigin(), res = base.getResolution();
+  var crs = ensureCrs(opts.crs || crsFromKeys(base));
+  var toSrc = globalThis.proj4(ensureCrs(grid.crs), crs);
+  var lat = lattice(grid, toSrc, origin, res);
+  var c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+  for (var k = 0; k < lat.col.length; k++) {
+    var c = lat.col[k], r = lat.row[k];
+    if (!isFinite(c) || !isFinite(r)) continue;
+    if (c < c0) c0 = c;
+    if (c > c1) c1 = c;
+    if (r < r0) r0 = r;
+    if (r > r1) r1 = r;
+  }
+  c0 = Math.max(0, Math.floor(c0));
+  r0 = Math.max(0, Math.floor(r0));
+  c1 = Math.min(W0, Math.ceil(c1) + 1);
+  r1 = Math.min(H0, Math.ceil(r1) + 1);
+  if (!(c1 > c0 && r1 > r0)) return null;
+  var nx = lat.xs.length, ny = lat.ys.length;
+  var mi = Math.floor((nx - 1) / 2), mj = Math.floor((ny - 1) / 2);
+  var scale = 1;
+  if (nx > 1) {
+    var a = mj * nx + mi, b = a + 1;
+    scale = Math.hypot(lat.col[b] - lat.col[a], lat.row[b] - lat.row[a]) / (lat.xs[mi + 1] - lat.xs[mi]);
+  }
+  var im = base, fx = 1, fy = 1;
+  for (var i = 1; i < lv.length; i++) {
+    var sx = W0 / lv[i].getWidth(), sy = H0 / lv[i].getHeight();
+    if (sx <= scale * 1.05) {
+      im = lv[i];
+      fx = sx;
+      fy = sy;
+    }
+  }
+  var Wl = im.getWidth(), Hl = im.getHeight();
+  var wx0 = Math.max(0, Math.floor(c0 / fx)), wy0 = Math.max(0, Math.floor(r0 / fy));
+  var wx1 = Math.min(Wl, Math.ceil(c1 / fx)), wy1 = Math.min(Hl, Math.ceil(r1 / fy));
+  if (!(wx1 > wx0 && wy1 > wy0)) return null;
+  var ww = wx1 - wx0, wh = wy1 - wy0;
+  var src = await im.readRasters({
+    window: [wx0, wy0, wx1, wy1],
+    interleave: false,
+    signal: opts.signal
+  });
+  var nb = src.length;
+  var nd = base.getGDALNoData();
+  if (nd === null || nd === void 0) nd = opts.nodata !== void 0 ? opts.nodata : 0;
+  var W = grid.width, H = grid.height, npx = W * H;
+  var Ctor = src[0].constructor;
+  var bands = [];
+  for (var bi = 0; bi < nb; bi++) {
+    var arr = new Ctor(npx);
+    if (nd !== 0) arr.fill(nd);
+    bands.push(arr);
+  }
+  var valid = new Uint8Array(npx);
+  var any = false;
+  for (var j = 0; j < ny - 1 || ny === 1 && j === 0; j++) {
+    var ya = lat.ys[j], yb = ny > 1 ? lat.ys[j + 1] : ya;
+    var yEnd = j + 1 >= ny - 1 ? yb : yb - 1;
+    for (var i2 = 0; i2 < nx - 1 || nx === 1 && i2 === 0; i2++) {
+      var xa = lat.xs[i2], xb = nx > 1 ? lat.xs[i2 + 1] : xa;
+      var xEnd = i2 + 1 >= nx - 1 ? xb : xb - 1;
+      var k00 = j * nx + i2, k10 = nx > 1 ? k00 + 1 : k00;
+      var k01 = ny > 1 ? k00 + nx : k00, k11 = ny > 1 ? k10 + nx : k10;
+      var c00 = lat.col[k00], c10 = lat.col[k10], c01 = lat.col[k01], c11 = lat.col[k11];
+      var q00 = lat.row[k00], q10 = lat.row[k10], q01 = lat.row[k01], q11 = lat.row[k11];
+      if (!(isFinite(c00) && isFinite(c10) && isFinite(c01) && isFinite(c11))) continue;
+      var spanx = xb - xa || 1, spany = yb - ya || 1;
+      for (var y = ya; y <= yEnd; y++) {
+        var ty = (y - ya) / spany;
+        var cl = c00 + (c01 - c00) * ty, cr = c10 + (c11 - c10) * ty;
+        var ql = q00 + (q01 - q00) * ty, qr = q10 + (q11 - q10) * ty;
+        var rowOff = y * W;
+        for (var x = xa; x <= xEnd; x++) {
+          var tx = (x - xa) / spanx;
+          var sc = Math.floor((cl + (cr - cl) * tx) / fx) - wx0;
+          var sr = Math.floor((ql + (qr - ql) * tx) / fy) - wy0;
+          if (sc < 0 || sr < 0 || sc >= ww || sr >= wh) continue;
+          var si = sr * ww + sc, o = rowOff + x, ok = false;
+          for (var b2 = 0; b2 < nb; b2++) {
+            var v = src[b2][si];
+            bands[b2][o] = v;
+            if (v !== nd && v === v) ok = true;
+          }
+          if (ok) {
+            valid[o] = 1;
+            any = true;
+          }
+        }
+      }
+    }
+  }
+  if (!any) return null;
+  return {
+    bands,
+    valid,
+    nodata: nd,
+    level: lv.indexOf(im),
+    window: [wx0, wy0, wx1, wy1]
+  };
+}
+
+// lib/sources/stac.js
+var BAND_ALIASES = {
+  visual: ["visual", "TCI", "tci", "visual_10m"],
+  coastal: ["coastal", "B01"],
+  blue: ["blue", "B02"],
+  green: ["green", "B03"],
+  red: ["red", "B04"],
+  rededge1: ["rededge1", "B05"],
+  rededge2: ["rededge2", "B06"],
+  rededge3: ["rededge3", "B07"],
+  nir: ["nir", "B08"],
+  nir08: ["nir08", "B8A"],
+  nir09: ["nir09", "B09"],
+  swir16: ["swir16", "B11"],
+  swir22: ["swir22", "B12"],
+  scl: ["scl", "SCL"],
+  aot: ["aot", "AOT"],
+  wvp: ["wvp", "WVP"]
+};
+function commonName(asset) {
+  var b = asset["eo:bands"] || asset.bands;
+  if (b && b.length === 1) return b[0].common_name || b[0]["eo:common_name"] || b[0].name;
+  return null;
+}
+function resolveAssets(item) {
+  var out = {};
+  var assets = item.assets || {};
+  var lower = {};
+  Object.keys(assets).forEach(function(k) {
+    lower[k.toLowerCase()] = k;
+  });
+  Object.keys(BAND_ALIASES).forEach(function(key) {
+    var names = BAND_ALIASES[key];
+    for (var i = 0; i < names.length; i++) {
+      var hit = assets[names[i]] ? names[i] : lower[names[i].toLowerCase()];
+      if (hit && /tiff|tif/i.test(assets[hit].type || "image/tiff")) {
+        out[key] = assets[hit].href;
+        return;
+      }
+    }
+    Object.keys(assets).forEach(function(k) {
+      var a = assets[k];
+      if (!out[key] && commonName(a) === key && /tiff/i.test(a.type || "")) out[key] = a.href;
+    });
+  });
+  return out;
+}
+function itemToScene(item) {
+  var p = item.properties || {};
+  var bbox = item.bbox || (item.geometry ? geometryBbox(item.geometry) : null);
+  var lon = bbox ? (bbox[0] + bbox[2]) / 2 : 0;
+  var epsg = p["proj:epsg"] ? "EPSG:" + p["proj:epsg"] : p["proj:code"] || null;
+  return {
+    id: item.id,
+    datetime: p.datetime,
+    day: solarDay(p.datetime, lon),
+    geometry: item.geometry,
+    bbox,
+    cloud: p["eo:cloud_cover"] !== void 0 ? p["eo:cloud_cover"] : null,
+    crs: epsg,
+    assets: resolveAssets(item),
+    meta: {
+      collection: item.collection,
+      platform: p.platform,
+      grid: p["grid:code"] || p["s2:mgrs_tile"] || null,
+      processingBaseline: p["s2:processing_baseline"] || null,
+      boaOffsetApplied: p["earthsearch:boa_offset_applied"],
+      nodataPct: p["s2:nodata_pixel_percentage"]
+    }
+  };
+}
+function trimSlash(u) {
+  return u.replace(/\/+$/, "");
+}
+function stacCatalog(opts) {
+  var root = trimSlash(opts.url);
+  var collection = opts.collection;
+  return {
+    kind: "stac",
+    label: root + " : " + collection,
+    bands: Object.keys(BAND_ALIASES),
+    search: async function(q) {
+      var maxItems = q.maxItems || 500;
+      var body = { collections: [collection], bbox: q.bbox, limit: Math.min(100, maxItems) };
+      if (q.datetime) body.datetime = q.datetime.split("/").map(function(d, i) {
+        return d.length === 10 ? d + (i === 0 ? "T00:00:00Z" : "T23:59:59Z") : d;
+      }).join("/");
+      if (q.cloudMax !== void 0 && q.cloudMax < 100) {
+        body.query = { "eo:cloud_cover": { lte: q.cloudMax } };
+      }
+      var req = { url: root + "/search", method: "POST", body };
+      var items = [];
+      while (req && items.length < maxItems) {
+        var r = await fetch(req.url, req.method === "GET" ? { signal: q.signal, headers: { Accept: "application/geo+json" } } : {
+          method: "POST",
+          signal: q.signal,
+          headers: { "Content-Type": "application/json", Accept: "application/geo+json" },
+          body: JSON.stringify(req.body)
+        });
+        if (!r.ok && req.body && req.body.query && r.status === 400) {
+          delete req.body.query;
+          delete body.query;
+          continue;
+        }
+        if (!r.ok) throw new Error("STAC search " + r.status + " " + (await r.text()).slice(0, 200));
+        var fc = await r.json();
+        items = items.concat(fc.features || []);
+        var next = (fc.links || []).filter(function(l) {
+          return l.rel === "next";
+        })[0];
+        req = next ? {
+          url: next.href,
+          method: (next.method || "GET").toUpperCase(),
+          body: next.body ? next.merge ? Object.assign({}, req.body, next.body) : next.body : null
+        } : null;
+        if (req && req.method === "POST" && !req.body) req.body = body;
+      }
+      var scenes = items.slice(0, maxItems).map(itemToScene);
+      if (q.cloudMax !== void 0 && q.cloudMax < 100) {
+        scenes = scenes.filter(function(s) {
+          return s.cloud === null || s.cloud <= q.cloudMax;
+        });
+      }
+      return scenes;
+    }
+  };
+}
+async function listCollections(url, signal) {
+  var r = await fetch(trimSlash(url) + "/collections", { signal });
+  if (!r.ok) throw new Error("collections " + r.status);
+  var j = await r.json();
+  return (j.collections || []).map(function(c) {
+    return { id: c.id, title: c.title || c.id };
+  });
+}
+
+// lib/sources/wildtiles.js
+var WILDTILES_BUCKET = "https://projects.pawsey.org.au/wildtiles";
+var OX = 14e4;
+var OY = 2e4;
+var NPIX = 720;
+var BANDS = [
+  "visual",
+  "red",
+  "green",
+  "blue",
+  "nir",
+  "nir08",
+  "nir09",
+  "coastal",
+  "rededge1",
+  "rededge2",
+  "rededge3",
+  "swir16",
+  "swir22",
+  "aot",
+  "wvp"
+];
+var HYPARQUET = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
+function parseTileId(id) {
+  var m = /^(\d{2})S_R(\d{4})_(\d{4})_(\d{4})$/.exec(String(id).trim());
+  if (!m) throw new Error("bad tile id: " + id);
+  return { zone: +m[1], res: +m[2], col: +m[3], row: +m[4] };
+}
+function makeTileId(t) {
+  var p = function(n) {
+    return String(n).padStart(4, "0");
+  };
+  return String(t.zone).padStart(2, "0") + "S_R" + p(t.res) + "_" + p(t.col) + "_" + p(t.row);
+}
+function tileExtent(t) {
+  var ts = NPIX * t.res;
+  return [OX + t.col * ts, OY + t.row * ts, OX + (t.col + 1) * ts, OY + (t.row + 1) * ts];
+}
+function tileLonLatBbox(t, pad) {
+  pad = pad || 0;
+  var e = tileExtent(t), ts = NPIX * t.res;
+  return transformBbox(
+    [e[0] - pad * ts, e[1] - pad * ts, e[2] + pad * ts, e[3] + pad * ts],
+    utmCode(t.zone, true),
+    "EPSG:4326"
+  );
+}
+function tilesForBbox(bbox, res, maxTiles) {
+  var lon = (bbox[0] + bbox[2]) / 2;
+  var zone = utmZoneOf(lon);
+  var e = transformBbox(bbox, "EPSG:4326", utmCode(zone, true));
+  var ts = NPIX * res;
+  var ca = Math.floor((e[0] - OX) / ts), cb = Math.floor((e[2] - OX) / ts);
+  var ra = Math.floor((e[1] - OY) / ts), rb = Math.floor((e[3] - OY) / ts);
+  var n = (cb - ca + 1) * (rb - ra + 1);
+  if (n > (maxTiles || 400)) throw new Error("region covers " + n + " wildtiles; draw a smaller one");
+  var out = [];
+  for (var c = ca; c <= cb; c++) for (var r = ra; r <= rb; r++) {
+    if (c >= 0 && r >= 0) out.push({ zone, res, col: c, row: r });
+  }
+  return out;
+}
+function wildtilesCatalog(opts) {
+  opts = opts || {};
+  var bucket = (opts.bucket || WILDTILES_BUCKET).replace(/\/+$/, "");
+  var res = opts.res || 10;
+  var inventory = null;
+  function loadInventory() {
+    if (inventory) return inventory;
+    inventory = (async function() {
+      var hp = await import(HYPARQUET);
+      var file = await hp.asyncBufferFromUrl({ url: bucket + "/index/inventory.parquet" });
+      var rows = await hp.parquetReadObjects({ file, columns: ["tile_id", "band", "solarday"] });
+      var idx = /* @__PURE__ */ new Map();
+      rows.forEach(function(row) {
+        var d = row.solarday instanceof Date ? row.solarday.toISOString().slice(0, 10) : String(row.solarday).slice(0, 10);
+        var t = idx.get(row.tile_id);
+        if (!t) {
+          t = /* @__PURE__ */ new Map();
+          idx.set(row.tile_id, t);
+        }
+        var s = t.get(d);
+        if (!s) {
+          s = /* @__PURE__ */ new Set();
+          t.set(d, s);
+        }
+        s.add(row.band);
+      });
+      return idx;
+    })();
+    inventory.catch(function() {
+      inventory = null;
+    });
+    return inventory;
+  }
+  return {
+    kind: "wildtiles",
+    label: "wildtiles " + bucket,
+    bands: BANDS,
+    search: async function(q) {
+      var tiles = tilesForBbox(q.bbox, res);
+      var idx = await loadInventory();
+      var range = (q.datetime || "0000-01-01/9999-12-31").split("/");
+      var scenes = [];
+      tiles.forEach(function(t) {
+        var id = makeTileId(t);
+        var days = idx.get(id);
+        if (!days) return;
+        var crs = utmCode(t.zone, true);
+        var bb = transformBbox(tileExtent(t), crs, "EPSG:4326");
+        days.forEach(function(bandSet, day) {
+          if (day < range[0] || day > range[1]) return;
+          var assets = {};
+          bandSet.forEach(function(b) {
+            assets[b] = bucket + "/cube/" + id + "/" + b + "/" + day + ".tif";
+          });
+          scenes.push({
+            id: id + "/" + day,
+            day,
+            datetime: day + "T12:00:00Z",
+            geometry: { type: "Polygon", coordinates: [[
+              [bb[0], bb[1]],
+              [bb[2], bb[1]],
+              [bb[2], bb[3]],
+              [bb[0], bb[3]],
+              [bb[0], bb[1]]
+            ]] },
+            bbox: bb,
+            cloud: null,
+            crs,
+            assets,
+            meta: { tile: id, grid: id }
+          });
+        });
+      });
+      return scenes;
+    }
+  };
+}
+
+// lib/explorer.js
+function byCloud(a, b) {
+  var ca = a.cloud === null ? 1e9 : a.cloud, cb = b.cloud === null ? 1e9 : b.cloud;
+  return ca - cb;
+}
+function groupByDay(scenes) {
+  var m = /* @__PURE__ */ new Map();
+  scenes.forEach(function(s) {
+    if (!m.has(s.day)) m.set(s.day, []);
+    m.get(s.day).push(s);
+  });
+  return Array.from(m.keys()).sort().map(function(day) {
+    var ss = m.get(day).slice().sort(byCloud);
+    var clouds = ss.map(function(s) {
+      return s.cloud;
+    }).filter(function(c) {
+      return c !== null;
+    });
+    return {
+      day,
+      scenes: ss,
+      cloudMin: clouds.length ? Math.min.apply(null, clouds) : null,
+      cloudMean: clouds.length ? clouds.reduce(function(a, b) {
+        return a + b;
+      }, 0) / clouds.length : null
+    };
+  });
+}
+async function pool(tasks, n) {
+  var out = new Array(tasks.length), next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      var i = next++;
+      try {
+        out[i] = { ok: true, value: await tasks[i]() };
+      } catch (e) {
+        out[i] = { ok: false, error: e };
+      }
+    }
+  }
+  var ws = [];
+  for (var k = 0; k < Math.min(n, tasks.length); k++) ws.push(worker());
+  await Promise.all(ws);
+  return out;
+}
+async function loadComposite(o) {
+  var t0 = performance.now();
+  var keys = o.keys, grid = o.grid;
+  var maxScenes = o.maxScenes || 6;
+  var view = gridLonLatBounds(grid);
+  var cands = o.scenes.filter(function(s) {
+    return (!s.bbox || bboxIntersects(s.bbox, view)) && keys.every(function(k) {
+      return s.assets[k];
+    });
+  }).sort(byCloud);
+  var missing = o.scenes.length - cands.length;
+  var use = cands.slice(0, maxScenes);
+  var done = 0;
+  var tasks = use.map(function(s) {
+    return async function() {
+      var parts = await Promise.all(keys.map(function(k) {
+        return readWarped(s.assets[k], grid, { crs: s.crs, signal: o.signal });
+      }));
+      done++;
+      if (o.onProgress) o.onProgress(done, use.length, s);
+      if (parts.some(function(p) {
+        return p === null;
+      })) return null;
+      if (parts.length === 1) return {
+        bands: parts[0].bands.slice(0, 3),
+        valid: parts[0].valid,
+        level: parts[0].level
+      };
+      var valid = parts[0].valid.slice();
+      for (var i = 1; i < parts.length; i++) {
+        var v = parts[i].valid;
+        for (var j = 0; j < valid.length; j++) valid[j] = valid[j] & v[j];
+      }
+      return {
+        bands: parts.map(function(p) {
+          return p.bands[0];
+        }),
+        valid,
+        level: parts[0].level
+      };
+    };
+  });
+  var results = await pool(tasks, o.concurrency || 4);
+  var layers = [], errors = [], levels2 = [];
+  results.forEach(function(r, i) {
+    if (!r.ok) {
+      errors.push({ id: use[i].id, message: String(r.error && r.error.message || r.error) });
+      return;
+    }
+    if (r.value) {
+      layers.push(r.value);
+      levels2.push(r.value.level);
+    }
+  });
+  var kind = keys.length === 1 ? "rgb8" : "bands";
+  var comp = null;
+  if (layers.length) {
+    if (kind === "rgb8" && layers[0].bands.length < 3) throw new Error(keys[0] + " is not a 3-band product");
+    comp = mosaic(grid, layers, kind, keys);
+  }
+  return {
+    composite: comp,
+    stats: {
+      candidates: cands.length,
+      used: layers.length,
+      read: use.length,
+      capped: Math.max(0, cands.length - use.length),
+      lackingAssets: missing,
+      files: use.length * keys.length,
+      errors,
+      levels: levels2,
+      ms: Math.round(performance.now() - t0)
+    }
+  };
+}
+
+// page.js
+var $ = function(id) {
+  return document.getElementById(id);
+};
+var statusEl = $("status");
+var map = L.map("map", { center: [-42.9, 147.3], zoom: 8 });
+var basemaps = {
+  "Esri imagery": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 18,
+    attribution: "Esri World Imagery"
+  }),
+  "OpenStreetMap": L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors"
+  })
+};
+basemaps["Esri imagery"].addTo(map);
+var labels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", {
+  maxZoom: 18,
+  pane: "shadowPane"
+}).addTo(map);
+L.control.layers(basemaps, { "place labels": labels }, { position: "topright" }).addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
+var coordBox = L.control({ position: "bottomleft" });
+coordBox.onAdd = function() {
+  var d = L.DomUtil.create("div", "coords");
+  d.textContent = "lon/lat";
+  return d;
+};
+coordBox.addTo(map);
+map.on("mousemove", function(e) {
+  document.querySelector(".coords").textContent = e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom();
+});
+var footLayer = L.layerGroup().addTo(map);
+var state = {
+  catalog: null,
+  roi: null,
+  roiRect: null,
+  scenes: [],
+  days: [],
+  dayIndex: -1,
+  comp: null,
+  overlay: null,
+  loading: null
+};
+function setStatus(msg, errs) {
+  statusEl.textContent = msg;
+  (errs || []).forEach(function(e) {
+    var d = document.createElement("div");
+    d.className = "err";
+    d.textContent = e;
+    statusEl.appendChild(d);
+  });
+}
+function fail(e) {
+  if (e && e.name === "AbortError") return;
+  console.error(e);
+  setStatus("", [String(e && e.message || e)]);
+}
+function isoDay(d) {
+  return d.toISOString().slice(0, 10);
+}
+["bR", "bG", "bB"].forEach(function(id, i) {
+  var sel = $(id);
+  Object.keys(BAND_ALIASES).filter(function(k) {
+    return k !== "visual";
+  }).forEach(function(k) {
+    var o = document.createElement("option");
+    o.value = k;
+    o.textContent = k;
+    sel.appendChild(o);
+  });
+  sel.value = ["red", "green", "blue"][i];
+});
+$("wtBucket").value = WILDTILES_BUCKET;
+var today = /* @__PURE__ */ new Date();
+$("to").value = isoDay(today);
+$("from").value = isoDay(new Date(today.getTime() - 60 * 864e5));
+function makeCatalog() {
+  if ($("src").value === "wildtiles") {
+    return wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
+  }
+  return stacCatalog({ url: $("stacUrl").value.trim(), collection: $("coll").value.trim() });
+}
+function sourceChanged() {
+  var wt = $("src").value === "wildtiles";
+  $("stacbox").classList.toggle("hide", wt);
+  $("wtbox").classList.toggle("hide", !wt);
+  clearScenes();
+}
+$("src").addEventListener("change", sourceChanged);
+["stacUrl", "coll", "wtBucket", "wtRes"].forEach(function(id) {
+  $(id).addEventListener("change", clearScenes);
+});
+$("listColl").addEventListener("click", function() {
+  setStatus("listing collections ...");
+  listCollections($("stacUrl").value.trim()).then(function(cs) {
+    var dl = $("colls");
+    dl.innerHTML = "";
+    cs.forEach(function(c) {
+      var o = document.createElement("option");
+      o.value = c.id;
+      o.textContent = c.title;
+      dl.appendChild(o);
+    });
+    setStatus(cs.length + " collections: pick one in the collection box");
+    $("coll").value = "";
+    $("coll").focus();
+  }).catch(fail);
+});
+$("wtTile").addEventListener("change", function() {
+  try {
+    var t = parseTileId(this.value);
+    $("wtRes").value = String(t.res);
+    setRoi(tileLonLatBbox(t, 1));
+    map.fitBounds(roiLatLngBounds(state.roi).pad(0.1));
+  } catch (e) {
+    fail(e);
+  }
+});
+function roiLatLngBounds(b) {
+  return L.latLngBounds([b[1], b[0]], [b[3], b[2]]);
+}
+function setRoi(bbox) {
+  state.roi = bbox;
+  if (state.roiRect) map.removeLayer(state.roiRect);
+  state.roiRect = L.rectangle(roiLatLngBounds(bbox), {
+    color: "#4fc3f7",
+    weight: 2,
+    fill: false,
+    dashArray: "6 4",
+    interactive: false
+  }).addTo(map);
+  var g = makeGrid(bbox, { maxDim: 1e5 });
+  var res = gridGroundRes(g);
+  var kmx = g.width * res / 1e3, kmy = g.height * res / 1e3;
+  $("roiInfo").textContent = "region " + kmx.toFixed(1) + " x " + kmy.toFixed(1) + " km  [" + bbox.map(function(v) {
+    return v.toFixed(3);
+  }).join(", ") + "]";
+  clearScenes();
+}
+var drawing = null;
+function endDraw() {
+  drawing = null;
+  map.dragging.enable();
+  map.boxZoom.enable();
+  $("map").classList.remove("drawing");
+  $("draw").classList.remove("on");
+  $("draw").textContent = "draw on map";
+}
+$("draw").addEventListener("click", function() {
+  if (drawing) {
+    endDraw();
+    return;
+  }
+  drawing = { start: null, rect: null };
+  map.dragging.disable();
+  map.boxZoom.disable();
+  $("map").classList.add("drawing");
+  $("draw").classList.add("on");
+  $("draw").textContent = "now drag a box...";
+});
+map.on("mousedown", function(e) {
+  if (!drawing) return;
+  drawing.start = e.latlng;
+  drawing.rect = L.rectangle([e.latlng, e.latlng], { color: "#4fc3f7", weight: 1, interactive: false }).addTo(map);
+});
+map.on("mousemove", function(e) {
+  if (drawing && drawing.start) drawing.rect.setBounds([drawing.start, e.latlng]);
+});
+map.on("mouseup", function(e) {
+  if (!drawing || !drawing.start) return;
+  var b = L.latLngBounds(drawing.start, e.latlng);
+  map.removeLayer(drawing.rect);
+  endDraw();
+  if (b.getNorth() - b.getSouth() < 1e-5 || b.getEast() - b.getWest() < 1e-5) return;
+  setRoi([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+});
+$("useView").addEventListener("click", function() {
+  var b = map.getBounds();
+  setRoi([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+});
+function clearScenes() {
+  state.scenes = [];
+  state.days = [];
+  state.dayIndex = -1;
+  $("days").innerHTML = "";
+  footLayer.clearLayers();
+}
+async function searchScenes() {
+  if (!state.roi) throw new Error("draw a region first");
+  state.catalog = makeCatalog();
+  clearScenes();
+  var btn = $("search");
+  btn.disabled = true;
+  setStatus("searching " + state.catalog.label + " ...");
+  try {
+    var t0 = performance.now();
+    var scenes = await state.catalog.search({
+      bbox: state.roi,
+      datetime: $("from").value + "/" + $("to").value,
+      cloudMax: +$("cloud").value,
+      maxItems: +$("maxItems").value || 300
+    });
+    state.scenes = scenes;
+    state.days = groupByDay(scenes);
+    renderDays();
+    var ms = Math.round(performance.now() - t0);
+    setStatus(scenes.length + " scenes on " + state.days.length + " days in " + ms + " ms" + (scenes.length >= (+$("maxItems").value || 300) ? " (hit max items; narrow the dates)" : "") + (state.days.length ? "\nclick a day to load it" : ""));
+  } finally {
+    btn.disabled = false;
+  }
+}
+function renderDays() {
+  var box = $("days");
+  box.innerHTML = "";
+  state.days.slice().reverse().forEach(function(d) {
+    var i = state.days.indexOf(d);
+    var row = document.createElement("div");
+    row.className = "day" + (i === state.dayIndex ? " sel" : "");
+    row.dataset.i = i;
+    var cl = d.cloudMin === null ? "" : ", cloud " + Math.round(d.cloudMin) + "%";
+    row.innerHTML = "<span></span><span class='n'></span>";
+    row.firstChild.textContent = d.day;
+    row.lastChild.textContent = d.scenes.length + " scene" + (d.scenes.length > 1 ? "s" : "") + cl;
+    row.addEventListener("click", function() {
+      selectDay(i, true);
+    });
+    box.appendChild(row);
+  });
+}
+function drawFootprints() {
+  footLayer.clearLayers();
+  var d = state.days[state.dayIndex];
+  if (!d || !$("showFoot").checked) return;
+  d.scenes.forEach(function(s) {
+    if (!s.geometry) return;
+    L.geoJSON(s.geometry, {
+      style: { color: "#ffd54f", weight: 1, fill: false },
+      interactive: false
+    }).addTo(footLayer);
+  });
+}
+function selectDay(i, load) {
+  state.dayIndex = i;
+  Array.prototype.forEach.call($("days").children, function(row) {
+    row.classList.toggle("sel", +row.dataset.i === i);
+  });
+  drawFootprints();
+  writeHash();
+  if (load) return loadImagery().catch(fail);
+}
+function currentKeys() {
+  var p = $("preset").value;
+  if (p === "visual") return ["visual"];
+  if (p === "custom") return [$("bR").value, $("bG").value, $("bB").value];
+  return p.split(",");
+}
+function presetChanged() {
+  $("bands").classList.toggle("hide", $("preset").value !== "custom");
+  $("stretchbox").classList.toggle("hide", $("preset").value === "visual");
+}
+var CH = ["R", "G", "B"];
+function offsetFor(comp) {
+  var m = $("offset").value;
+  if (m !== "auto") return +m;
+  return comp.offsetInfo ? comp.offsetInfo.offset : 0;
+}
+function offsetNote(comp) {
+  var off = offsetFor(comp), oi = comp.offsetInfo || {}, t;
+  if ($("offset").value !== "auto") t = "offset " + off + " DN (set by hand)";
+  else if (!oi.known) t = "offset 0 DN: no processing baseline in the metadata";
+  else if (off) t = "offset " + off + " DN: baseline 04.00+ and this archive keeps ESA's +1000";
+  else t = "offset 0 DN: pre-04.00 baseline, or this archive already removed the +1000";
+  if ($("offset").value === "auto" && oi.mixed) t += " (this day mixes both; the majority wins)";
+  $("offNote").textContent = t;
+}
+function writeLimits(st) {
+  CH.forEach(function(c, i) {
+    $("min" + c).value = Math.round(st[i][0]);
+    $("max" + c).value = Math.round(st[i][1]);
+  });
+}
+function readLimits() {
+  var r = [+$("minR").value, +$("maxR").value];
+  return CH.map(function(c) {
+    var lo = $("min" + c).value.trim(), hi = $("max" + c).value.trim();
+    return [lo !== "" && isFinite(+lo) ? +lo : r[0], hi !== "" && isFinite(+hi) ? +hi : r[1]];
+  });
+}
+function pctStretch(comp, off) {
+  var lo = Math.min(Math.max(+$("plo").value, 0), 50) / 100;
+  var hi = Math.min(Math.max(+$("phi").value, 50), 100) / 100;
+  var joint = $("joint").checked;
+  var key = [lo, hi, joint, off].join("|");
+  comp.stretchCache = comp.stretchCache || {};
+  return comp.stretchCache[key] || (comp.stretchCache[key] = autoStretch(comp, lo, hi, { joint, offset: off }));
+}
+function renderParams(comp) {
+  if (comp.kind === "rgb8") return {};
+  var off = offsetFor(comp), stretch;
+  offsetNote(comp);
+  if ($("limits").value === "pct" || $("minR").value.trim() === "") {
+    stretch = pctStretch(comp, off);
+    writeLimits(stretch);
+  } else {
+    stretch = readLimits();
+  }
+  return {
+    stretch,
+    offset: off,
+    gamma: $("gamma").value / 100,
+    transfer: $("curve").value
+  };
+}
+var CanvasOverlay = L.ImageOverlay.extend({
+  _initImage: function() {
+    var el = this._image = this._url;
+    L.DomUtil.addClass(el, "leaflet-image-layer");
+    if (this._zoomAnimated) L.DomUtil.addClass(el, "leaflet-zoom-animated");
+    el.onselectstart = L.Util.falseFn;
+    el.onmousemove = L.Util.falseFn;
+  }
+});
+function paint() {
+  var comp = state.comp;
+  if (!comp) return;
+  var g = comp.grid;
+  var rgba = renderRGBA(comp, renderParams(comp));
+  var cv = state.overlay && state.overlay._url;
+  if (cv && cv.width === g.width && cv.height === g.height) {
+    cv.getContext("2d").putImageData(new ImageData(rgba, g.width, g.height), 0, 0);
+  } else {
+    cv = rgbaToCanvas(rgba, g.width, g.height);
+    if (state.overlay) map.removeLayer(state.overlay);
+    state.overlay = new CanvasOverlay(
+      cv,
+      roiLatLngBounds(gridLonLatBounds(g)),
+      { opacity: $("opacity").value / 100 }
+    );
+    if ($("showImg").checked) state.overlay.addTo(map);
+  }
+  state.overlay.setBounds(roiLatLngBounds(gridLonLatBounds(g)));
+}
+async function loadImagery() {
+  if (state.dayIndex < 0) throw new Error("search scenes and pick a day first");
+  if (state.loading) state.loading.abort();
+  var ctl = new AbortController();
+  state.loading = ctl;
+  var day = state.days[state.dayIndex];
+  var keys = currentKeys();
+  var grid = makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 });
+  $("load").disabled = true;
+  setStatus(day.day + ": reading " + keys.join("/") + " ...");
+  try {
+    var r = await loadComposite({
+      scenes: day.scenes,
+      keys,
+      grid,
+      maxScenes: +$("maxScenes").value || 6,
+      signal: ctl.signal,
+      onProgress: function(n, of) {
+        if (state.loading === ctl) setStatus(day.day + ": " + n + "/" + of + " scenes read ...");
+      }
+    });
+    if (state.loading !== ctl) return;
+    var s = r.stats;
+    var errs = s.errors.map(function(e) {
+      return e.id + ": " + e.message;
+    });
+    if (s.lackingAssets) errs.push(s.lackingAssets + " scene(s) lack " + keys.join("/") + " or miss the region");
+    if (!r.composite) {
+      setStatus(day.day + ": no pixels in the region", errs);
+      return;
+    }
+    state.comp = r.composite;
+    state.comp.offsetInfo = scenesOffset(day.scenes.filter(function(sc) {
+      return keys.every(function(k) {
+        return sc.assets[k];
+      });
+    }));
+    paint();
+    var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + s.files + " files, " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m, overview " + lv + ", " + s.ms + " ms" + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    writeHash();
+  } finally {
+    if (state.loading === ctl) {
+      state.loading = null;
+      $("load").disabled = false;
+    }
+  }
+}
+$("search").addEventListener("click", function() {
+  searchScenes().catch(fail);
+});
+$("load").addEventListener("click", function() {
+  loadImagery().catch(fail);
+});
+$("preset").addEventListener("change", presetChanged);
+$("gamma").addEventListener("input", function() {
+  $("gval").textContent = (this.value / 100).toFixed(1);
+  paint();
+  writeHash();
+});
+["limits", "curve", "plo", "phi", "joint", "offset"].forEach(function(id) {
+  $(id).addEventListener("change", function() {
+    if (id === "plo" || id === "phi") $("limits").value = "pct";
+    paint();
+    writeHash();
+  });
+});
+CH.forEach(function(c) {
+  ["min", "max"].forEach(function(w) {
+    $(w + c).addEventListener("change", function() {
+      $("limits").value = "man";
+      if ($("joint").checked) CH.forEach(function(c2) {
+        $(w + c2).value = $(w + c).value;
+      });
+      paint();
+      writeHash();
+    });
+  });
+});
+$("resetStretch").addEventListener("click", function() {
+  $("limits").value = "pct";
+  $("plo").value = 2;
+  $("phi").value = 98;
+  $("joint").checked = false;
+  $("curve").value = "linear";
+  $("offset").value = "auto";
+  $("gamma").value = 100;
+  $("gval").textContent = "1.0";
+  paint();
+  writeHash();
+});
+$("opacity").addEventListener("input", function() {
+  if (state.overlay) state.overlay.setOpacity(this.value / 100);
+});
+$("showFoot").addEventListener("change", drawFootprints);
+function showImagery() {
+  if (!state.overlay) return;
+  if ($("showImg").checked) state.overlay.addTo(map);
+  else map.removeLayer(state.overlay);
+}
+$("showImg").addEventListener("change", showImagery);
+document.addEventListener("keydown", function(e) {
+  var tag = (e.target.tagName || "").toLowerCase();
+  if (e.key !== "i" || e.ctrlKey || e.metaKey || e.altKey || tag === "input" || tag === "select" || tag === "textarea") return;
+  $("showImg").checked = !$("showImg").checked;
+  showImagery();
+});
+function writeHash() {
+  var h = new URLSearchParams();
+  h.set("src", $("src").value);
+  if ($("src").value === "stac") {
+    h.set("url", $("stacUrl").value.trim());
+    h.set("coll", $("coll").value.trim());
+  } else {
+    h.set("bucket", $("wtBucket").value.trim());
+    h.set("res", $("wtRes").value);
+  }
+  if (state.roi) h.set("roi", state.roi.map(function(v) {
+    return v.toFixed(5);
+  }).join(","));
+  h.set("from", $("from").value);
+  h.set("to", $("to").value);
+  h.set("cloud", $("cloud").value);
+  h.set("preset", $("preset").value);
+  if ($("preset").value === "custom") h.set("bands", currentKeys().join(","));
+  if (state.dayIndex >= 0) h.set("day", state.days[state.dayIndex].day);
+  if ($("preset").value !== "visual") {
+    h.set("lim", $("limits").value);
+    if ($("limits").value === "pct") h.set("pct", $("plo").value + "," + $("phi").value);
+    else h.set("mm", CH.map(function(c) {
+      return $("min" + c).value + ":" + $("max" + c).value;
+    }).join(","));
+    if ($("joint").checked) h.set("joint", "1");
+    h.set("curve", $("curve").value);
+    h.set("gamma", ($("gamma").value / 100).toFixed(2));
+    h.set("off", $("offset").value);
+  }
+  history.replaceState(null, "", "#" + h.toString());
+}
+async function readHash() {
+  var h = new URLSearchParams(location.hash.slice(1));
+  if (!h.has("roi")) return;
+  if (h.get("src")) $("src").value = h.get("src");
+  sourceChanged();
+  if (h.get("url")) $("stacUrl").value = h.get("url");
+  if (h.get("coll")) $("coll").value = h.get("coll");
+  if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
+  if (h.get("res")) $("wtRes").value = h.get("res");
+  ["from", "to", "cloud", "preset"].forEach(function(k) {
+    if (h.get(k)) $(k).value = h.get(k);
+  });
+  if (h.get("bands")) {
+    var b = h.get("bands").split(",");
+    $("bR").value = b[0];
+    $("bG").value = b[1];
+    $("bB").value = b[2];
+  }
+  presetChanged();
+  if (h.get("lim")) $("limits").value = h.get("lim");
+  if (h.get("pct")) {
+    var pc = h.get("pct").split(",");
+    $("plo").value = pc[0];
+    $("phi").value = pc[1];
+  }
+  if (h.get("mm")) h.get("mm").split(",").forEach(function(pair, i2) {
+    var mm = pair.split(":");
+    $("min" + CH[i2]).value = mm[0];
+    $("max" + CH[i2]).value = mm[1];
+  });
+  $("joint").checked = h.get("joint") === "1";
+  if (h.get("curve")) $("curve").value = h.get("curve");
+  if (h.get("gamma")) {
+    $("gamma").value = Math.round(+h.get("gamma") * 100);
+    $("gval").textContent = (+h.get("gamma")).toFixed(1);
+  }
+  if (h.get("off")) $("offset").value = h.get("off");
+  var roi = h.get("roi").split(",").map(Number);
+  setRoi(roi);
+  map.fitBounds(roiLatLngBounds(roi).pad(0.1));
+  await searchScenes();
+  var want = h.get("day");
+  var i = state.days.findIndex(function(d) {
+    return d.day === want;
+  });
+  if (i >= 0) await selectDay(i, true);
+}
+presetChanged();
+readHash().catch(fail);
+window.explorer = {
+  X: explorer_exports,
+  map,
+  state,
+  selectDay,
+  loadImagery,
+  searchScenes,
+  setRoi
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rangefinder</title>
+<!--
+  rangefinder: point at a STAC API (or the wildtiles cube), draw a
+  region on the map, search scenes, and compose imagery client-side from
+  the raw COGs with windowed overview reads. No server, no credentials,
+  no build step. The layers live in lib/ (see README.md).
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.11.0/proj4.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.min.js"></script>
+<style>
+  :root { --bg: #10141a; --panel: #1a212b; --text: #d8e0ea; --muted: #8696a8;
+          --accent: #4fc3f7; --edge: #2a3542; --sel: #24425a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px/1.45 system-ui, sans-serif; }
+  #app { display: flex; height: 100%; }
+  #panel { width: 320px; min-width: 320px; padding: 14px 16px; background: var(--panel);
+           border-right: 1px solid var(--edge); overflow-y: auto; box-sizing: border-box; }
+  #map { flex: 1; background: #000; }
+  #map.drawing, #map.drawing .leaflet-interactive { cursor: crosshair; }
+  .coords { background: rgba(16,20,26,0.8); color: var(--text); padding: 2px 6px;
+            border-radius: 4px; font: 12px ui-monospace, monospace; }
+  h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: 0.4px; }
+  h2 { font-size: 11px; margin: 16px 0 2px; color: var(--accent); text-transform: uppercase;
+       letter-spacing: 0.8px; border-top: 1px solid var(--edge); padding-top: 10px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  label { display: block; margin: 9px 0 3px; color: var(--muted); font-size: 11px;
+          text-transform: uppercase; letter-spacing: 0.6px; }
+  input, select, button { width: 100%; box-sizing: border-box; padding: 6px 9px;
+          background: var(--bg); color: var(--text); border: 1px solid var(--edge);
+          border-radius: 6px; font: inherit; }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  button { margin-top: 10px; background: var(--accent); color: #06222e; border: none;
+           font-weight: 600; cursor: pointer; }
+  button.minor { background: var(--bg); color: var(--text); border: 1px solid var(--edge);
+                 font-weight: 400; }
+  button.minor.on { border-color: var(--accent); color: var(--accent); }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; min-width: 0; }
+  .row input[type=checkbox] { flex: 0 0 auto; width: auto; }
+  .row span { font-size: 13px; }
+  .hide { display: none; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  #days { margin-top: 8px; max-height: 210px; overflow-y: auto; border: 1px solid var(--edge);
+          border-radius: 6px; }
+  #days:empty { display: none; }
+  .day { display: flex; justify-content: space-between; padding: 4px 9px; font-size: 13px;
+         cursor: pointer; border-bottom: 1px solid var(--edge); }
+  .day:last-child { border-bottom: none; }
+  .day:hover { background: var(--bg); }
+  .day.sel { background: var(--sel); }
+  .day .n { color: var(--muted); font-size: 12px; }
+  #status { margin-top: 10px; font-size: 12px; color: var(--muted);
+            white-space: pre-wrap; min-height: 2.5em; }
+  #status .err { color: #ff8a80; }
+  input[type=range] { padding: 0; accent-color: var(--accent); }
+  table.lims { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  table.lims th { font-size: 11px; color: var(--muted); font-weight: 400; text-align: left;
+                  padding: 0 4px 2px 0; }
+  table.lims td { padding: 2px 4px 2px 0; }
+  table.lims th.cR { color: #ff8a80; }
+  table.lims th.cG { color: #b9f6ca; }
+  table.lims th.cB { color: #82b1ff; }
+  .foot { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--edge);
+          font-size: 11px; color: var(--muted); }
+  .foot code { color: var(--text); }
+  @media (max-width: 700px) {
+    #app { flex-direction: column-reverse; }
+    #panel { width: 100%; min-width: 0; height: 55%; border-right: none;
+             border-top: 1px solid var(--edge); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="panel">
+    <h1>rangefinder</h1>
+    <div class="sub">search a catalogue, draw a region, compose from the raw COGs</div>
+
+    <h2>source</h2>
+    <select id="src">
+      <option value="stac">STAC API</option>
+      <option value="wildtiles">wildtiles cube</option>
+    </select>
+    <div id="stacbox">
+      <label for="stacUrl">STAC API URL</label>
+      <input id="stacUrl" value="https://earth-search.aws.element84.com/v1" spellcheck="false">
+      <label for="coll">collection</label>
+      <div class="row">
+        <input id="coll" value="sentinel-2-l2a" list="colls" spellcheck="false">
+        <button id="listColl" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">list</button>
+      </div>
+      <datalist id="colls"></datalist>
+    </div>
+    <div id="wtbox" class="hide">
+      <label for="wtBucket">bucket</label>
+      <input id="wtBucket" spellcheck="false">
+      <div class="row">
+        <div><label for="wtRes">resolution (m)</label>
+          <select id="wtRes"><option>10</option><option>60</option></select></div>
+        <div><label for="wtTile">jump to tile</label>
+          <input id="wtTile" placeholder="41S_R0010_0055_0347" list="tiles" spellcheck="false"></div>
+      </div>
+      <datalist id="tiles">
+        <option value="41S_R0010_0055_0347">auster center</option>
+        <option value="43S_R0060_0005_0094">heard (60m)</option>
+        <option value="57S_R0010_0049_0547">macquarie station</option>
+      </datalist>
+    </div>
+
+    <h2>region</h2>
+    <div class="row">
+      <button id="draw" class="minor">draw on map</button>
+      <button id="useView" class="minor">use view</button>
+    </div>
+    <div id="roiInfo" class="note">no region yet: drag a box after "draw on map"</div>
+
+    <h2>scenes</h2>
+    <div class="row">
+      <div><label for="from">from</label><input id="from" type="date"></div>
+      <div><label for="to">to</label><input id="to" type="date"></div>
+    </div>
+    <div class="row">
+      <div><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
+      <div><label for="maxItems">max items</label><input id="maxItems" type="number" value="300" min="1"></div>
+    </div>
+    <button id="search">Search scenes</button>
+    <div id="days"></div>
+
+    <h2>composite</h2>
+    <select id="preset">
+      <option value="visual">TCI (baked true color, fast)</option>
+      <option value="red,green,blue">true color (raw bands)</option>
+      <option value="nir,red,green">false color IR (vegetation)</option>
+      <option value="swir16,nir,red">SWIR (snow/ice vs cloud)</option>
+      <option value="swir22,swir16,nir">geology</option>
+      <option value="custom">custom...</option>
+    </select>
+    <div id="bands" class="hide">
+      <div class="row">
+        <div><label>R</label><select id="bR"></select></div>
+        <div><label>G</label><select id="bG"></select></div>
+        <div><label>B</label><select id="bB"></select></div>
+      </div>
+    </div>
+    <div id="stretchbox" class="hide">
+      <div class="row">
+        <div><label for="limits">limits</label>
+          <select id="limits">
+            <option value="pct">percentile</option>
+            <option value="man">manual</option>
+          </select></div>
+        <div><label for="curve">stretch curve</label>
+          <select id="curve">
+            <option value="linear">linear</option>
+            <option value="sqrt">sqrt</option>
+            <option value="log">log</option>
+          </select></div>
+      </div>
+      <div class="row">
+        <div><label for="plo">low %</label><input id="plo" type="number" value="2" min="0" max="50" step="0.5"></div>
+        <div><label for="phi">high %</label><input id="phi" type="number" value="98" min="50" max="100" step="0.5"></div>
+      </div>
+      <label class="row" style="margin-top:8px" title="one pair of limits from all three bands pooled, which keeps the colour balance">
+        <input type="checkbox" id="joint"> <span>same limits for all bands</span>
+      </label>
+      <table class="lims">
+        <tr><th></th><th>min</th><th>max</th></tr>
+        <tr><th class="cR">R</th><td><input id="minR" spellcheck="false"></td><td><input id="maxR" spellcheck="false"></td></tr>
+        <tr><th class="cG">G</th><td><input id="minG" spellcheck="false"></td><td><input id="maxG" spellcheck="false"></td></tr>
+        <tr><th class="cB">B</th><td><input id="minB" spellcheck="false"></td><td><input id="maxB" spellcheck="false"></td></tr>
+      </table>
+      <div class="note">limits fill in from the percentiles; typing one switches to manual</div>
+      <label for="gamma">gamma <span id="gval">1.0</span></label>
+      <input type="range" id="gamma" min="30" max="300" value="100">
+      <label for="offset">L2A offset</label>
+      <select id="offset">
+        <option value="auto">auto (from scene metadata)</option>
+        <option value="-1000">always -1000</option>
+        <option value="0">off (stored DN)</option>
+      </select>
+      <div class="note" id="offNote"></div>
+      <button id="resetStretch" class="minor">reset to 2-98% auto</button>
+    </div>
+    <div class="row">
+      <div><label for="maxpx">output size (px)</label>
+        <select id="maxpx"><option>1024</option><option selected>1536</option>
+          <option>2048</option><option>3072</option></select></div>
+      <div><label for="maxScenes">max scenes</label>
+        <input id="maxScenes" type="number" value="6" min="1" max="40"></div>
+    </div>
+    <button id="load">Load imagery</button>
+
+    <label for="opacity">overlay opacity</label>
+    <input type="range" id="opacity" min="0" max="100" value="100">
+    <label class="row" style="margin-top:8px">
+      <input type="checkbox" id="showImg" checked> <span>show imagery (key: i)</span>
+    </label>
+    <label class="row" style="margin-top:4px">
+      <input type="checkbox" id="showFoot" checked> <span>show scene footprints</span>
+    </label>
+
+    <div id="status">ready</div>
+
+    <div class="foot">
+      Scenes come from a STAC <code>/search</code> (default Earth Search,
+      Sentinel-2 L2A on AWS Open Data) or the wildtiles inventory. Pixels
+      are read straight from the COGs by HTTP range request at the overview
+      level that suits the region, warped onto one Web Mercator grid and
+      mosaicked least-cloudy-first. Stretch and composition happen here on
+      the raw numbers. The URL hash is a permalink.
+    </div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script type="module">
+import * as X from "./lib/explorer.js";
+
+var $ = function (id) { return document.getElementById(id); };
+var statusEl = $("status");
+
+// --- map ---------------------------------------------------------------------
+
+var map = L.map("map", { center: [-42.9, 147.3], zoom: 8 });
+var basemaps = {
+  "Esri imagery": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 18, attribution: "Esri World Imagery" }),
+  "OpenStreetMap": L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" })
+};
+basemaps["Esri imagery"].addTo(map);
+var labels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", {
+  maxZoom: 18, pane: "shadowPane" }).addTo(map);
+L.control.layers(basemaps, { "place labels": labels }, { position: "topright" }).addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
+var coordBox = L.control({ position: "bottomleft" });
+coordBox.onAdd = function () {
+  var d = L.DomUtil.create("div", "coords");
+  d.textContent = "lon/lat";
+  return d;
+};
+coordBox.addTo(map);
+map.on("mousemove", function (e) {
+  document.querySelector(".coords").textContent =
+    e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom();
+});
+var footLayer = L.layerGroup().addTo(map);
+
+var state = {
+  catalog: null, roi: null, roiRect: null,
+  scenes: [], days: [], dayIndex: -1,
+  comp: null, overlay: null, loading: null
+};
+
+// --- small helpers -----------------------------------------------------------
+
+function setStatus(msg, errs) {
+  statusEl.textContent = msg;
+  (errs || []).forEach(function (e) {
+    var d = document.createElement("div");
+    d.className = "err"; d.textContent = e;
+    statusEl.appendChild(d);
+  });
+}
+function fail(e) {
+  if (e && e.name === "AbortError") return;
+  console.error(e);
+  setStatus("", [String(e && e.message || e)]);
+}
+function isoDay(d) { return d.toISOString().slice(0, 10); }
+
+// band pickers
+["bR", "bG", "bB"].forEach(function (id, i) {
+  var sel = $(id);
+  Object.keys(X.BAND_ALIASES).filter(function (k) { return k !== "visual"; }).forEach(function (k) {
+    var o = document.createElement("option");
+    o.value = k; o.textContent = k;
+    sel.appendChild(o);
+  });
+  sel.value = ["red", "green", "blue"][i];
+});
+
+$("wtBucket").value = X.WILDTILES_BUCKET;
+var today = new Date();
+$("to").value = isoDay(today);
+$("from").value = isoDay(new Date(today.getTime() - 60 * 864e5));
+
+// --- source ------------------------------------------------------------------
+
+function makeCatalog() {
+  if ($("src").value === "wildtiles") {
+    return X.wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
+  }
+  return X.stacCatalog({ url: $("stacUrl").value.trim(), collection: $("coll").value.trim() });
+}
+function sourceChanged() {
+  var wt = $("src").value === "wildtiles";
+  $("stacbox").classList.toggle("hide", wt);
+  $("wtbox").classList.toggle("hide", !wt);
+  clearScenes();
+}
+$("src").addEventListener("change", sourceChanged);
+["stacUrl", "coll", "wtBucket", "wtRes"].forEach(function (id) {
+  $(id).addEventListener("change", clearScenes);
+});
+$("listColl").addEventListener("click", function () {
+  setStatus("listing collections ...");
+  X.listCollections($("stacUrl").value.trim()).then(function (cs) {
+    var dl = $("colls");
+    dl.innerHTML = "";
+    cs.forEach(function (c) {
+      var o = document.createElement("option");
+      o.value = c.id; o.textContent = c.title;
+      dl.appendChild(o);
+    });
+    setStatus(cs.length + " collections: pick one in the collection box");
+    $("coll").value = "";
+    $("coll").focus();
+  }).catch(fail);
+});
+$("wtTile").addEventListener("change", function () {
+  try {
+    var t = X.parseTileId(this.value);
+    $("wtRes").value = String(t.res);
+    setRoi(X.tileLonLatBbox(t, 1));
+    map.fitBounds(roiLatLngBounds(state.roi).pad(0.1));
+  } catch (e) { fail(e); }
+});
+
+// --- region of interest ------------------------------------------------------
+
+function roiLatLngBounds(b) { return L.latLngBounds([b[1], b[0]], [b[3], b[2]]); }
+
+function setRoi(bbox) {
+  state.roi = bbox;
+  if (state.roiRect) map.removeLayer(state.roiRect);
+  state.roiRect = L.rectangle(roiLatLngBounds(bbox), {
+    color: "#4fc3f7", weight: 2, fill: false, dashArray: "6 4", interactive: false
+  }).addTo(map);
+  var g = X.makeGrid(bbox, { maxDim: 100000 });
+  var res = X.gridGroundRes(g);
+  var kmx = g.width * res / 1000, kmy = g.height * res / 1000;
+  $("roiInfo").textContent = "region " + kmx.toFixed(1) + " x " + kmy.toFixed(1) + " km  [" +
+    bbox.map(function (v) { return v.toFixed(3); }).join(", ") + "]";
+  clearScenes();
+}
+
+var drawing = null;
+function endDraw() {
+  drawing = null;
+  map.dragging.enable(); map.boxZoom.enable();
+  $("map").classList.remove("drawing");
+  $("draw").classList.remove("on");
+  $("draw").textContent = "draw on map";
+}
+$("draw").addEventListener("click", function () {
+  if (drawing) { endDraw(); return; }
+  drawing = { start: null, rect: null };
+  map.dragging.disable(); map.boxZoom.disable();
+  $("map").classList.add("drawing");
+  $("draw").classList.add("on");
+  $("draw").textContent = "now drag a box...";
+});
+map.on("mousedown", function (e) {
+  if (!drawing) return;
+  drawing.start = e.latlng;
+  drawing.rect = L.rectangle([e.latlng, e.latlng], { color: "#4fc3f7", weight: 1, interactive: false }).addTo(map);
+});
+map.on("mousemove", function (e) {
+  if (drawing && drawing.start) drawing.rect.setBounds([drawing.start, e.latlng]);
+});
+map.on("mouseup", function (e) {
+  if (!drawing || !drawing.start) return;
+  var b = L.latLngBounds(drawing.start, e.latlng);
+  map.removeLayer(drawing.rect);
+  endDraw();
+  if (b.getNorth() - b.getSouth() < 1e-5 || b.getEast() - b.getWest() < 1e-5) return;
+  setRoi([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+});
+$("useView").addEventListener("click", function () {
+  var b = map.getBounds();
+  setRoi([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+});
+
+// --- scenes and days ---------------------------------------------------------
+//
+// state.days is [{ day, scenes, cloudMin }]; selectDay(i) is the one entry
+// point a time scrubber needs.
+
+function clearScenes() {
+  state.scenes = []; state.days = []; state.dayIndex = -1;
+  $("days").innerHTML = "";
+  footLayer.clearLayers();
+}
+
+async function searchScenes() {
+  if (!state.roi) throw new Error("draw a region first");
+  state.catalog = makeCatalog();
+  clearScenes();
+  var btn = $("search");
+  btn.disabled = true;
+  setStatus("searching " + state.catalog.label + " ...");
+  try {
+    var t0 = performance.now();
+    var scenes = await state.catalog.search({
+      bbox: state.roi,
+      datetime: $("from").value + "/" + $("to").value,
+      cloudMax: +$("cloud").value,
+      maxItems: +$("maxItems").value || 300
+    });
+    state.scenes = scenes;
+    state.days = X.groupByDay(scenes);
+    renderDays();
+    var ms = Math.round(performance.now() - t0);
+    setStatus(scenes.length + " scenes on " + state.days.length + " days in " + ms + " ms" +
+      (scenes.length >= (+$("maxItems").value || 300) ? " (hit max items; narrow the dates)" : "") +
+      (state.days.length ? "\nclick a day to load it" : ""));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderDays() {
+  var box = $("days");
+  box.innerHTML = "";
+  state.days.slice().reverse().forEach(function (d) {
+    var i = state.days.indexOf(d);
+    var row = document.createElement("div");
+    row.className = "day" + (i === state.dayIndex ? " sel" : "");
+    row.dataset.i = i;
+    var cl = d.cloudMin === null ? "" : ", cloud " + Math.round(d.cloudMin) + "%";
+    row.innerHTML = "<span></span><span class='n'></span>";
+    row.firstChild.textContent = d.day;
+    row.lastChild.textContent = d.scenes.length + " scene" + (d.scenes.length > 1 ? "s" : "") + cl;
+    row.addEventListener("click", function () { selectDay(i, true); });
+    box.appendChild(row);
+  });
+}
+
+function drawFootprints() {
+  footLayer.clearLayers();
+  var d = state.days[state.dayIndex];
+  if (!d || !$("showFoot").checked) return;
+  d.scenes.forEach(function (s) {
+    if (!s.geometry) return;
+    L.geoJSON(s.geometry, { style: { color: "#ffd54f", weight: 1, fill: false },
+                            interactive: false }).addTo(footLayer);
+  });
+}
+
+function selectDay(i, load) {
+  state.dayIndex = i;
+  Array.prototype.forEach.call($("days").children, function (row) {
+    row.classList.toggle("sel", +row.dataset.i === i);
+  });
+  drawFootprints();
+  writeHash();
+  if (load) return loadImagery().catch(fail);
+}
+
+// --- composite ---------------------------------------------------------------
+
+function currentKeys() {
+  var p = $("preset").value;
+  if (p === "visual") return ["visual"];
+  if (p === "custom") return [$("bR").value, $("bG").value, $("bB").value];
+  return p.split(",");
+}
+function presetChanged() {
+  $("bands").classList.toggle("hide", $("preset").value !== "custom");
+  $("stretchbox").classList.toggle("hide", $("preset").value === "visual");
+}
+
+// --- stretch controls ----------------------------------------------------------
+//
+// Limits are in corrected units (stored DN + offset). "pct" fills the R/G/B
+// min/max boxes from percentiles of the whole view; "man" reads them back.
+
+var CH = ["R", "G", "B"];
+
+function offsetFor(comp) {
+  var m = $("offset").value;
+  if (m !== "auto") return +m;
+  return comp.offsetInfo ? comp.offsetInfo.offset : 0;
+}
+function offsetNote(comp) {
+  var off = offsetFor(comp), oi = comp.offsetInfo || {}, t;
+  if ($("offset").value !== "auto") t = "offset " + off + " DN (set by hand)";
+  else if (!oi.known) t = "offset 0 DN: no processing baseline in the metadata";
+  else if (off) t = "offset " + off + " DN: baseline 04.00+ and this archive keeps ESA's +1000";
+  else t = "offset 0 DN: pre-04.00 baseline, or this archive already removed the +1000";
+  if ($("offset").value === "auto" && oi.mixed) t += " (this day mixes both; the majority wins)";
+  $("offNote").textContent = t;
+}
+function writeLimits(st) {
+  CH.forEach(function (c, i) {
+    $("min" + c).value = Math.round(st[i][0]);
+    $("max" + c).value = Math.round(st[i][1]);
+  });
+}
+function readLimits() {
+  var r = [+$("minR").value, +$("maxR").value];
+  return CH.map(function (c) {
+    var lo = $("min" + c).value.trim(), hi = $("max" + c).value.trim();
+    return [lo !== "" && isFinite(+lo) ? +lo : r[0], hi !== "" && isFinite(+hi) ? +hi : r[1]];
+  });
+}
+function pctStretch(comp, off) {
+  var lo = Math.min(Math.max(+$("plo").value, 0), 50) / 100;
+  var hi = Math.min(Math.max(+$("phi").value, 50), 100) / 100;
+  var joint = $("joint").checked;
+  var key = [lo, hi, joint, off].join("|");
+  comp.stretchCache = comp.stretchCache || {};
+  return comp.stretchCache[key] ||
+    (comp.stretchCache[key] = X.autoStretch(comp, lo, hi, { joint: joint, offset: off }));
+}
+
+function renderParams(comp) {
+  if (comp.kind === "rgb8") return {};
+  var off = offsetFor(comp), stretch;
+  offsetNote(comp);
+  if ($("limits").value === "pct" || $("minR").value.trim() === "") {
+    stretch = pctStretch(comp, off);
+    writeLimits(stretch);
+  } else {
+    stretch = readLimits();
+  }
+  return { stretch: stretch, offset: off, gamma: $("gamma").value / 100,
+           transfer: $("curve").value };
+}
+
+// An image overlay whose element is a canvas we keep, so re-stretching is a
+// putImageData, not a PNG encode.
+var CanvasOverlay = L.ImageOverlay.extend({
+  _initImage: function () {
+    var el = this._image = this._url;
+    L.DomUtil.addClass(el, "leaflet-image-layer");
+    if (this._zoomAnimated) L.DomUtil.addClass(el, "leaflet-zoom-animated");
+    el.onselectstart = L.Util.falseFn;
+    el.onmousemove = L.Util.falseFn;
+  }
+});
+
+// Re-render the cached composite (stretch and gamma never refetch).
+function paint() {
+  var comp = state.comp;
+  if (!comp) return;
+  var g = comp.grid;
+  var rgba = X.renderRGBA(comp, renderParams(comp));
+  var cv = state.overlay && state.overlay._url;
+  if (cv && cv.width === g.width && cv.height === g.height) {
+    cv.getContext("2d").putImageData(new ImageData(rgba, g.width, g.height), 0, 0);
+  } else {
+    cv = X.rgbaToCanvas(rgba, g.width, g.height);
+    if (state.overlay) map.removeLayer(state.overlay);
+    state.overlay = new CanvasOverlay(cv, roiLatLngBounds(X.gridLonLatBounds(g)),
+      { opacity: $("opacity").value / 100 });
+    if ($("showImg").checked) state.overlay.addTo(map);
+  }
+  state.overlay.setBounds(roiLatLngBounds(X.gridLonLatBounds(g)));
+}
+
+async function loadImagery() {
+  if (state.dayIndex < 0) throw new Error("search scenes and pick a day first");
+  if (state.loading) state.loading.abort();
+  var ctl = new AbortController();
+  state.loading = ctl;
+  var day = state.days[state.dayIndex];
+  var keys = currentKeys();
+  var grid = X.makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 });
+  $("load").disabled = true;
+  setStatus(day.day + ": reading " + keys.join("/") + " ...");
+  try {
+    var r = await X.loadComposite({
+      scenes: day.scenes, keys: keys, grid: grid,
+      maxScenes: +$("maxScenes").value || 6, signal: ctl.signal,
+      onProgress: function (n, of) {
+        if (state.loading === ctl) setStatus(day.day + ": " + n + "/" + of + " scenes read ...");
+      }
+    });
+    if (state.loading !== ctl) return;
+    var s = r.stats;
+    var errs = s.errors.map(function (e) { return e.id + ": " + e.message; });
+    if (s.lackingAssets) errs.push(s.lackingAssets + " scene(s) lack " + keys.join("/") + " or miss the region");
+    if (!r.composite) {
+      setStatus(day.day + ": no pixels in the region", errs);
+      return;
+    }
+    state.comp = r.composite;
+    state.comp.offsetInfo = X.scenesOffset(day.scenes.filter(function (sc) {
+      return keys.every(function (k) { return sc.assets[k]; });
+    }));
+    paint();
+    var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + s.files + " files, " +
+      grid.width + "x" + grid.height + " px at " + X.gridGroundRes(grid).toFixed(0) +
+      " m, overview " + lv + ", " + s.ms + " ms" +
+      (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    writeHash();
+  } finally {
+    if (state.loading === ctl) { state.loading = null; $("load").disabled = false; }
+  }
+}
+
+// --- wiring ------------------------------------------------------------------
+
+$("search").addEventListener("click", function () { searchScenes().catch(fail); });
+$("load").addEventListener("click", function () { loadImagery().catch(fail); });
+$("preset").addEventListener("change", presetChanged);
+$("gamma").addEventListener("input", function () {
+  $("gval").textContent = (this.value / 100).toFixed(1);
+  paint(); writeHash();
+});
+["limits", "curve", "plo", "phi", "joint", "offset"].forEach(function (id) {
+  $(id).addEventListener("change", function () {
+    if (id === "plo" || id === "phi") $("limits").value = "pct";
+    paint(); writeHash();
+  });
+});
+CH.forEach(function (c) {
+  ["min", "max"].forEach(function (w) {
+    $(w + c).addEventListener("change", function () {
+      $("limits").value = "man";
+      if ($("joint").checked) CH.forEach(function (c2) { $(w + c2).value = $(w + c).value; });
+      paint(); writeHash();
+    });
+  });
+});
+$("resetStretch").addEventListener("click", function () {
+  $("limits").value = "pct"; $("plo").value = 2; $("phi").value = 98;
+  $("joint").checked = false; $("curve").value = "linear"; $("offset").value = "auto";
+  $("gamma").value = 100; $("gval").textContent = "1.0";
+  paint(); writeHash();
+});
+$("opacity").addEventListener("input", function () {
+  if (state.overlay) state.overlay.setOpacity(this.value / 100);
+});
+$("showFoot").addEventListener("change", drawFootprints);
+function showImagery() {
+  if (!state.overlay) return;
+  if ($("showImg").checked) state.overlay.addTo(map);
+  else map.removeLayer(state.overlay);
+}
+$("showImg").addEventListener("change", showImagery);
+document.addEventListener("keydown", function (e) {
+  var tag = (e.target.tagName || "").toLowerCase();
+  if (e.key !== "i" || e.ctrlKey || e.metaKey || e.altKey ||
+      tag === "input" || tag === "select" || tag === "textarea") return;
+  $("showImg").checked = !$("showImg").checked;
+  showImagery();
+});
+
+// --- permalink ---------------------------------------------------------------
+
+function writeHash() {
+  var h = new URLSearchParams();
+  h.set("src", $("src").value);
+  if ($("src").value === "stac") { h.set("url", $("stacUrl").value.trim()); h.set("coll", $("coll").value.trim()); }
+  else { h.set("bucket", $("wtBucket").value.trim()); h.set("res", $("wtRes").value); }
+  if (state.roi) h.set("roi", state.roi.map(function (v) { return v.toFixed(5); }).join(","));
+  h.set("from", $("from").value); h.set("to", $("to").value); h.set("cloud", $("cloud").value);
+  h.set("preset", $("preset").value);
+  if ($("preset").value === "custom") h.set("bands", currentKeys().join(","));
+  if (state.dayIndex >= 0) h.set("day", state.days[state.dayIndex].day);
+  if ($("preset").value !== "visual") {
+    h.set("lim", $("limits").value);
+    if ($("limits").value === "pct") h.set("pct", $("plo").value + "," + $("phi").value);
+    else h.set("mm", CH.map(function (c) { return $("min" + c).value + ":" + $("max" + c).value; }).join(","));
+    if ($("joint").checked) h.set("joint", "1");
+    h.set("curve", $("curve").value);
+    h.set("gamma", ($("gamma").value / 100).toFixed(2));
+    h.set("off", $("offset").value);
+  }
+  history.replaceState(null, "", "#" + h.toString());
+}
+
+async function readHash() {
+  var h = new URLSearchParams(location.hash.slice(1));
+  if (!h.has("roi")) return;
+  if (h.get("src")) $("src").value = h.get("src");
+  sourceChanged();
+  if (h.get("url")) $("stacUrl").value = h.get("url");
+  if (h.get("coll")) $("coll").value = h.get("coll");
+  if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
+  if (h.get("res")) $("wtRes").value = h.get("res");
+  ["from", "to", "cloud", "preset"].forEach(function (k) { if (h.get(k)) $(k).value = h.get(k); });
+  if (h.get("bands")) {
+    var b = h.get("bands").split(",");
+    $("bR").value = b[0]; $("bG").value = b[1]; $("bB").value = b[2];
+  }
+  presetChanged();
+  if (h.get("lim")) $("limits").value = h.get("lim");
+  if (h.get("pct")) { var pc = h.get("pct").split(","); $("plo").value = pc[0]; $("phi").value = pc[1]; }
+  if (h.get("mm")) h.get("mm").split(",").forEach(function (pair, i) {
+    var mm = pair.split(":");
+    $("min" + CH[i]).value = mm[0]; $("max" + CH[i]).value = mm[1];
+  });
+  $("joint").checked = h.get("joint") === "1";
+  if (h.get("curve")) $("curve").value = h.get("curve");
+  if (h.get("gamma")) { $("gamma").value = Math.round(+h.get("gamma") * 100); $("gval").textContent = (+h.get("gamma")).toFixed(1); }
+  if (h.get("off")) $("offset").value = h.get("off");
+  var roi = h.get("roi").split(",").map(Number);
+  setRoi(roi);
+  map.fitBounds(roiLatLngBounds(roi).pad(0.1));
+  await searchScenes();
+  var want = h.get("day");
+  var i = state.days.findIndex(function (d) { return d.day === want; });
+  if (i >= 0) await selectDay(i, true);
+}
+
+presetChanged();
+readHash().catch(fail);
+
+// exposed for debugging and for later UI layers (time scrubber, etc.)
+window.explorer = { X: X, map: map, state: state, selectDay: selectDay,
+                    loadImagery: loadImagery, searchScenes: searchScenes, setRoi: setRoi };
+</script>
+</body>
+</html>
