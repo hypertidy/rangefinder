@@ -25,9 +25,10 @@ Two ways to open it locally:
 ## Using it
 
 1. **Source.** STAC API URL + collection (the `list` button reads
-   `/collections`); a starc store URL (`read store` shows what it holds,
+   `/collections`); a starc store URL ([in-dev]: an experimental format
+   from a related project, listed last) (`read store` shows what it holds,
    draws its tiles and sets the dates to its span; see `docs/starc.md`);
-   or the wildtiles bucket and tile resolution. Choosing wildtiles reads the
+   or the wildtiles bucket and tile resolution ([in-dev] likewise). Choosing wildtiles reads the
    bucket's three well-known keys (`index/inventory.parquet`,
    `registry/tiles.parquet`, `registry/BANDS.txt`): its regions fill the
    region picker and are outlined on the map, and extra bands such as
