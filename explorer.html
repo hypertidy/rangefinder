@@ -249,6 +249,9 @@
       <button id="draw" class="minor">draw on map</button>
       <button id="useView" class="minor">use view</button>
     </div>
+    <label class="row" style="margin-top:8px" title="when the map stops moving, the view becomes the region and is read again at its own detail">
+      <input type="checkbox" id="follow"> <span>follow the map (zoom in for finer data)</span>
+    </label>
     <div id="roiInfo" class="note">no region yet: drag a box after "draw on map"</div>
 
     <h2>scenes</h2>
@@ -5468,11 +5471,39 @@ map.on("mouseup", function(e) {
   if (ext[2] - ext[0] < (v[2] - v[0]) / px.x * 3 || ext[3] - ext[1] < (v[3] - v[1]) / px.y * 3) return;
   setRoiExtent(ext);
 });
-$("useView").addEventListener("click", function() {
+function useView() {
   if (state.mapCrs === "EPSG:3857") {
     var b = map.getBounds();
     setRoi([b.getWest(), Math.max(-85, b.getSouth()), b.getEast(), Math.min(85, b.getNorth())]);
   } else setRoiExtent(viewExtent(map));
+}
+$("useView").addEventListener("click", useView);
+var followTimer = null;
+var followSeq = 0;
+async function followView() {
+  var seq = ++followSeq;
+  var day = state.days[state.dayIndex] ? state.days[state.dayIndex].day : null;
+  var preset = $("preset").value;
+  useView();
+  writeHash();
+  await searchScenes(preset);
+  if (seq !== followSeq || !datedDays()) return;
+  var i = state.days.findIndex(function(d) {
+    return d.day === day;
+  });
+  if (i >= 0) await selectDay(i, true);
+}
+function followSoon() {
+  clearTimeout(followTimer);
+  if (!$("follow").checked || drawing) return;
+  followTimer = setTimeout(function() {
+    followView().catch(fail);
+  }, 600);
+}
+map.on("moveend", followSoon);
+$("follow").addEventListener("change", function() {
+  followSoon();
+  writeHash();
 });
 var warpedBase = null;
 async function setMapCrs(code, quiet) {
@@ -6089,13 +6120,17 @@ function cacheKey(i) {
 }
 function dayComposite(i, ctl, onProgress) {
   var key = cacheKey(i), hit2 = state.cache.get(key);
+  if (hit2 && !hit2.done && hit2.signal && hit2.signal.aborted) {
+    state.cache.delete(key);
+    hit2 = null;
+  }
   if (hit2) {
     state.cache.delete(key);
     state.cache.set(key, hit2);
     return hit2.promise;
   }
   var day = state.days[i], keys = currentKeys(), mode = currentMode();
-  var entry = { done: false, bytes: 0 };
+  var entry = { done: false, bytes: 0, signal: ctl.signal };
   entry.promise = loadComposite({
     scenes: day.scenes,
     keys,
@@ -6569,6 +6604,7 @@ function writeHash() {
   h.set("to", $("to").value);
   h.set("cloud", $("cloud").value);
   h.set("preset", $("preset").value);
+  if ($("follow").checked) h.set("follow", "1");
   if ($("preset").value === "custom") h.set("bands", currentKeys().join(","));
   if (state.dayIndex >= 0) h.set("day", state.days[state.dayIndex].day);
   var pm = currentMode();
@@ -6622,6 +6658,7 @@ async function readHash() {
     return;
   }
   if (h.get("url")) $("stacUrl").value = h.get("url");
+  $("follow").checked = h.get("follow") === "1";
   syncPicks();
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("cloud")) $("cloud").value = h.get("cloud");

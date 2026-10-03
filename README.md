@@ -57,7 +57,10 @@ Two ways to open it locally:
    your own URL and leaving the box (or pressing `read`) does the same. An
    `http://` URL is fetched over https when the page itself is on https,
    since browsers block the mixed request.
-2. **Region.** `draw on map`, then drag a box; or `use view`. **Map and
+2. **Region.** `draw on map`, then drag a box; or `use view`. With
+   `follow the map` ticked, the view becomes the region whenever the map
+   stops moving and is read again (same day and composite), so zooming in
+   reads finer overviews or full-resolution files and zooming out coarser. **Map and
    output CRS** sets the projection the map is drawn in and the composite
    is built in. The choices are Web Mercator (the default), Antarctic or
    Arctic polar stereographic, Australian Albers, the UTM zone of the
