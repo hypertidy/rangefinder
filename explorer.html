@@ -231,6 +231,19 @@
     </div>
 
     <h2>region</h2>
+    <label for="ocrs">map and output CRS</label>
+    <div class="row">
+      <select id="ocrs">
+        <option value="EPSG:3857">Web Mercator (EPSG:3857)</option>
+        <option value="EPSG:3031">Antarctic polar stereographic (EPSG:3031)</option>
+        <option value="EPSG:3413">Arctic polar stereographic (EPSG:3413)</option>
+        <option value="EPSG:3577">Australian Albers (EPSG:3577)</option>
+        <option value="utm">UTM zone of the view</option>
+        <option value="EPSG:4326">lon/lat (EPSG:4326)</option>
+        <option value="other">other EPSG code ...</option>
+      </select>
+      <input id="ocrsCode" class="hide" placeholder="EPSG:28355" spellcheck="false">
+    </div>
     <div class="row">
       <button id="draw" class="minor">draw on map</button>
       <button id="useView" class="minor">use view</button>
@@ -424,8 +437,12 @@ __export(explorer_exports, {
   crsCode: () => crsCode,
   crsFromWkt: () => crsFromWkt,
   crsProvenance: () => crsProvenance,
+  defaultView: () => defaultView,
   ensureCrs: () => ensureCrs,
+  extentLatLngs: () => extentLatLngs,
+  extentOverlayClass: () => extentOverlayClass,
   fetchTile: () => fetchTile,
+  fitExtent: () => fitExtent,
   geometryBbox: () => geometryBbox,
   gridGroundRes: () => gridGroundRes,
   gridLonLatBounds: () => gridLonLatBounds,
@@ -433,8 +450,10 @@ __export(explorer_exports, {
   groupByDay: () => groupByDay,
   guessDecode: () => guessDecode,
   hillshade: () => hillshade,
+  homeExtent: () => homeExtent,
   isCapabilitiesUrl: () => isCapabilitiesUrl,
   isGeographic: () => isGeographic,
+  leafletCrs: () => leafletCrs,
   levelRange: () => levelRange,
   listCollections: () => listCollections,
   loadComposite: () => loadComposite,
@@ -479,7 +498,9 @@ __export(explorer_exports, {
   transformBbox: () => transformBbox,
   utmCode: () => utmCode,
   utmZoneOf: () => utmZoneOf,
+  viewExtent: () => viewExtent,
   vrtCatalog: () => vrtCatalog,
+  warpedBasemap: () => warpedBasemap,
   webMercatorQuad: () => webMercatorQuad,
   wildtilesCatalog: () => wildtilesCatalog,
   wktEpsg: () => wktEpsg,
@@ -1994,6 +2015,198 @@ function cogReadTiles(log, max) {
     }
   });
   return out;
+}
+
+// lib/mapcrs.js
+var POLAR = [-4194304 * 1.5, -4194304 * 1.5, 4194304 * 1.5, 4194304 * 1.5];
+var HOME = {
+  "EPSG:3031": POLAR,
+  "EPSG:3976": POLAR,
+  "EPSG:3413": POLAR,
+  "EPSG:3995": POLAR,
+  "EPSG:3412": POLAR,
+  "EPSG:3411": POLAR,
+  "EPSG:9354": POLAR,
+  "EPSG:6931": [-9e6, -9e6, 9e6, 9e6],
+  "EPSG:6932": [-9e6, -9e6, 9e6, 9e6],
+  "EPSG:4326": [-180, -90, 180, 90]
+};
+function defaultView(crs) {
+  crs = ensureCrs(crs);
+  return HOME[crs] && crs !== "EPSG:4326" ? [-36e5, -36e5, 36e5, 36e5].map(function(v) {
+    return /^EPSG:69/.test(crs) ? v * 2 : v;
+  }) : null;
+}
+function homeExtent(crs, lonlat) {
+  crs = ensureCrs(crs);
+  if (HOME[crs]) return HOME[crs].slice();
+  var b = lonlat || [-180, -85, 180, 85];
+  var cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+  var wx = Math.max(20, (b[2] - b[0]) * 4), wy = Math.max(15, (b[3] - b[1]) * 4);
+  var wide = [
+    Math.max(-180, cx - wx / 2),
+    Math.max(-85, cy - wy / 2),
+    Math.min(180, cx + wx / 2),
+    Math.min(85, cy + wy / 2)
+  ];
+  var e = transformBbox(wide, "EPSG:4326", crs, 32);
+  var s = Math.max(e[2] - e[0], e[3] - e[1]) / 2, mx = (e[0] + e[2]) / 2, my = (e[1] + e[3]) / 2;
+  return [mx - s, my - s, mx + s, my + s];
+}
+function leafletCrs(code, extent) {
+  var L2 = globalThis.L;
+  code = ensureCrs(code);
+  if (code === "EPSG:3857") return L2.CRS.EPSG3857;
+  extent = extent || homeExtent(code);
+  var f = globalThis.proj4("EPSG:4326", code);
+  var res0 = Math.max(extent[2] - extent[0], extent[3] - extent[1]) / 256;
+  var projection = {
+    project: function(ll) {
+      var p = f.forward([ll.lng, ll.lat]);
+      return L2.point(p[0], p[1]);
+    },
+    unproject: function(pt) {
+      var q = f.inverse([pt.x, pt.y]);
+      return L2.latLng(q[1], q[0]);
+    },
+    bounds: L2.bounds([extent[0], extent[1]], [extent[2], extent[3]])
+  };
+  return L2.extend({}, L2.CRS, {
+    code,
+    projection,
+    extent,
+    transformation: new L2.Transformation(1 / res0, -extent[0] / res0, -1 / res0, extent[3] / res0),
+    scale: function(z) {
+      return Math.pow(2, z);
+    },
+    zoom: function(s) {
+      return Math.log(s) / Math.LN2;
+    },
+    distance: L2.CRS.Earth.distance,
+    R: L2.CRS.Earth.R,
+    infinite: false
+  });
+}
+function viewExtent(map2) {
+  var crs = map2.options.crs, pb = map2.getPixelBounds(), z = map2.getZoom();
+  var a = crs.projection.project(crs.pointToLatLng(pb.min, z));
+  var b = crs.projection.project(crs.pointToLatLng(pb.max, z));
+  return [Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y)];
+}
+function fitExtent(map2, e, pad) {
+  var crs = map2.options.crs, L2 = globalThis.L, size = map2.getSize();
+  pad = pad || 0;
+  var w = (e[2] - e[0]) * (1 + 2 * pad), h = (e[3] - e[1]) * (1 + 2 * pad);
+  var s = Math.min(size.x / w, size.y / h) / Math.abs(crs.transformation._a);
+  var z = Math.floor(crs.zoom(s));
+  z = Math.max(map2.getMinZoom(), Math.min(isFinite(map2.getMaxZoom()) ? map2.getMaxZoom() : 22, z));
+  var c = crs.projection.unproject(L2.point((e[0] + e[2]) / 2, (e[1] + e[3]) / 2));
+  map2.setView(c, z, { animate: false });
+}
+function extentLatLngs(map2, e, n) {
+  var crs = map2.options.crs, L2 = globalThis.L, out = [];
+  n = n || 16;
+  var pts = [];
+  for (var i = 0; i < n; i++) pts.push([e[0] + (e[2] - e[0]) * i / n, e[1]]);
+  for (i = 0; i < n; i++) pts.push([e[2], e[1] + (e[3] - e[1]) * i / n]);
+  for (i = 0; i < n; i++) pts.push([e[2] - (e[2] - e[0]) * i / n, e[3]]);
+  for (i = 0; i < n; i++) pts.push([e[0], e[3] - (e[3] - e[1]) * i / n]);
+  pts.forEach(function(p) {
+    out.push(crs.projection.unproject(L2.point(p[0], p[1])));
+  });
+  return out;
+}
+function extentOverlayClass() {
+  var L2 = globalThis.L;
+  return L2.ImageOverlay.extend({
+    initialize: function(url, extent, options) {
+      this._extent = extent;
+      L2.ImageOverlay.prototype.initialize.call(this, url, L2.latLngBounds([0, 0], [0, 0]), options);
+    },
+    setExtent: function(e) {
+      this._extent = e;
+      if (this._map) this._reset();
+      return this;
+    },
+    _corners: function() {
+      var crs = this._map.options.crs, e = this._extent;
+      return [crs.projection.unproject(L2.point(e[0], e[3])), crs.projection.unproject(L2.point(e[2], e[1]))];
+    },
+    _animateZoom: function(ev) {
+      var c = this._corners(), m = this._map;
+      var tl = m._latLngToNewLayerPoint(c[0], ev.zoom, ev.center);
+      L2.DomUtil.setTransform(this._image, tl, m.getZoomScale(ev.zoom));
+    },
+    _reset: function() {
+      var c = this._corners(), m = this._map;
+      this._bounds = L2.latLngBounds(c[0], c[1]);
+      var tl = m.latLngToLayerPoint(c[0]), br = m.latLngToLayerPoint(c[1]);
+      L2.DomUtil.setPosition(this._image, tl);
+      this._image.style.width = br.x - tl.x + "px";
+      this._image.style.height = br.y - tl.y + "px";
+    }
+  });
+}
+function warpedBasemap(template, opts) {
+  var L2 = globalThis.L, Overlay = extentOverlayClass();
+  opts = opts || {};
+  var src = {
+    kind: "tiles",
+    template,
+    tms: webMercatorQuad(opts.maxzoom || 18),
+    format: "rgb",
+    label: "basemap",
+    bbox: null
+  };
+  var layer = L2.Layer.extend({
+    onAdd: function(map2) {
+      this._map = map2;
+      this._seq = 0;
+      this._ov = null;
+      map2.on("moveend", this._update, this);
+      this._update();
+    },
+    onRemove: function(map2) {
+      map2.off("moveend", this._update, this);
+      if (this._ov) map2.removeLayer(this._ov);
+      this._ov = null;
+    },
+    _update: async function() {
+      var map2 = this._map, seq = ++this._seq;
+      if (!map2) return;
+      var e = viewExtent(map2), size = map2.getSize();
+      var grid = {
+        crs: map2.options.crs.code,
+        bbox: e,
+        width: Math.max(1, Math.round(size.x)),
+        height: Math.max(1, Math.round(size.y))
+      };
+      var r = null;
+      try {
+        r = await readTilesWarped(src, grid, { maxTiles: 96 });
+      } catch (err) {
+        r = null;
+      }
+      if (seq !== this._seq || !this._map) return;
+      if (!r) return;
+      var n = grid.width * grid.height, rgba = new Uint8ClampedArray(n * 4);
+      for (var i = 0; i < n; i++) {
+        rgba[4 * i] = r.bands[0][i];
+        rgba[4 * i + 1] = r.bands[1][i];
+        rgba[4 * i + 2] = r.bands[2][i];
+        rgba[4 * i + 3] = r.valid[i] ? 255 : 0;
+      }
+      var cv = document.createElement("canvas");
+      cv.width = grid.width;
+      cv.height = grid.height;
+      cv.getContext("2d").putImageData(new ImageData(rgba, grid.width, grid.height), 0, 0);
+      var ov = new Overlay(cv.toDataURL("image/png"), e, { pane: "tilePane", interactive: false });
+      ov.addTo(map2);
+      if (this._ov) map2.removeLayer(this._ov);
+      this._ov = ov;
+    }
+  });
+  return new layer();
 }
 
 // lib/sources/cog.js
@@ -4266,7 +4479,8 @@ var labels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/R
   maxZoom: 18,
   pane: "shadowPane"
 }).addTo(map);
-L.control.layers(basemaps, { "place labels": labels }, { position: "topright" }).addTo(map);
+var layersCtl = L.control.layers(basemaps, { "place labels": labels }, { position: "topright" }).addTo(map);
+var BASE_TEMPLATE = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
 L.control.scale({ imperial: false }).addTo(map);
 var coordBox = L.control({ position: "bottomleft" });
 coordBox.onAdd = function() {
@@ -4284,6 +4498,9 @@ var state = {
   catalog: null,
   roi: null,
   roiRect: null,
+  mapCrs: "EPSG:3857",
+  roiExt: null,
+  // the map's CRS; the region as an extent in it
   scenes: [],
   days: [],
   dayIndex: -1,
@@ -4471,7 +4688,7 @@ async function readStore(fit, quiet) {
         Math.max(a[3], t.bbox[3])
       ];
     }, [180, 90, -180, -90]);
-    map.fitBounds(roiLatLngBounds(b));
+    fitLonLat(b);
   }
   if (!quiet) setStatus("store read: " + info.acquisitions + " acquisitions" + (state.roi ? "" : "\ndraw a region over the purple tiles, then search"));
   return info;
@@ -4521,7 +4738,7 @@ $("wtRegion").addEventListener("change", function() {
   var r = cubeRegions[+this.value];
   if (!r || this.value === "") return;
   setRoi(r.bbox);
-  map.fitBounds(roiLatLngBounds(r.bbox).pad(0.1));
+  fitLonLat(r.bbox, 0.1);
 });
 $("wtRes").addEventListener("change", function() {
   if (cubeRegions.length) readCube(true).catch(fail);
@@ -4540,7 +4757,7 @@ async function readVrt(fit, quiet) {
     { style, interactive: false }
   ).addTo(coverLayer);
   $("vrtInfo").textContent = info.files + " files, " + info.bands + " band(s) of " + info.dataType + " at " + info.res + "; " + crsLine(info.crs, info.crsFrom);
-  if (fit && !state.roi) map.fitBounds(roiLatLngBounds(info.bbox));
+  if (fit && !state.roi) fitLonLat(info.bbox);
   if (!quiet) setStatus("VRT read: " + info.files + " files\ndraw a region over the purple tiles, then search");
   return info;
 }
@@ -4566,7 +4783,7 @@ async function readCogs(fit) {
   $("cogInfo").style.whiteSpace = "pre-wrap";
   if (fit && info.bbox) {
     setRoi(info.bbox);
-    map.fitBounds(roiLatLngBounds(info.bbox).pad(0.1));
+    fitLonLat(info.bbox, 0.1);
   }
   setStatus(info.bbox ? "headers read: search to list the files" : "", info.bbox ? [] : ["no readable file"]);
   return info;
@@ -4703,7 +4920,7 @@ async function describeZarr(fit, keepDates) {
     $("to").value = d.times[1];
     $("from").value = isoDay2(new Date(Date.parse(d.times[1]) - 30 * 864e5));
   }
-  if (fit && !state.roi) map.fitBounds(roiLatLngBounds(d.bbox));
+  if (fit && !state.roi) fitLonLat(d.bbox);
   setStatus(d.name + " read\ndraw a region (a chunk or two of it), then search");
   return d;
 }
@@ -4821,7 +5038,7 @@ $("wtTile").addEventListener("change", function() {
     var t = parseTileId(this.value);
     $("wtRes").value = String(t.res);
     setRoi(tileLonLatBbox(t, 1));
-    map.fitBounds(roiLatLngBounds(state.roi).pad(0.1));
+    fitLonLat(state.roi, 0.1);
   } catch (e) {
     fail(e);
   }
@@ -4829,23 +5046,46 @@ $("wtTile").addEventListener("change", function() {
 function roiLatLngBounds(b) {
   return L.latLngBounds([b[1], b[0]], [b[3], b[2]]);
 }
+function fitLonLat(b, pad) {
+  if (state.mapCrs === "EPSG:3857") {
+    map.fitBounds(roiLatLngBounds(b).pad(pad || 0));
+    return;
+  }
+  fitExtent(map, transformBbox(b, "EPSG:4326", state.mapCrs, 32), pad || 0);
+}
 function setRoi(bbox) {
-  state.roi = bbox;
+  setRoiExtent(transformBbox(bbox, "EPSG:4326", state.mapCrs, 32), bbox);
+}
+function setRoiExtent(ext, lonlat, keepScenes) {
+  state.roiExt = ext;
+  state.roi = lonlat || lonLatBounds(ext, state.mapCrs);
+  drawRoi();
+  var g = makeGrid(state.roi, { crs: state.mapCrs, extent: ext, maxDim: 1e5 });
+  var res = gridGroundRes(g);
+  var kmx = g.width * res / 1e3, kmy = g.height * res / 1e3;
+  $("roiInfo").textContent = "region " + kmx.toFixed(1) + " x " + kmy.toFixed(1) + " km  [" + state.roi.map(function(v) {
+    return v.toFixed(3);
+  }).join(", ") + "]" + (state.mapCrs === "EPSG:3857" ? "" : " in " + state.mapCrs);
+  if (!keepScenes) clearScenes();
+}
+function drawRoi() {
   if (state.roiRect) map.removeLayer(state.roiRect);
-  state.roiRect = L.rectangle(roiLatLngBounds(bbox), {
+  state.roiRect = null;
+  if (!state.roiExt) return;
+  state.roiRect = L.polygon(extentLatLngs(map, state.roiExt), {
     color: "#4fc3f7",
     weight: 2,
     fill: false,
     dashArray: "6 4",
     interactive: false
   }).addTo(map);
-  var g = makeGrid(bbox, { maxDim: 1e5 });
-  var res = gridGroundRes(g);
-  var kmx = g.width * res / 1e3, kmy = g.height * res / 1e3;
-  $("roiInfo").textContent = "region " + kmx.toFixed(1) + " x " + kmy.toFixed(1) + " km  [" + bbox.map(function(v) {
-    return v.toFixed(3);
-  }).join(", ") + "]";
-  clearScenes();
+}
+function projected(ll) {
+  var p = map.options.crs.projection.project(ll);
+  return [p.x, p.y];
+}
+function boxOf(a, b) {
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
 }
 var drawing = null;
 function endDraw() {
@@ -4870,24 +5110,96 @@ $("draw").addEventListener("click", function() {
 });
 map.on("mousedown", function(e) {
   if (!drawing) return;
-  drawing.start = e.latlng;
-  drawing.rect = L.rectangle([e.latlng, e.latlng], { color: "#4fc3f7", weight: 1, interactive: false }).addTo(map);
+  drawing.start = projected(e.latlng);
+  drawing.rect = L.polygon([e.latlng], { color: "#4fc3f7", weight: 1, interactive: false }).addTo(map);
 });
 map.on("mousemove", function(e) {
-  if (drawing && drawing.start) drawing.rect.setBounds([drawing.start, e.latlng]);
+  if (drawing && drawing.start) {
+    drawing.rect.setLatLngs(extentLatLngs(map, boxOf(drawing.start, projected(e.latlng)), 4));
+  }
 });
 map.on("mouseup", function(e) {
   if (!drawing || !drawing.start) return;
-  var b = L.latLngBounds(drawing.start, e.latlng);
+  var ext = boxOf(drawing.start, projected(e.latlng)), px = map.getSize();
   map.removeLayer(drawing.rect);
   endDraw();
-  if (b.getNorth() - b.getSouth() < 1e-5 || b.getEast() - b.getWest() < 1e-5) return;
-  setRoi([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+  var v = viewExtent(map);
+  if (ext[2] - ext[0] < (v[2] - v[0]) / px.x * 3 || ext[3] - ext[1] < (v[3] - v[1]) / px.y * 3) return;
+  setRoiExtent(ext);
 });
 $("useView").addEventListener("click", function() {
-  var b = map.getBounds();
-  setRoi([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+  if (state.mapCrs === "EPSG:3857") {
+    var b = map.getBounds();
+    setRoi([b.getWest(), Math.max(-85, b.getSouth()), b.getEast(), Math.min(85, b.getNorth())]);
+  } else setRoiExtent(viewExtent(map));
 });
+var warpedBase = null;
+async function setMapCrs(code, quiet) {
+  code = await resolveCrs(code);
+  if (code === state.mapCrs && map.options.crs.code === code) return;
+  var view = state.mapCrs === "EPSG:3857" ? (function() {
+    var b = map.getBounds();
+    return [b.getWest(), Math.max(-85, b.getSouth()), b.getEast(), Math.min(85, b.getNorth())];
+  })() : lonLatBounds(viewExtent(map), state.mapCrs);
+  var c = map.getCenter(), z = map.getZoom();
+  var crs = leafletCrs(code, homeExtent(code, state.roi || view));
+  if (code === "EPSG:3857") {
+    if (warpedBase) {
+      map.removeLayer(warpedBase);
+      warpedBase = null;
+    }
+    basemaps["Esri imagery"].addTo(map);
+    labels.addTo(map);
+    if (!layersCtl._map) layersCtl.addTo(map);
+  } else {
+    Object.keys(basemaps).forEach(function(k) {
+      map.removeLayer(basemaps[k]);
+    });
+    map.removeLayer(labels);
+    if (layersCtl._map) layersCtl.remove();
+    if (!warpedBase) warpedBase = warpedBasemap(BASE_TEMPLATE);
+  }
+  if (state.overlay) {
+    map.removeLayer(state.overlay);
+    state.overlay = null;
+  }
+  state.comp = null;
+  map.options.crs = crs;
+  state.mapCrs = code;
+  map.setView(c, z, { reset: true });
+  if (warpedBase && !warpedBase._map) warpedBase.addTo(map);
+  if (state.roi) {
+    setRoiExtent(transformBbox(state.roi, "EPSG:4326", code, 32), state.roi, true);
+    fitExtent(map, state.roiExt, 0.1);
+    if (state.dayIndex >= 0) selectDay(state.dayIndex, true).catch(fail);
+  } else {
+    fitExtent(map, defaultView(code) || transformBbox(view, "EPSG:4326", code, 32), 0);
+  }
+  if (!quiet) writeHash();
+}
+function ocrsChanged() {
+  var v = $("ocrs").value;
+  $("ocrsCode").classList.toggle("hide", v !== "other");
+  if (v === "other") {
+    if ($("ocrsCode").value.trim()) setMapCrs($("ocrsCode").value.trim()).catch(fail);
+    return;
+  }
+  if (v === "utm") {
+    var c = state.roi ? [(state.roi[0] + state.roi[2]) / 2, (state.roi[1] + state.roi[3]) / 2] : [map.getCenter().lng, map.getCenter().lat];
+    v = utmCode(utmZoneOf(c[0]), c[1] < 0);
+  }
+  setMapCrs(v).catch(fail);
+}
+$("ocrs").addEventListener("change", ocrsChanged);
+$("ocrsCode").addEventListener("change", ocrsChanged);
+function showOcrs(code) {
+  var opt = Array.prototype.some.call($("ocrs").options, function(o) {
+    return o.value === code;
+  });
+  $("ocrs").value = opt ? code : "other";
+  $("ocrsCode").value = opt ? "" : code;
+  $("ocrsCode").classList.toggle("hide", opt);
+}
 function clearScenes() {
   stopPlay();
   if (state.prefetch) {
@@ -5370,7 +5682,7 @@ function legend(comp) {
     box.appendChild(row);
   });
 }
-var CanvasOverlay = L.ImageOverlay.extend({
+var CanvasOverlay = extentOverlayClass().extend({
   _initImage: function() {
     var el = this._image = this._url;
     L.DomUtil.addClass(el, "leaflet-image-layer");
@@ -5390,14 +5702,10 @@ function paint() {
   } else {
     cv = rgbaToCanvas(rgba, g.width, g.height);
     if (state.overlay) map.removeLayer(state.overlay);
-    state.overlay = new CanvasOverlay(
-      cv,
-      roiLatLngBounds(gridLonLatBounds(g)),
-      { opacity: $("opacity").value / 100 }
-    );
+    state.overlay = new CanvasOverlay(cv, g.bbox, { opacity: $("opacity").value / 100 });
     if ($("showImg").checked) state.overlay.addTo(map);
   }
-  state.overlay.setBounds(roiLatLngBounds(gridLonLatBounds(g)));
+  state.overlay.setExtent(g.bbox);
 }
 var CACHE_BYTES2 = 4e8;
 function minRes() {
@@ -5409,7 +5717,12 @@ function minRes() {
   return rs.length ? Math.min.apply(null, rs) : 10;
 }
 function currentGrid() {
-  return makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: minRes() });
+  return makeGrid(state.roi, {
+    crs: state.mapCrs,
+    extent: state.roiExt,
+    maxDim: +$("maxpx").value,
+    minGroundRes: minRes()
+  });
 }
 function cacheKey(i) {
   var d = state.days[i];
@@ -5418,6 +5731,7 @@ function cacheKey(i) {
   return [
     d.day,
     currentMode() + ":" + currentKeys().join(","),
+    g.crs,
     g.width,
     g.height,
     g.bbox.join(","),
@@ -5561,7 +5875,7 @@ async function inspLevels(prefer) {
   $("inspTiles").classList.toggle("hide", !src);
   if (!src) return;
   var sel = $("inspLevel"), r = levelRange(src), unit = /3857|326|327|3031|3413|3976/.test(src.tms.crs) ? " m" : "";
-  var b = map.getBounds(), view = [b.getWest(), Math.max(-85, b.getSouth()), b.getEast(), Math.min(85, b.getNorth())];
+  var b = viewBox(), view = [b[0], Math.max(-85, b[1]), b[2], Math.min(85, b[3])];
   var fit = chooseLevel(src, makeGrid(view, { maxDim: Math.max(map.getSize().x, map.getSize().y) })).index;
   sel.innerHTML = "";
   for (var i = r[0]; i <= r[1]; i++) {
@@ -5653,6 +5967,7 @@ async function peek(t) {
   $("peekText").style.whiteSpace = "pre-wrap";
 }
 function viewBox() {
+  if (state.mapCrs !== "EPSG:3857") return lonLatBounds(viewExtent(map), state.mapCrs);
   var b = map.getBounds();
   return [Math.max(-180, b.getWest()), Math.max(-90, b.getSouth()), Math.min(180, b.getEast()), Math.min(90, b.getNorth())];
 }
@@ -5871,9 +6186,15 @@ function writeHash() {
     h.set("bucket", $("wtBucket").value.trim());
     h.set("res", $("wtRes").value);
   }
+  if (state.mapCrs !== "EPSG:3857") h.set("crs", state.mapCrs);
   if (state.roi) h.set("roi", state.roi.map(function(v) {
     return v.toFixed(5);
   }).join(","));
+  if (state.roi && state.mapCrs !== "EPSG:3857") {
+    h.set("rext", state.roiExt.map(function(v) {
+      return +v.toPrecision(9);
+    }).join(","));
+  }
   h.set("from", $("from").value);
   h.set("to", $("to").value);
   h.set("cloud", $("cloud").value);
@@ -5900,6 +6221,10 @@ function writeHash() {
 }
 async function readHash() {
   var h = new URLSearchParams(location.hash.slice(1));
+  if (h.get("crs")) {
+    showOcrs(h.get("crs"));
+    await setMapCrs(h.get("crs"), true);
+  }
   if (h.get("src")) $("src").value = h.get("src");
   sourceChanged();
   if (h.get("store")) $("starcUrl").value = h.get("store");
@@ -5961,8 +6286,13 @@ async function readHash() {
   }
   if (h.get("off")) $("offset").value = h.get("off");
   var roi = h.get("roi").split(",").map(Number);
-  setRoi(roi);
-  map.fitBounds(roiLatLngBounds(roi).pad(0.1));
+  if (h.get("rext") && state.mapCrs !== "EPSG:3857") {
+    setRoiExtent(h.get("rext").split(",").map(Number), roi);
+    fitExtent(map, state.roiExt, 0.1);
+  } else {
+    setRoi(roi);
+    fitLonLat(roi, 0.1);
+  }
   await searchScenes(wantPreset || null);
   if (h.get("src") === "starc") readStore(false, true).catch(fail);
   if (h.get("src") === "vrt") readVrt(false, true).catch(fail);

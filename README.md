@@ -52,7 +52,20 @@ Two ways to open it locally:
    your own URL and leaving the box (or pressing `read`) does the same. An
    `http://` URL is fetched over https when the page itself is on https,
    since browsers block the mixed request.
-2. **Region.** `draw on map`, then drag a box; or `use view`.
+2. **Region.** `draw on map`, then drag a box; or `use view`. **Map and
+   output CRS** sets the projection the map is drawn in and the composite
+   is built in. The choices are Web Mercator (the default), Antarctic or
+   Arctic polar stereographic, Australian Albers, the UTM zone of the
+   view, lon/lat, or any EPSG code.
+   - A box is drawn square in that CRS, so a polar region is a true polar
+     box, not a lon/lat one.
+   - Changing the CRS keeps the region and the scenes and composes the
+     current day again on the new grid.
+   - Outside Web Mercator the basemap is Esri imagery warped into the CRS
+     for each view, with the same warp the composites use. Mercator tiles
+     stop at 85 degrees, so a polar view has a hole at the pole.
+   - There is no reprojection while panning: the map simply is that
+     projection.
 3. **Scenes.** Date range (a blank date is an open end), max cloud,
    `Search scenes`. Results are grouped by solar day (local date at the
    scene centre). Click a day to load it, or use the timeline.
@@ -92,7 +105,7 @@ Two ways to open it locally:
 7. **Output size** caps the longer side of the output grid; it is also never
    finer than the data (the scenes' own resolution when they say, else 10 m). **Max scenes** caps how many scenes one load reads.
 
-The URL hash is a permalink (source, region, dates, composite, day).
+The URL hash is a permalink (source, map CRS, region, dates, composite, day).
 
 ![Four-scene true colour mosaic, same limits for all bands, sqrt curve](docs/img/tasmania-joint-sqrt.png)
 
@@ -113,6 +126,8 @@ lib/sources/zarr.js      layers 1-3: one variable of a Zarr store (zarrita), chu
 lib/cog.js               layer 3: windowed overview reads warped to the grid
 lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/decode,
                          the same warp for tile pyramids, WMTS capabilities parsing
+lib/mapcrs.js            Leaflet in any CRS: a CRS from proj4, overlays placed by extent,
+                         a basemap warped into the view
 lib/inspect.js           the tile inspector: tile grids, probes, coverage walk,
                          overzoom check, COG read tiles
 lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma, ramps,
@@ -316,6 +331,9 @@ explorer itself has no dependencies to install).
   (`python3 make_fixtures.py wildtiles` rebuilds just those).
   `make_starc_fixture.py` builds the starc stores from `items.json`
   (`pip install pyarrow`); those are committed.
+- `test-crs.mjs` loads a permalink and picks each given map/output CRS in
+  turn (the AWS terrain tiles stand in for the Esri basemap, which the
+  container can't reach).
 - `test-zarr.mjs` loads a Zarr permalink, steps one day (the chunk cache)
   and draws `last read`. `npm run bundle-zarrita` first; the tests serve
   zarrita from that bundle in place of jsdelivr.
