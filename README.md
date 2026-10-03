@@ -2,8 +2,8 @@
 
 A static, server-free explorer for online imagery and gridded data. Point it
 at a STAC API (default: Earth Search v1, `sentinel-2-l2a`), a published starc
-store, the wildtiles cube, a GDAL VRT mosaic, a list of COG URLs or a map
-tile server (XYZ or WMTS, any tile matrix set), draw a
+store, the wildtiles cube, a GDAL VRT mosaic, a list of COG URLs, a map
+tile server (XYZ or WMTS, any tile matrix set) or a Zarr store, draw a
 region on the map, search, scrub through the days, and the page reads the
 COGs directly by HTTP range request and composes the image in the browser:
 three bands to RGB, one band through a colour ramp (with hillshade for
@@ -43,7 +43,10 @@ Two ways to open it locally:
    and formats, and a WMTS time dimension becomes the day list and timeline.
    Tiles go through the same warp as COGs, at the level that suits the
    region. Elevation packed into RGB (terrarium, Mapbox terrain-RGB) is
-   decoded to metres, so it gets ramps and hillshade like a DEM.
+   decoded to metres, so it gets ramps and hillshade like a DEM. A **Zarr
+   store** (default: MUR SST on AWS) is read with zarrita through its
+   consolidated metadata: `read` lists the gridded variables, and the chosen
+   one's coordinates give its grid, CRS and times (see "Zarr" below).
 2. **Region.** `draw on map`, then drag a box; or `use view`.
 3. **Scenes.** Date range (a blank date is an open end), max cloud,
    `Search scenes`. Results are grouped by solar day (local date at the
@@ -77,9 +80,9 @@ Two ways to open it locally:
    of tiles that have data, within the request budget, and flags a tile
    that is just its parent upsampled, so it finds where native resolution
    really ends on a patchy server. For any source, `last read` draws what
-   the last load fetched: the map tiles, or each COG's internal tiles at the
+   the last load fetched: the map tiles, each COG's internal tiles at the
    overview it was read at (whole tiles are fetched, so this is the read
-   amplification). Click a cell to see the tile as served, with its HTTP
+   amplification), or the Zarr chunks. Click a cell to see the tile as served, with its HTTP
    status, size, type and hash.
 7. **Output size** caps the longer side of the output grid; it is also never
    finer than the data (the scenes' own resolution when they say, else 10 m). **Max scenes** caps how many scenes one load reads.
@@ -101,6 +104,7 @@ lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory, tile registry
 lib/sources/vrt.js       layers 1+2: GDAL VRT mosaic (the VRT is the file index)
 lib/sources/cog.js       layers 1+2: pasted COG URLs (headers only)
 lib/sources/tiles.js     layers 1+2: XYZ template or WMTS capabilities (layers, sets, times)
+lib/sources/zarr.js      layers 1-3: one variable of a Zarr store (zarrita), chunk reads
 lib/cog.js               layer 3: windowed overview reads warped to the grid
 lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/decode,
                          the same warp for tile pyramids, WMTS capabilities parsing
@@ -117,7 +121,8 @@ docs/sources-brainstorm.md  beyond Sentinel-2: other sources, tile servers
 
 Dependencies are globals loaded by the page from cdnjs/jsdelivr: Leaflet
 1.9.4, proj4 2.11.0, geotiff.js 2.1.3. The wildtiles and starc sources
-import hyparquet from jsdelivr on demand. No build step.
+import hyparquet from jsdelivr on demand, and the Zarr source imports
+zarrita 0.7 the same way (esm.sh as a fallback). No build step.
 
 ## How a load works
 
@@ -188,6 +193,31 @@ tms        = { id, crs, levels: [{ id, cell, origin: [x, y], tileWidth, tileHeig
 
 A read returns the usual `{ bands, valid, level }` plus `log`: one entry per
 tile (url, status, bytes, ms, hash), which the status line summarises.
+
+**Zarr** (see `lib/sources/zarr.js`): the asset is
+`{ kind: "zarr", url, variable, index, crs }`, read by `readZarrWarped`.
+`index` is the position on the time axis (-1 without one). Minimal by
+design:
+
+- Dimensions come from `_ARRAY_DIMENSIONS` (v2) or `dimension_names` (v3).
+  x, y and time are recognised by name or CF attributes (units
+  `degrees_east` / `... since ...`, `axis`, `standard_name`); any other
+  dimension is read at index 0.
+- x and y must have regular 1D coordinate arrays (no curvilinear grids
+  yet). Longitudes 0..360 are wrapped.
+- The CRS is EPSG:4326 for lon/lat axes, else the variable's
+  `grid_mapping` (`crs_wkt` / `spatial_ref`), else `proj:code` / `crs`
+  attributes, else the CRS box on the page.
+- Values are unpacked with `scale_factor` / `add_offset`, and the fill
+  value or `missing_value` becomes NaN.
+- Times decode from CF units; a long time axis that is regular in its
+  first and last chunks is not read chunk by chunk.
+
+A read fetches whole chunks, the only unit a store has, so the chunk shape
+sets what a view costs. Reads are capped at 64 chunks or 400 MB decoded.
+Decoded chunks stay in a small cache (320 MB), so stepping through days
+that share a chunk refetches nothing. Each chunk is logged like a map
+tile, so `last read` draws the chunk grid.
 ```
 
 Extension points left for the next pieces of work:
@@ -228,6 +258,15 @@ Extension points left for the next pieces of work:
 - The wildtiles region picker lists regions with data at the chosen
   resolution; without `registry/tiles.parquet` the binding falls back to
   computing tiles from the aatgrid id (UTM south, one zone per region).
+- Zarr chunk shapes vary a lot (checked 2026-10):
+  - MUR SST (`mur-sst/zarr-v1`, CORS open) is chunked 5 days x 1799 x 3600
+    cells. That is 20-38 MB compressed and 62 MB decoded per chunk, so the
+    first day over Tasmania reads about 66 MB. The next four days come
+    from the cache.
+  - ITS_LIVE velocity cubes (`its-live-data`, CORS open, EPSG:3031 via
+    `grid_mapping`) are chunked for time series (all times x 10 x 10
+    cells). A map view there means many small chunks, so draw a small
+    region.
 - Drawing a region uses mouse events; on touch devices use `use view`.
 
 ## Working on it
@@ -258,6 +297,9 @@ explorer itself has no dependencies to install).
   (`python3 make_fixtures.py wildtiles` rebuilds just those).
   `make_starc_fixture.py` builds the starc stores from `items.json`
   (`pip install pyarrow`); those are committed.
+- `test-zarr.mjs` loads a Zarr permalink, steps one day (the chunk cache)
+  and draws `last read`. `npm run bundle-zarrita` first; the tests serve
+  zarrita from that bundle in place of jsdelivr.
 - `test-inspect.mjs` drives the tile inspector headless (grid, probe,
   walk, last read) from a permalink and a map view.
 - `test.mjs` drives the page headless from a permalink hash and prints the

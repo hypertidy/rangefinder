@@ -6,7 +6,8 @@ import { chromium } from "playwright";
 const NM = process.cwd() + "/node_modules/";
 const map = { "leaflet.min.css": NM + "leaflet/dist/leaflet.css", "leaflet.min.js": NM + "leaflet/dist/leaflet.js",
   "proj4.min.js": NM + "proj4/dist/proj4.js", "geotiff.min.js": NM + "geotiff/dist-browser/geotiff.js",
-  "hyparquet@1/+esm": process.cwd() + "/hyparquet.esm.js" };
+  "hyparquet@1/+esm": process.cwd() + "/hyparquet.esm.js",
+  "zarrita@0.7/+esm": process.cwd() + "/zarrita.esm.js" };
 const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium", proxy: { server: process.env.HTTPS_PROXY, bypass: "localhost" }, args: ["--ignore-certificate-errors"] });
 const page = await (await browser.newContext({ viewport: { width: 1400, height: 900 }, ignoreHTTPSErrors: true })).newPage();
 page.on("pageerror", e => console.log("pageerror:", e.message));

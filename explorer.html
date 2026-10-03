@@ -110,6 +110,7 @@
       <option value="vrt">GDAL VRT mosaic</option>
       <option value="cog">COG files (paste URLs)</option>
       <option value="tiles">tile server (XYZ / WMTS)</option>
+      <option value="zarr">Zarr store (CF grid)</option>
       <option value="starc">[in-dev] starc store</option>
       <option value="wildtiles">[in-dev] wildtiles cube</option>
     </select>
@@ -181,6 +182,25 @@
       <button id="readCogs" class="minor">read headers and zoom to them</button>
       <div id="cogInfo" class="note">any public, CORS-enabled GeoTIFF; the header gives the
         footprint, CRS and bands</div>
+    </div>
+
+    <div id="zarrbox" class="hide">
+      <label for="zarrUrl">Zarr store URL</label>
+      <div class="row">
+        <input id="zarrUrl" list="zarrs" spellcheck="false"
+          value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">
+        <button id="readZarr" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
+      </div>
+      <datalist id="zarrs">
+        <option value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">MUR SST, daily, 0.01 degree (AWS)</option>
+      </datalist>
+      <div class="row">
+        <div><label for="zarrVar">variable</label><select id="zarrVar"></select></div>
+        <div><label for="zarrCrs">CRS, if the store has none</label>
+          <input id="zarrCrs" placeholder="EPSG:3031" spellcheck="false"></div>
+      </div>
+      <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata and regular
+        1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
     </div>
 
     <div id="tilebox" class="hide">
@@ -353,7 +373,8 @@
     <div class="foot">
       Sources: a STAC <code>/search</code> (default Earth Search, Sentinel-2
       L2A on AWS Open Data), a published starc store, the wildtiles inventory,
-      a GDAL VRT mosaic, pasted COG URLs, or an XYZ / WMTS tile server. The
+      a GDAL VRT mosaic, pasted COG URLs, an XYZ / WMTS tile server, or a
+      Zarr store. The
       timeline under the map scrubs the days (drag it, or the arrow keys);
       days already read come back instantly. Pixels are read straight from
       the COGs (or tiles) by HTTP range request at the overview level that
@@ -443,6 +464,7 @@ __export(explorer_exports, {
   readAsset: () => readAsset,
   readTilesWarped: () => readTilesWarped,
   readWarped: () => readWarped,
+  readZarrWarped: () => readZarrWarped,
   renderRGBA: () => renderRGBA,
   resolveAssets: () => resolveAssets,
   rgbaToCanvas: () => rgbaToCanvas,
@@ -465,7 +487,8 @@ __export(explorer_exports, {
   webMercatorQuad: () => webMercatorQuad,
   wildtilesCatalog: () => wildtilesCatalog,
   wktEpsg: () => wktEpsg,
-  wmtsSource: () => wmtsSource
+  wmtsSource: () => wmtsSource,
+  zarrCatalog: () => zarrCatalog
 });
 
 // lib/geo.js
@@ -2224,6 +2247,648 @@ function vrtCatalog(opts) {
   };
 }
 
+// lib/sources/zarr.js
+var CDNS = ["https://cdn.jsdelivr.net/npm/zarrita@0.7/+esm", "https://esm.sh/zarrita@0.7"];
+var zmod = null;
+function zarrita() {
+  if (!zmod) {
+    zmod = (async function() {
+      var last;
+      for (var i = 0; i < CDNS.length; i++) {
+        try {
+          return await import(CDNS[i]);
+        } catch (e) {
+          last = e;
+        }
+      }
+      throw new Error("could not load zarrita: " + (last && last.message || last));
+    })();
+    zmod.catch(function() {
+      zmod = null;
+    });
+  }
+  return zmod;
+}
+function countingStore(z, url) {
+  var raw = new z.FetchStore(url);
+  var bytes = /* @__PURE__ */ new Map();
+  var s = {
+    bytes,
+    get: async function(key, opts) {
+      var b = await raw.get(key, opts);
+      if (b) bytes.set(key, b.byteLength);
+      return b;
+    }
+  };
+  if (raw.getRange) {
+    s.getRange = async function(key, range, opts) {
+      var b = await raw.getRange(key, range, opts);
+      if (b) bytes.set(key, (bytes.get(key) || 0) + b.byteLength);
+      return b;
+    };
+  }
+  return s;
+}
+var datasets = /* @__PURE__ */ new Map();
+function openDataset(url) {
+  url = String(url || "").trim().replace(/\/+$/, "");
+  if (!datasets.has(url)) {
+    var p = (async function() {
+      var z = await zarrita();
+      var counting = countingStore(z, url);
+      var store = await z.withMaybeConsolidatedMetadata(counting);
+      var paths = store.contents ? store.contents().filter(function(c) {
+        return c.kind === "array";
+      }).map(function(c) {
+        return c.path;
+      }) : null;
+      var rootAttrs = {};
+      try {
+        rootAttrs = (await z.open(z.root(store), { kind: "group" })).attrs || {};
+      } catch (e) {
+      }
+      return {
+        z,
+        url,
+        store,
+        counting,
+        paths,
+        rootAttrs,
+        arrays: /* @__PURE__ */ new Map(),
+        vars: /* @__PURE__ */ new Map()
+      };
+    })();
+    p.catch(function() {
+      datasets.delete(url);
+    });
+    datasets.set(url, p);
+  }
+  return datasets.get(url);
+}
+function arrayAt(ds, path) {
+  path = "/" + String(path).replace(/^\/+/, "");
+  if (!ds.arrays.has(path)) {
+    var p = ds.z.open(ds.z.root(ds.store).resolve(path), { kind: "array" });
+    p.catch(function() {
+      ds.arrays.delete(path);
+    });
+    ds.arrays.set(path, p);
+  }
+  return ds.arrays.get(path);
+}
+function dimNames(arr) {
+  return arr.dimensionNames || arr.attrs && arr.attrs._ARRAY_DIMENSIONS || null;
+}
+var X_NAMES = /^(x|lon|long|longitude|nav_lon|xc|rlon|easting)$/i;
+var Y_NAMES = /^(y|lat|latitude|nav_lat|yc|rlat|northing)$/i;
+var T_NAMES = /^(time|t|times|date)$/i;
+function role(name, attrs) {
+  attrs = attrs || {};
+  var u = String(attrs.units || ""), sn = String(attrs.standard_name || ""), ax = String(attrs.axis || "");
+  if (/ since /.test(u) || ax === "T" || sn === "time" || T_NAMES.test(name)) return "t";
+  if (/degrees?_?e(ast)?$/i.test(u) || sn === "longitude" || sn === "projection_x_coordinate" || ax === "X" || X_NAMES.test(name)) return "x";
+  if (/degrees?_?n(orth)?$/i.test(u) || sn === "latitude" || sn === "projection_y_coordinate" || ax === "Y" || Y_NAMES.test(name)) return "y";
+  return null;
+}
+function isLonLat(name, attrs) {
+  attrs = attrs || {};
+  return /^degrees?/i.test(String(attrs.units || "")) || /lon|lat/i.test(name) || /^(longitude|latitude)$/.test(String(attrs.standard_name || ""));
+}
+function toNumbers(a) {
+  var out = new Float64Array(a.length);
+  for (var i = 0; i < a.length; i++) out[i] = Number(a[i]);
+  return out;
+}
+function regularAxis(v, name) {
+  var n = v.length;
+  if (n < 2) return { first: v[0], step: 1, n };
+  var step = (v[n - 1] - v[0]) / (n - 1);
+  var tol = Math.abs(step) * 0.01;
+  for (var i = 1; i < n; i++) {
+    if (Math.abs(v[i] - v[i - 1] - step) > tol) {
+      throw new Error(name + " is not regularly spaced (irregular and curvilinear grids are not supported yet)");
+    }
+  }
+  return { first: v[0], step, n };
+}
+var UNIT_MS = {
+  second: 1e3,
+  sec: 1e3,
+  s: 1e3,
+  minute: 6e4,
+  min: 6e4,
+  hour: 36e5,
+  h: 36e5,
+  hr: 36e5,
+  day: 864e5,
+  d: 864e5,
+  week: 6048e5,
+  millisecond: 1,
+  msec: 1,
+  ms: 1
+};
+function timeDecoder(units) {
+  var m = /^\s*(\w+?)s?\s+since\s+(.+?)\s*$/i.exec(String(units || ""));
+  if (!m) return null;
+  var per = UNIT_MS[m[1].toLowerCase()];
+  if (!per) return null;
+  var ref = m[2].replace(" ", "T").replace(/\s.*$/, "");
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(ref)) ref += "T00:00:00";
+  if (!/(Z|[+-]\d\d:?\d\d)$/.test(ref)) ref += "Z";
+  var t0 = Date.parse(ref.replace(/^(\d{4})-(\d)-/, "$1-0$2-").replace(/-(\d)T/, "-0$1T"));
+  if (!isFinite(t0)) return null;
+  return function(v) {
+    return t0 + v * per;
+  };
+}
+async function timeValues(ds, arr) {
+  var n = arr.shape[0], c = arr.chunks[0], nch = Math.ceil(n / c);
+  async function chunkVals(i2) {
+    var ch = await arr.getChunk([i2]);
+    return toNumbers(ch.data).subarray(0, Math.min(c, n - i2 * c));
+  }
+  if (nch <= 64) return toNumbers((await ds.z.get(arr)).data);
+  var a = await chunkVals(0), b = await chunkVals(nch - 1);
+  if (a.length > 1) {
+    var step = a[1] - a[0], last = b[b.length - 1];
+    var regular = true;
+    for (var i = 1; i < a.length; i++) if (Math.abs(a[i] - a[i - 1] - step) > 1e-9 * Math.abs(step)) regular = false;
+    if (regular && Math.abs(a[0] + (n - 1) * step - last) <= 1e-6 * Math.abs(step)) {
+      var out = new Float64Array(n);
+      for (var k = 0; k < n; k++) out[k] = a[0] + k * step;
+      return out;
+    }
+  }
+  var all = new Float64Array(n), next = 0;
+  async function worker() {
+    while (next < nch) {
+      var i2 = next++, v = await chunkVals(i2);
+      all.set(v, i2 * c);
+    }
+  }
+  await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map(worker));
+  return all;
+}
+async function variableCrs(ds, arr, xName, xAttrs, opts) {
+  if (opts.crs) return ensureCrs(opts.crs);
+  if (isLonLat(xName, xAttrs)) return "EPSG:4326";
+  var a = arr.attrs || {};
+  var gm = a.grid_mapping && String(a.grid_mapping).split(/[\s:]+/)[0];
+  if (gm) {
+    try {
+      var g = await arrayAt(ds, gm), ga = g.attrs || {};
+      var wkt = ga.crs_wkt || ga.spatial_ref;
+      if (wkt) return crsFromWkt(wkt);
+      if (ga.epsg_code) return ensureCrs(ga.epsg_code);
+    } catch (e) {
+    }
+  }
+  var cands = [
+    a["proj:code"],
+    a["proj:epsg"],
+    a.crs,
+    ds.rootAttrs["proj:code"],
+    ds.rootAttrs["proj:epsg"],
+    ds.rootAttrs.crs,
+    ds.rootAttrs.epsg
+  ];
+  for (var i = 0; i < cands.length; i++) {
+    if (cands[i] !== void 0 && cands[i] !== null && cands[i] !== "") {
+      var c = String(cands[i]);
+      return /^\s*(PROJCS|GEOGCS|PROJCRS|GEOGCRS)/.test(c) ? crsFromWkt(c) : ensureCrs(c);
+    }
+  }
+  throw new Error("no CRS found for " + arr.path + " (no grid_mapping); enter one, e.g. EPSG:3031");
+}
+function describe(ds, name, opts) {
+  opts = opts || {};
+  var key = name + "|" + (opts.crs || "");
+  if (!ds.vars.has(key)) {
+    var p = (async function() {
+      var path = "/" + String(name).replace(/^\/+/, "");
+      var arr = await arrayAt(ds, path);
+      var dims = dimNames(arr);
+      if (!dims || dims.length !== arr.shape.length) {
+        throw new Error(name + " has no dimension names (_ARRAY_DIMENSIONS or dimension_names)");
+      }
+      var parent = path.replace(/\/[^/]*$/, "");
+      var coords = await Promise.all(dims.map(function(d) {
+        return arrayAt(ds, parent + "/" + d).then(function(c) {
+          return c.shape.length === 1 ? c : null;
+        }, function() {
+          return null;
+        });
+      }));
+      var roles = dims.map(function(d, i) {
+        return role(d, coords[i] && coords[i].attrs);
+      });
+      var xi = roles.lastIndexOf("x"), yi = roles.lastIndexOf("y"), ti = roles.indexOf("t");
+      if (xi < 0 || yi < 0) {
+        if (arr.shape.length < 2) throw new Error(name + " is not gridded");
+        yi = arr.shape.length - 2;
+        xi = arr.shape.length - 1;
+      }
+      if (!coords[xi] || !coords[yi]) {
+        throw new Error(name + ": no 1D coordinate arrays for " + dims[xi] + " / " + dims[yi]);
+      }
+      var xv = toNumbers((await ds.z.get(coords[xi])).data);
+      var yv = toNumbers((await ds.z.get(coords[yi])).data);
+      var xa = regularAxis(xv, dims[xi]), ya = regularAxis(yv, dims[yi]);
+      var crs = await variableCrs(ds, arr, dims[xi], coords[xi].attrs, opts);
+      var origin = [xa.first - xa.step / 2, ya.first - ya.step / 2];
+      var res = [xa.step, ya.step];
+      var W = arr.shape[xi], H = arr.shape[yi];
+      var x0 = origin[0], x1 = origin[0] + W * res[0], y0 = origin[1], y1 = origin[1] + H * res[1];
+      var ext = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+      var geo = crs === "EPSG:4326";
+      var wrap = geo && ext[2] > 180.5;
+      var bbox = geo ? [
+        wrap ? -180 : Math.max(-180, ext[0]),
+        Math.max(-90, ext[1]),
+        wrap ? 180 : Math.min(180, ext[2]),
+        Math.min(90, ext[3])
+      ] : transformBbox(ext, crs, "EPSG:4326");
+      var times = null;
+      if (ti >= 0 && coords[ti]) {
+        var dec = timeDecoder(coords[ti].attrs && coords[ti].attrs.units);
+        if (dec) {
+          var tv = await timeValues(ds, coords[ti]);
+          times = Array.prototype.map.call(tv, dec);
+        }
+      }
+      if (ti >= 0 && !times) ti = -1;
+      var a = arr.attrs || {};
+      var fill = a._FillValue !== void 0 ? a._FillValue : arr.fillValue;
+      return {
+        path,
+        arr,
+        dims,
+        xi,
+        yi,
+        ti,
+        W,
+        H,
+        origin,
+        res,
+        crs,
+        wrap,
+        extent: ext,
+        bbox,
+        scale: a.scale_factor !== void 0 ? +a.scale_factor : 1,
+        offset: a.add_offset !== void 0 ? +a.add_offset : 0,
+        fill: fill === null || fill === void 0 || fill === "NaN" ? null : Number(fill),
+        missing: a.missing_value !== void 0 ? Number(a.missing_value) : null,
+        times,
+        units: a.units || "",
+        longName: a.long_name || a.standard_name || "",
+        flags: a.flag_values && a.flag_meanings ? { values: a.flag_values, meanings: a.flag_meanings } : null
+      };
+    })();
+    p.catch(function() {
+      ds.vars.delete(key);
+    });
+    ds.vars.set(key, p);
+  }
+  return ds.vars.get(key);
+}
+var CACHE_BYTES = 320 * 1024 * 1024;
+var cache = /* @__PURE__ */ new Map();
+var cacheSize = 0;
+function cached(key, make) {
+  if (cache.has(key)) {
+    var hit2 = cache.get(key);
+    cache.delete(key);
+    cache.set(key, hit2);
+    return { p: hit2.p, hit: true };
+  }
+  var e = { p: make(), size: 0 };
+  cache.set(key, e);
+  e.p.then(function(ch) {
+    e.size = ch.data.byteLength || 0;
+    cacheSize += e.size;
+    var it = cache.keys();
+    while (cacheSize > CACHE_BYTES && cache.size > 1) {
+      var k = it.next().value, old = cache.get(k);
+      if (old === e) break;
+      cache.delete(k);
+      cacheSize -= old.size;
+    }
+  }, function() {
+    cache.delete(key);
+  });
+  return { p: e.p, hit: false };
+}
+function chunkKey(v, coords) {
+  return [
+    v.path + "/" + coords.join("."),
+    v.path + "/" + coords.join("/"),
+    v.path + "/c/" + coords.join("/")
+  ];
+}
+async function pool3(items, n, fn) {
+  var next = 0;
+  async function worker() {
+    while (next < items.length) {
+      var i = next++;
+      await fn(items[i], i);
+    }
+  }
+  var ws = [];
+  for (var k = 0; k < Math.min(n, items.length); k++) ws.push(worker());
+  await Promise.all(ws);
+}
+async function readZarrWarped(a, grid, opts) {
+  opts = opts || {};
+  var maxChunks = opts.maxChunks || a.maxChunks || 64, maxMB = opts.maxMB || 400;
+  var ds = await openDataset(a.url);
+  var v = await describe(ds, a.variable, { crs: a.crs });
+  var proj2 = globalThis.proj4(ensureCrs(grid.crs), ensureCrs(v.crs));
+  var toSrc = proj2;
+  if (v.wrap) {
+    var xmin = v.extent[0];
+    toSrc = { forward: function(p) {
+      var s = proj2.forward(p);
+      if (s[0] < xmin) s[0] += 360;
+      return s;
+    } };
+  }
+  var lat = gridLattice(grid, toSrc, v.origin, v.res);
+  var win = latticeWindow(lat, v.W, v.H);
+  if (!win) return null;
+  var f = Math.max(1, Math.floor(latticeScale(lat)));
+  var cx = v.arr.chunks[v.xi], cy = v.arr.chunks[v.yi];
+  var ch0 = Math.floor(win[0] / cx), ch1 = Math.ceil(win[2] / cx) - 1;
+  var cr0 = Math.floor(win[1] / cy), cr1 = Math.ceil(win[3] / cy) - 1;
+  var n = (ch1 - ch0 + 1) * (cr1 - cr0 + 1);
+  var chunkMB = v.arr.chunks.reduce(function(p, c2) {
+    return p * c2;
+  }, 1) * (v.arr.dtype.match(/\d+/) ? +v.arr.dtype.match(/\d+/)[0] / 8 : 4) / 1048576;
+  if (n > maxChunks || n * chunkMB > maxMB) {
+    throw new Error("this region needs " + n + " chunks of " + v.path.slice(1) + " (" + v.arr.chunks.join("x") + ", " + chunkMB.toFixed(chunkMB < 10 ? 1 : 0) + " MB each decoded); draw a smaller one (at most " + Math.min(maxChunks, Math.floor(maxMB / chunkMB)) + " chunks)");
+  }
+  var wx0 = Math.floor(win[0] / f), wy0 = Math.floor(win[1] / f);
+  var wx1 = Math.ceil(win[2] / f), wy1 = Math.ceil(win[3] / f);
+  var ww = wx1 - wx0, wh = wy1 - wy0;
+  var out = new Float32Array(ww * wh).fill(NaN);
+  var ti = v.ti >= 0 ? Math.max(0, a.index || 0) : -1;
+  var jobs = [];
+  for (var r = cr0; r <= cr1; r++) for (var c = ch0; c <= ch1; c++) jobs.push([c, r]);
+  var log = [];
+  var scale = v.scale, offset = v.offset, fill = v.fill, missing = v.missing;
+  await pool3(jobs, 4, async function(j) {
+    var coords = v.dims.map(function(d2, i) {
+      if (i === v.xi) return j[0];
+      if (i === v.yi) return j[1];
+      if (i === v.ti) return Math.floor(ti / v.arr.chunks[i]);
+      return 0;
+    });
+    var key = a.url + "|" + v.path + "|" + coords.join(".");
+    var t0 = performance.now();
+    var got = cached(key, function() {
+      return v.arr.getChunk(coords, { signal: opts.signal });
+    });
+    var e = {
+      kind: "chunk",
+      z: v.path.slice(1),
+      x: j[0],
+      y: j[1],
+      url: a.url + chunkKey(v, coords)[0],
+      crs: v.crs,
+      ok: false,
+      status: null,
+      bytes: 0,
+      ms: 0,
+      cached: got.hit,
+      extent: [
+        v.origin[0] + j[0] * cx * v.res[0],
+        v.origin[1] + j[1] * cy * v.res[1],
+        v.origin[0] + Math.min(v.W, (j[0] + 1) * cx) * v.res[0],
+        v.origin[1] + Math.min(v.H, (j[1] + 1) * cy) * v.res[1]
+      ]
+    };
+    e.extent = [
+      Math.min(e.extent[0], e.extent[2]),
+      Math.min(e.extent[1], e.extent[3]),
+      Math.max(e.extent[0], e.extent[2]),
+      Math.max(e.extent[1], e.extent[3])
+    ];
+    log.push(e);
+    var chunk;
+    try {
+      chunk = await got.p;
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      e.error = String(err && err.message || err);
+      e.status = 404;
+      return;
+    }
+    e.ms = Math.round(performance.now() - t0);
+    e.ok = true;
+    e.status = got.hit ? "cache" : 200;
+    if (!got.hit) {
+      var keys = chunkKey(v, coords);
+      for (var q = 0; q < keys.length; q++) {
+        if (ds.counting.bytes.has(keys[q])) {
+          e.bytes = ds.counting.bytes.get(keys[q]);
+          break;
+        }
+      }
+    }
+    var data = chunk.data, st = chunk.stride, big = typeof data[0] === "bigint";
+    var base = 0;
+    for (var d = 0; d < coords.length; d++) {
+      if (d === v.xi || d === v.yi) continue;
+      var within = d === v.ti ? ti - coords[d] * v.arr.chunks[d] : 0;
+      base += within * st[d];
+    }
+    var sx = st[v.xi], sy = st[v.yi];
+    var r0 = j[1] * cy, r1 = Math.min(v.H, r0 + cy), c0 = j[0] * cx, c1 = Math.min(v.W, c0 + cx);
+    var Y0 = Math.max(wy0, Math.ceil(r0 / f)), Y1 = Math.min(wy1, Math.ceil(r1 / f));
+    var X0 = Math.max(wx0, Math.ceil(c0 / f)), X1 = Math.min(wx1, Math.ceil(c1 / f));
+    for (var Y = Y0; Y < Y1; Y++) {
+      var so = base + (Y * f - r0) * sy, o = (Y - wy0) * ww - wx0;
+      for (var X = X0; X < X1; X++) {
+        var raw = data[so + (X * f - c0) * sx];
+        if (big) raw = Number(raw);
+        if (raw === fill || raw === missing || raw !== raw) continue;
+        out[o + X] = raw * scale + offset;
+      }
+    }
+  });
+  var res = resampleWindow(lat, grid, [out], ww, wh, wx0, wy0, f, f, NaN, null);
+  if (!res.any) {
+    var bad = log.filter(function(t) {
+      return t.error;
+    })[0];
+    if (bad && log.every(function(t) {
+      return !t.ok;
+    })) throw new Error("no chunk could be read (" + bad.error + ")");
+    return null;
+  }
+  return { bands: res.bands, valid: res.valid, nodata: NaN, level: f, log };
+}
+function isoDay(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+function zarrCatalog(opts) {
+  var url = String(opts.url || "").trim().replace(/\/+$/, "");
+  var chosen = null;
+  async function variable() {
+    if (chosen) return chosen;
+    var ds = await openDataset(url);
+    var name = opts.variable;
+    if (!name) {
+      var inf = await cat.info();
+      var ok = inf.variables.filter(function(x) {
+        return !x.error;
+      })[0];
+      if (!ok) throw new Error("no gridded variable found in " + url);
+      name = ok.name;
+    }
+    chosen = { ds, v: await describe(ds, name, { crs: opts.crs }) };
+    return chosen;
+  }
+  var infoP = null;
+  var cat = {
+    kind: "zarr",
+    label: "Zarr " + url.split("/").slice(-2).join("/"),
+    capabilities: { cloud: false, time: true },
+    maxScenes: 1,
+    presets: [],
+    // The store's arrays: { variables: [{ name, dims, shape, chunks, dtype,
+    //   units, longName, error? }], attrs, consolidated }
+    info: function() {
+      if (!infoP) {
+        infoP = (async function() {
+          var ds = await openDataset(url);
+          var names = ds.paths ? ds.paths.map(function(p) {
+            return p.replace(/^\//, "");
+          }) : [];
+          var arrs = await Promise.all(names.map(function(n) {
+            return arrayAt(ds, n).then(function(a) {
+              return a;
+            }, function() {
+              return null;
+            });
+          }));
+          var dimSet = {};
+          arrs.forEach(function(a) {
+            (a && dimNames(a) || []).forEach(function(d) {
+              dimSet[d] = 1;
+            });
+          });
+          var vars = [];
+          arrs.forEach(function(a, i) {
+            if (!a || a.shape.length < 2 || dimSet[names[i].split("/").pop()]) return;
+            var at = a.attrs || {};
+            vars.push({
+              name: names[i],
+              dims: dimNames(a) || [],
+              shape: a.shape,
+              chunks: a.chunks,
+              dtype: a.dtype,
+              units: at.units || "",
+              longName: at.long_name || at.standard_name || ""
+            });
+          });
+          vars.sort(function(p, q) {
+            return q.shape.length - p.shape.length;
+          });
+          return { variables: vars, attrs: ds.rootAttrs, consolidated: !!ds.paths };
+        })();
+        infoP.catch(function() {
+          infoP = null;
+        });
+      }
+      return infoP;
+    },
+    // Facts about the chosen variable: { name, dims, shape, chunks, dtype, crs,
+    //   bbox, res, times: [first, last, n] | null, chunkMB }
+    describe: async function() {
+      var c = await variable(), v = c.v, a = v.arr;
+      var bytes = +(a.dtype.match(/\d+/) || [32])[0] / 8;
+      return {
+        name: v.path.slice(1),
+        dims: v.dims,
+        shape: a.shape,
+        chunks: a.chunks,
+        dtype: a.dtype,
+        crs: v.crs,
+        bbox: v.bbox,
+        res: v.res,
+        units: v.units,
+        longName: v.longName,
+        times: v.times ? [
+          isoDay(Math.min.apply(null, v.times)),
+          isoDay(Math.max.apply(null, v.times)),
+          v.times.length
+        ] : null,
+        chunkMB: a.chunks.reduce(function(p, k) {
+          return p * k;
+        }, 1) * bytes / 1048576
+      };
+    },
+    search: async function(q) {
+      var c = await variable(), v = c.v;
+      cat.capabilities = { cloud: false, time: !!v.times };
+      var key = v.path.slice(1);
+      var label = key + (v.units ? " (" + v.units + ")" : "");
+      cat.presets = [{ keys: [key], mode: "single", label, ramp: "viridis", hillshade: 0 }];
+      if (q.bbox && !bboxIntersects(v.bbox, q.bbox)) return [];
+      var idx = [-1];
+      if (v.times) {
+        var range = (q.datetime || "../..").split("/");
+        var lo = range[0] && range[0] !== ".." ? range[0] : "0000";
+        var hi = range[1] && range[1] !== ".." ? range[1] : "9999";
+        idx = [];
+        v.times.forEach(function(t, i) {
+          var d = isoDay(t);
+          if (d >= lo && d <= hi) idx.push(i);
+        });
+        idx.sort(function(p, r) {
+          return v.times[p] - v.times[r];
+        });
+        idx = idx.slice(-(q.maxItems || 300));
+      }
+      var b = v.bbox;
+      var groundRes = Math.abs(v.res[0]) * (v.crs === "EPSG:4326" ? 111320 : 1);
+      return idx.map(function(i) {
+        var assets = {}, meta = {};
+        assets[key] = {
+          kind: "zarr",
+          url,
+          variable: key,
+          index: i,
+          crs: opts.crs || null,
+          maxChunks: opts.maxChunks || null,
+          href: url + "#" + key + "@" + i
+        };
+        meta[key] = {};
+        var t = i >= 0 ? new Date(v.times[i]).toISOString() : null;
+        return {
+          id: key + (t ? " " + t.slice(0, 16).replace("T", " ") : ""),
+          day: t ? t.slice(0, 10) : UNDATED,
+          datetime: t,
+          bbox: b,
+          cloud: null,
+          crs: v.crs,
+          geometry: { type: "Polygon", coordinates: [[
+            [b[0], b[1]],
+            [b[2], b[1]],
+            [b[2], b[3]],
+            [b[0], b[3]],
+            [b[0], b[1]]
+          ]] },
+          assets,
+          assetMeta: meta,
+          meta: { res: groundRes, index: i }
+        };
+      });
+    }
+  };
+  return cat;
+}
+
 // lib/sources/stac.js
 var BAND_ALIASES = {
   visual: ["visual", "TCI", "tci", "visual_10m"],
@@ -2492,17 +3157,17 @@ function hyparquet() {
 function trimSlash2(u) {
   return String(u).trim().replace(/\/+$/, "");
 }
-function cached(cache, key, make) {
-  if (!cache.has(key)) {
+function cached2(cache2, key, make) {
+  if (!cache2.has(key)) {
     var p = make();
-    cache.set(key, p);
+    cache2.set(key, p);
     p.catch(function() {
-      cache.delete(key);
+      cache2.delete(key);
     });
   }
-  return cache.get(key);
+  return cache2.get(key);
 }
-async function pool3(items, n, fn) {
+async function pool4(items, n, fn) {
   var out = new Array(items.length), next = 0;
   async function worker() {
     while (next < items.length) {
@@ -2616,7 +3281,7 @@ function num2(v) {
   return isFinite(n) ? n : null;
 }
 function readFile(f, want) {
-  return cached(fileCache, f.url + "|" + want.join(","), async function() {
+  return cached2(fileCache, f.url + "|" + want.join(","), async function() {
     var hp = await hyparquet();
     var file = await hp.asyncBufferFromUrl({ url: f.url });
     var md = await hp.parquetMetadataAsync(file);
@@ -2647,7 +3312,7 @@ function readFile(f, want) {
 }
 async function readAll(files, want, onFile) {
   var done = 0;
-  var parts = await pool3(files, 6, async function(f) {
+  var parts = await pool4(files, 6, async function(f) {
     var rows = await readFile(f, want);
     done++;
     if (onFile) onFile(done, files.length);
@@ -2754,7 +3419,7 @@ function tileFootprint(a) {
   ]] } };
 }
 function loadAcquisitions(root, store, onFile) {
-  return cached(tableCache, root + "|acquisitions", async function() {
+  return cached2(tableCache, root + "|acquisitions", async function() {
     var rows = await readAll(store.files.acquisitions, COLUMNS.acquisitions, onFile);
     var m = /* @__PURE__ */ new Map();
     rows.forEach(function(r) {
@@ -2776,7 +3441,7 @@ function loadAcquisitions(root, store, onFile) {
   });
 }
 function loadProducts(root, store, onFile) {
-  return cached(tableCache, root + "|products", async function() {
+  return cached2(tableCache, root + "|products", async function() {
     var rows = await readAll(store.files.products, COLUMNS.products, onFile);
     var seen = /* @__PURE__ */ new Set(), byAcq = /* @__PURE__ */ new Map(), collections = /* @__PURE__ */ new Map();
     rows.forEach(function(r) {
@@ -2835,7 +3500,7 @@ function starcCatalog(opts) {
   var collection = (opts.collection || "").trim();
   var prefer = opts.prefer || ["sentinel-2-c1-l2a", "sentinel-2-l2a"];
   function store() {
-    return cached(storeCache, root, function() {
+    return cached2(storeCache, root, function() {
       return findFiles(root);
     });
   }
@@ -3234,7 +3899,7 @@ function groupByDay(scenes) {
     };
   });
 }
-async function pool4(tasks, n) {
+async function pool5(tasks, n) {
   var out = new Array(tasks.length), next = 0;
   async function worker() {
     while (next < tasks.length) {
@@ -3259,6 +3924,7 @@ function assetMeta(scene, key) {
 }
 function readAsset(a, grid, opts) {
   if (a && typeof a === "object" && a.kind === "tiles") return readTilesWarped(a, grid, opts);
+  if (a && typeof a === "object" && a.kind === "zarr") return readZarrWarped(a, grid, opts);
   return readWarped(assetHref(a), grid, opts);
 }
 async function loadComposite(o) {
@@ -3312,7 +3978,7 @@ async function loadComposite(o) {
       };
     };
   });
-  var results = await pool4(tasks, o.concurrency || 4);
+  var results = await pool5(tasks, o.concurrency || 4);
   var layers = [], errors = [], levels2 = [];
   results.forEach(function(r, i) {
     if (!r.ok) {
@@ -3497,7 +4163,7 @@ function fail(e) {
   console.error(e);
   setStatus("", [String(e && e.message || e)]);
 }
-function isoDay(d) {
+function isoDay2(d) {
   return d.toISOString().slice(0, 10);
 }
 ["bR", "bG", "bB"].forEach(function(id, i) {
@@ -3528,8 +4194,8 @@ function addBands(list) {
 }
 $("wtBucket").value = WILDTILES_BUCKET;
 var today = /* @__PURE__ */ new Date();
-$("to").value = isoDay(today);
-$("from").value = isoDay(new Date(today.getTime() - 60 * 864e5));
+$("to").value = isoDay2(today);
+$("from").value = isoDay2(new Date(today.getTime() - 60 * 864e5));
 function tileOpts() {
   return {
     url: $("tileUrl").value.trim(),
@@ -3553,6 +4219,10 @@ function makeCatalog() {
     if (!$("cogUrls").value.trim()) throw new Error("paste at least one COG URL");
     return cogCatalog({ urls: $("cogUrls").value });
   }
+  if ($("src").value === "zarr") {
+    if (!$("zarrUrl").value.trim()) throw new Error("enter the Zarr store URL");
+    return zarrCatalog2();
+  }
   if ($("src").value === "wildtiles") {
     return wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
   }
@@ -3569,6 +4239,7 @@ function sourceChanged() {
   $("wtbox").classList.toggle("hide", src !== "wildtiles");
   $("vrtbox").classList.toggle("hide", src !== "vrt");
   $("cogbox").classList.toggle("hide", src !== "cog");
+  $("zarrbox").classList.toggle("hide", src !== "zarr");
   $("tilebox").classList.toggle("hide", src !== "tiles");
   $("inspTiles").classList.toggle("hide", src !== "tiles");
   coverLayer.clearLayers();
@@ -3580,7 +4251,7 @@ function capabilitiesChanged(cat) {
   var src = $("src").value;
   var caps = cat && cat.capabilities || {
     cloud: src === "stac" || src === "starc",
-    time: src !== "vrt" && src !== "cog" && !(src === "tiles" && !isCapabilitiesUrl($("tileUrl").value))
+    time: src !== "vrt" && src !== "cog" && !(src === "tiles" && !isCapabilitiesUrl($("tileUrl").value)) && !(src === "zarr" && zarrNoTime)
   };
   $("cloudBox").classList.toggle("hide", !caps.cloud);
   $("from").parentNode.parentNode.classList.toggle("hide", !caps.time);
@@ -3590,6 +4261,7 @@ $("src").addEventListener("change", function() {
   sourceChanged();
   if ($("src").value === "wildtiles") readCube(false).catch(fail);
   if ($("src").value === "tiles") readTiles().catch(fail);
+  if ($("src").value === "zarr") readZarr(true).catch(fail);
 });
 [
   "stacUrl",
@@ -3604,7 +4276,10 @@ $("src").addEventListener("change", function() {
   "tileSet",
   "tileFmt",
   "tileDecode",
-  "tileMax"
+  "tileMax",
+  "zarrUrl",
+  "zarrVar",
+  "zarrCrs"
 ].forEach(function(id) {
   $(id).addEventListener("change", clearScenes);
 });
@@ -3749,6 +4424,70 @@ async function readCogs(fit) {
 $("readCogs").addEventListener("click", function() {
   readCogs(true).catch(fail);
 });
+var zarrCat = null;
+var zarrNoTime = false;
+function zarrCatalog2() {
+  var o = {
+    url: $("zarrUrl").value.trim(),
+    variable: $("zarrVar").value || null,
+    crs: $("zarrCrs").value.trim() || null
+  };
+  var k = JSON.stringify(o);
+  if (!zarrCat || zarrCat.key !== k) {
+    zarrCat = zarrCatalog(o);
+    zarrCat.key = k;
+  }
+  return zarrCat;
+}
+async function readZarr(fit, want, keepDates) {
+  setStatus("reading the Zarr store's metadata ...");
+  $("zarrVar").innerHTML = "";
+  zarrCat = null;
+  var info = await zarrCatalog2().info();
+  fillSelect($("zarrVar"), info.variables.map(function(v) {
+    return [v.name, v.name + " [" + v.dims.join(", ") + "]" + (v.units ? " " + v.units : "")];
+  }), want);
+  if (!info.variables.length) {
+    $("zarrInfo").textContent = info.consolidated ? "no gridded variables found" : "no consolidated metadata, so the store cannot be listed";
+    setStatus("", ["nothing to show in this store"]);
+    return info;
+  }
+  return describeZarr(fit, keepDates);
+}
+async function describeZarr(fit, keepDates) {
+  setStatus("reading " + $("zarrVar").value + " coordinates ...");
+  var d = await zarrCatalog2().describe();
+  zarrNoTime = !d.times;
+  zarrCatalog2().capabilities = { cloud: false, time: !!d.times };
+  capabilitiesChanged(null);
+  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + d.crs + ", cell " + d.res.map(function(r) {
+    return +Math.abs(r).toPrecision(4);
+  }).join(" x ") + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
+  coverLayer.clearLayers();
+  L.rectangle(roiLatLngBounds(d.bbox), {
+    color: "#b39ddb",
+    weight: 1,
+    fill: false,
+    opacity: 0.7,
+    interactive: false
+  }).addTo(coverLayer);
+  if (d.times && !keepDates) {
+    $("to").value = d.times[1];
+    $("from").value = isoDay2(new Date(Date.parse(d.times[1]) - 30 * 864e5));
+  }
+  if (fit && !state.roi) map.fitBounds(roiLatLngBounds(d.bbox));
+  setStatus(d.name + " read\ndraw a region (a chunk or two of it), then search");
+  return d;
+}
+$("readZarr").addEventListener("click", function() {
+  readZarr(true, $("zarrVar").value).catch(fail);
+});
+$("zarrVar").addEventListener("change", function() {
+  describeZarr(false).catch(fail);
+});
+$("zarrCrs").addEventListener("change", function() {
+  describeZarr(false).catch(fail);
+});
 var tileCaps = null;
 function fillSelect(sel, items, want) {
   sel.innerHTML = "";
@@ -3782,7 +4521,7 @@ function tileLayerChanged(wantSet, wantFmt) {
   if (l.times && l.times.length) {
     var last = l.times[l.times.length - 1].slice(0, 10);
     $("to").value = last;
-    $("from").value = isoDay(new Date(Date.parse(last) - 60 * 864e5));
+    $("from").value = isoDay2(new Date(Date.parse(last) - 60 * 864e5));
   }
 }
 async function readTiles(want) {
@@ -4432,7 +5171,7 @@ function paint() {
   }
   state.overlay.setBounds(roiLatLngBounds(gridLonLatBounds(g)));
 }
-var CACHE_BYTES = 4e8;
+var CACHE_BYTES2 = 4e8;
 function minRes() {
   var rs = state.scenes.map(function(sc) {
     return sc.meta && sc.meta.res;
@@ -4495,7 +5234,7 @@ function dayComposite(i, ctl, onProgress) {
       r.composite.valid.byteLength
     ) : 0;
     state.cacheBytes += entry.bytes;
-    while (state.cacheBytes > CACHE_BYTES && state.cache.size > 1) {
+    while (state.cacheBytes > CACHE_BYTES2 && state.cache.size > 1) {
       var oldest = state.cache.keys().next().value, e = state.cache.get(oldest);
       state.cache.delete(oldest);
       state.cacheBytes -= e.bytes;
@@ -4522,9 +5261,9 @@ async function loadImagery() {
   var day = state.days[state.dayIndex];
   var keys = currentKeys();
   var grid = currentGrid();
-  var cached2 = cachedDay(state.dayIndex);
+  var cached3 = cachedDay(state.dayIndex);
   $("load").disabled = true;
-  setStatus(day.day + ": " + (cached2 ? "from cache" : "reading " + keys.join("/")) + " ...");
+  setStatus(day.day + ": " + (cached3 ? "from cache" : "reading " + keys.join("/")) + " ...");
   try {
     var r = await dayComposite(state.dayIndex, ctl, function(n, of) {
       if (state.loading === ctl) setStatus(day.day + ": " + n + "/" + of + " scenes read ...");
@@ -4533,6 +5272,8 @@ async function loadImagery() {
     var s = r.stats;
     var errs = s.errors.map(function(e) {
       return e.id + ": " + e.message;
+    }).filter(function(m, i, all) {
+      return all.indexOf(m) === i;
     });
     if (s.lackingAssets) errs.push(s.lackingAssets + " scene(s) lack " + keys.join("/") + " or miss the region");
     if (!r.composite) {
@@ -4552,13 +5293,25 @@ async function loadImagery() {
     var tl = s.log.filter(function(t) {
       return t.kind === "tile";
     });
-    if (tl.length) {
+    var zc = s.log.filter(function(t) {
+      return t.kind === "chunk";
+    });
+    if (zc.length) {
+      var mb = zc.reduce(function(a, t) {
+        return a + (t.bytes || 0);
+      }, 0) / 1048576;
+      var hits = zc.filter(function(t) {
+        return t.cached;
+      }).length;
+      what = zc.length + " chunk(s) of " + zc[0].z + " (" + (hits ? hits + " from cache, " : "") + mb.toFixed(1) + " MB fetched)";
+      tl = zc;
+    } else if (tl.length) {
       var got = tl.filter(function(t) {
         return t.ok;
       }).length;
       what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " + (tl.length - got) + " missing or failed)";
     }
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached2 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) {
@@ -4653,7 +5406,7 @@ async function peek(t) {
     peekUrl = null;
   }
   var blob = t.blob;
-  if (!blob && t.url && (t.status || t.kind === "grid")) {
+  if (!blob && t.url && !t.chunk && (t.status || t.kind === "grid")) {
     var got = await fetchTile(t.url);
     blob = got.blob;
     if (t.kind === "grid") t.status = got.status;
@@ -4742,7 +5495,7 @@ $("inspLast").addEventListener("click", function() {
     return;
   }
   var tiles = log.filter(function(e) {
-    return e.kind === "tile";
+    return e.kind === "tile" || e.kind === "chunk";
   }).map(function(e) {
     var t = {
       z: e.z,
@@ -4756,6 +5509,7 @@ $("inspLast").addEventListener("click", function() {
       extent: e.extent,
       kind: e.ok ? "data" : e.error ? "error" : "missing",
       note: e.error,
+      chunk: e.kind === "chunk",
       polygon: boxPolygon(e.extent, ensureCrs(e.crs), 4)
     };
     return t;
@@ -4768,7 +5522,10 @@ $("inspLast").addEventListener("click", function() {
   var files = log.filter(function(e) {
     return e.kind === "cog";
   }).length;
-  inspInfo(tiles.length ? tiles.length + " map tiles read:" : cog.length + " internal COG tiles read from " + files + " file read(s) (whole tiles are fetched, so this is the read amplification)", tiles.length ? kindSummary(tiles) : null);
+  var chunks = tiles.filter(function(t) {
+    return t.chunk;
+  }).length;
+  inspInfo(chunks ? chunks + " Zarr chunk(s) read (labels are variable/column/row of the chunk grid):" : tiles.length ? tiles.length + " map tiles read:" : cog.length + " internal COG tiles read from " + files + " file read(s) (whole tiles are fetched, so this is the read amplification)", tiles.length ? kindSummary(tiles) : null);
 });
 $("inspClear").addEventListener("click", function() {
   if (insp.ctl) insp.ctl.abort();
@@ -4871,7 +5628,11 @@ function writeHash() {
     if ($("starcColl").value.trim()) h.set("scoll", $("starcColl").value.trim());
   } else if ($("src").value === "vrt") h.set("vrt", $("vrtUrl").value.trim());
   else if ($("src").value === "cog") h.set("cogs", $("cogUrls").value.trim().split(/\s+/).join(" "));
-  else if ($("src").value === "tiles") {
+  else if ($("src").value === "zarr") {
+    h.set("zarr", $("zarrUrl").value.trim());
+    if ($("zarrVar").value) h.set("zvar", $("zarrVar").value);
+    if ($("zarrCrs").value.trim()) h.set("zcrs", $("zarrCrs").value.trim());
+  } else if ($("src").value === "tiles") {
     h.set("tiles", $("tileUrl").value.trim());
     if ($("tileLayer").value) h.set("tlayer", $("tileLayer").value);
     if ($("tileSet").value) h.set("tset", $("tileSet").value);
@@ -4919,6 +5680,11 @@ async function readHash() {
   if (h.get("res")) $("wtRes").value = h.get("res");
   if (h.get("vrt")) $("vrtUrl").value = h.get("vrt");
   if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
+  if (h.get("src") === "zarr") {
+    if (h.get("zarr")) $("zarrUrl").value = h.get("zarr");
+    if (h.get("zcrs")) $("zarrCrs").value = h.get("zcrs");
+    await readZarr(!h.has("roi"), h.get("zvar"), h.has("from"));
+  }
   if (h.get("tiles")) {
     $("tileUrl").value = h.get("tiles");
     if (h.get("tdec")) $("tileDecode").value = h.get("tdec");

@@ -109,6 +109,7 @@
       <option value="vrt">GDAL VRT mosaic</option>
       <option value="cog">COG files (paste URLs)</option>
       <option value="tiles">tile server (XYZ / WMTS)</option>
+      <option value="zarr">Zarr store (CF grid)</option>
       <option value="starc">[in-dev] starc store</option>
       <option value="wildtiles">[in-dev] wildtiles cube</option>
     </select>
@@ -180,6 +181,25 @@
       <button id="readCogs" class="minor">read headers and zoom to them</button>
       <div id="cogInfo" class="note">any public, CORS-enabled GeoTIFF; the header gives the
         footprint, CRS and bands</div>
+    </div>
+
+    <div id="zarrbox" class="hide">
+      <label for="zarrUrl">Zarr store URL</label>
+      <div class="row">
+        <input id="zarrUrl" list="zarrs" spellcheck="false"
+          value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">
+        <button id="readZarr" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
+      </div>
+      <datalist id="zarrs">
+        <option value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">MUR SST, daily, 0.01 degree (AWS)</option>
+      </datalist>
+      <div class="row">
+        <div><label for="zarrVar">variable</label><select id="zarrVar"></select></div>
+        <div><label for="zarrCrs">CRS, if the store has none</label>
+          <input id="zarrCrs" placeholder="EPSG:3031" spellcheck="false"></div>
+      </div>
+      <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata and regular
+        1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
     </div>
 
     <div id="tilebox" class="hide">
@@ -352,7 +372,8 @@
     <div class="foot">
       Sources: a STAC <code>/search</code> (default Earth Search, Sentinel-2
       L2A on AWS Open Data), a published starc store, the wildtiles inventory,
-      a GDAL VRT mosaic, pasted COG URLs, or an XYZ / WMTS tile server. The
+      a GDAL VRT mosaic, pasted COG URLs, an XYZ / WMTS tile server, or a
+      Zarr store. The
       timeline under the map scrubs the days (drag it, or the arrow keys);
       days already read come back instantly. Pixels are read straight from
       the COGs (or tiles) by HTTP range request at the overview level that
@@ -486,6 +507,10 @@ function makeCatalog() {
     if (!$("cogUrls").value.trim()) throw new Error("paste at least one COG URL");
     return X.cogCatalog({ urls: $("cogUrls").value });
   }
+  if ($("src").value === "zarr") {
+    if (!$("zarrUrl").value.trim()) throw new Error("enter the Zarr store URL");
+    return zarrCatalog();
+  }
   if ($("src").value === "wildtiles") {
     return X.wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
   }
@@ -502,6 +527,7 @@ function sourceChanged() {
   $("wtbox").classList.toggle("hide", src !== "wildtiles");
   $("vrtbox").classList.toggle("hide", src !== "vrt");
   $("cogbox").classList.toggle("hide", src !== "cog");
+  $("zarrbox").classList.toggle("hide", src !== "zarr");
   $("tilebox").classList.toggle("hide", src !== "tiles");
   $("inspTiles").classList.toggle("hide", src !== "tiles");
   coverLayer.clearLayers();
@@ -515,7 +541,8 @@ function capabilitiesChanged(cat) {
   var src = $("src").value;
   var caps = (cat && cat.capabilities) ||
     { cloud: src === "stac" || src === "starc",
-      time: src !== "vrt" && src !== "cog" && !(src === "tiles" && !X.isCapabilitiesUrl($("tileUrl").value)) };
+      time: src !== "vrt" && src !== "cog" && !(src === "tiles" && !X.isCapabilitiesUrl($("tileUrl").value)) &&
+            !(src === "zarr" && zarrNoTime) };
   $("cloudBox").classList.toggle("hide", !caps.cloud);
   $("from").parentNode.parentNode.classList.toggle("hide", !caps.time);
   $("dateNote").classList.toggle("hide", !caps.time);
@@ -524,9 +551,10 @@ $("src").addEventListener("change", function () {
   sourceChanged();
   if ($("src").value === "wildtiles") readCube(false).catch(fail);   // three small files
   if ($("src").value === "tiles") readTiles().catch(fail);
+  if ($("src").value === "zarr") readZarr(true).catch(fail);
 });
 ["stacUrl", "coll", "wtBucket", "wtRes", "starcColl", "vrtUrl", "cogUrls", "tileUrl", "tileLayer",
- "tileSet", "tileFmt", "tileDecode", "tileMax"].forEach(function (id) {
+ "tileSet", "tileFmt", "tileDecode", "tileMax", "zarrUrl", "zarrVar", "zarrCrs"].forEach(function (id) {
   $(id).addEventListener("change", clearScenes);
 });
 $("starcUrl").addEventListener("change", function () { coverLayer.clearLayers(); clearScenes(); });
@@ -651,6 +679,59 @@ async function readCogs(fit) {
   return info;
 }
 $("readCogs").addEventListener("click", function () { readCogs(true).catch(fail); });
+
+// A Zarr store lists its arrays (consolidated metadata); the chosen
+// variable's coordinates give its grid, CRS and times. One catalogue per
+// URL / variable / CRS, so the opened store and the chunk cache carry over.
+var zarrCat = null, zarrNoTime = false;
+function zarrCatalog() {
+  var o = { url: $("zarrUrl").value.trim(), variable: $("zarrVar").value || null,
+            crs: $("zarrCrs").value.trim() || null };
+  var k = JSON.stringify(o);
+  if (!zarrCat || zarrCat.key !== k) { zarrCat = X.zarrCatalog(o); zarrCat.key = k; }
+  return zarrCat;
+}
+async function readZarr(fit, want, keepDates) {
+  setStatus("reading the Zarr store's metadata ...");
+  $("zarrVar").innerHTML = "";
+  zarrCat = null;
+  var info = await zarrCatalog().info();
+  fillSelect($("zarrVar"), info.variables.map(function (v) {
+    return [v.name, v.name + " [" + v.dims.join(", ") + "]" + (v.units ? " " + v.units : "")];
+  }), want);
+  if (!info.variables.length) {
+    $("zarrInfo").textContent = info.consolidated ? "no gridded variables found" :
+      "no consolidated metadata, so the store cannot be listed";
+    setStatus("", ["nothing to show in this store"]);
+    return info;
+  }
+  return describeZarr(fit, keepDates);
+}
+async function describeZarr(fit, keepDates) {
+  setStatus("reading " + $("zarrVar").value + " coordinates ...");
+  var d = await zarrCatalog().describe();
+  zarrNoTime = !d.times;
+  zarrCatalog().capabilities = { cloud: false, time: !!d.times };
+  capabilitiesChanged(null);
+  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " +
+    d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") +
+    " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + d.crs + ", cell " +
+    d.res.map(function (r) { return +Math.abs(r).toPrecision(4); }).join(" x ") +
+    (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
+  coverLayer.clearLayers();
+  L.rectangle(roiLatLngBounds(d.bbox), { color: "#b39ddb", weight: 1, fill: false, opacity: 0.7,
+    interactive: false }).addTo(coverLayer);
+  if (d.times && !keepDates) {   // the last month of the store
+    $("to").value = d.times[1];
+    $("from").value = isoDay(new Date(Date.parse(d.times[1]) - 30 * 864e5));
+  }
+  if (fit && !state.roi) map.fitBounds(roiLatLngBounds(d.bbox));
+  setStatus(d.name + " read\ndraw a region (a chunk or two of it), then search");
+  return d;
+}
+$("readZarr").addEventListener("click", function () { readZarr(true, $("zarrVar").value).catch(fail); });
+$("zarrVar").addEventListener("change", function () { describeZarr(false).catch(fail); });
+$("zarrCrs").addEventListener("change", function () { describeZarr(false).catch(fail); });
 
 // A WMTS describes itself: layers, matrix sets (any CRS), formats, times.
 // An XYZ template is Web Mercator by definition and says nothing more.
@@ -1359,7 +1440,8 @@ async function loadImagery() {
     });
     if (state.loading !== ctl) return;
     var s = r.stats;
-    var errs = s.errors.map(function (e) { return e.id + ": " + e.message; });
+    var errs = s.errors.map(function (e) { return e.id + ": " + e.message; })
+      .filter(function (m, i, all) { return all.indexOf(m) === i; });
     if (s.lackingAssets) errs.push(s.lackingAssets + " scene(s) lack " + keys.join("/") + " or miss the region");
     if (!r.composite) {
       // never leave another day's image on screen under this day's label
@@ -1374,7 +1456,15 @@ async function loadImagery() {
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
     var what = s.files + " files";
     var tl = s.log.filter(function (t) { return t.kind === "tile"; });
-    if (tl.length) {   // a tile source: say what the level read looked like
+    var zc = s.log.filter(function (t) { return t.kind === "chunk"; });
+    if (zc.length) {   // a Zarr store: chunks, and what they cost
+      var mb = zc.reduce(function (a, t) { return a + (t.bytes || 0); }, 0) / 1048576;
+      var hits = zc.filter(function (t) { return t.cached; }).length;
+      what = zc.length + " chunk(s) of " + zc[0].z + " (" + (hits ? hits + " from cache, " : "") +
+        mb.toFixed(1) + " MB fetched)";
+      tl = zc;
+    }
+    else if (tl.length) {   // a tile source: say what the level read looked like
       var got = tl.filter(function (t) { return t.ok; }).length;
       what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " +
         (tl.length - got) + " missing or failed)";
@@ -1472,7 +1562,7 @@ async function peek(t) {
   $("peek").classList.remove("hide");
   if (peekUrl) { URL.revokeObjectURL(peekUrl); peekUrl = null; }
   var blob = t.blob;
-  if (!blob && t.url && (t.status || t.kind === "grid")) {   // a map tile: fetch it (usually cached)
+  if (!blob && t.url && !t.chunk && (t.status || t.kind === "grid")) {   // a map tile: fetch it (usually cached)
     var got = await X.fetchTile(t.url);
     blob = got.blob;
     if (t.kind === "grid") t.status = got.status;
@@ -1544,17 +1634,20 @@ async function inspRun(what) {
 $("inspLast").addEventListener("click", function () {
   var log = state.lastLog || [];
   if (!log.length) { inspInfo("load something first"); return; }
-  var tiles = log.filter(function (e) { return e.kind === "tile"; }).map(function (e) {
+  var tiles = log.filter(function (e) { return e.kind === "tile" || e.kind === "chunk"; }).map(function (e) {
     var t = { z: e.z, col: e.x, row: e.y, url: e.url, status: e.status, bytes: e.bytes, ms: e.ms,
               hash: e.hash, extent: e.extent, kind: e.ok ? "data" : (e.error ? "error" : "missing"),
-              note: e.error, polygon: X.boxPolygon(e.extent, X.ensureCrs(e.crs), 4) };
+              note: e.error, chunk: e.kind === "chunk",
+              polygon: X.boxPolygon(e.extent, X.ensureCrs(e.crs), 4) };
     return t;
   });
   if (tiles.length) X.markRepeats(tiles);
   var cog = X.cogReadTiles(log.filter(function (e) { return e.kind === "cog"; }));
   inspDraw(tiles.concat(cog));
   var files = log.filter(function (e) { return e.kind === "cog"; }).length;
-  inspInfo(tiles.length ? tiles.length + " map tiles read:" :
+  var chunks = tiles.filter(function (t) { return t.chunk; }).length;
+  inspInfo(chunks ? chunks + " Zarr chunk(s) read (labels are variable/column/row of the chunk grid):" :
+    tiles.length ? tiles.length + " map tiles read:" :
     cog.length + " internal COG tiles read from " + files + " file read(s) (whole tiles are fetched, so" +
     " this is the read amplification)", tiles.length ? kindSummary(tiles) : null);
 });
@@ -1633,6 +1726,11 @@ function writeHash() {
   }
   else if ($("src").value === "vrt") h.set("vrt", $("vrtUrl").value.trim());
   else if ($("src").value === "cog") h.set("cogs", $("cogUrls").value.trim().split(/\s+/).join(" "));
+  else if ($("src").value === "zarr") {
+    h.set("zarr", $("zarrUrl").value.trim());
+    if ($("zarrVar").value) h.set("zvar", $("zarrVar").value);
+    if ($("zarrCrs").value.trim()) h.set("zcrs", $("zarrCrs").value.trim());
+  }
   else if ($("src").value === "tiles") {
     h.set("tiles", $("tileUrl").value.trim());
     if ($("tileLayer").value) h.set("tlayer", $("tileLayer").value);
@@ -1672,6 +1770,11 @@ async function readHash() {
   if (h.get("res")) $("wtRes").value = h.get("res");
   if (h.get("vrt")) $("vrtUrl").value = h.get("vrt");
   if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
+  if (h.get("src") === "zarr") {
+    if (h.get("zarr")) $("zarrUrl").value = h.get("zarr");
+    if (h.get("zcrs")) $("zarrCrs").value = h.get("zcrs");
+    await readZarr(!h.has("roi"), h.get("zvar"), h.has("from"));
+  }
   if (h.get("tiles")) {
     $("tileUrl").value = h.get("tiles");
     if (h.get("tdec")) $("tileDecode").value = h.get("tdec");

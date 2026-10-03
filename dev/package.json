@@ -6,6 +6,7 @@
   "scripts": {
     "serve": "node server.mjs",
     "bundle-hyparquet": "esbuild node_modules/hyparquet/src/index.js --bundle --format=esm --outfile=hyparquet.esm.js",
+    "bundle-zarrita": "esbuild node_modules/zarrita/dist/src/index.js --bundle --format=esm --outfile=zarrita.esm.js",
     "standalone": "python3 build_standalone.py"
   },
   "devDependencies": {
@@ -14,6 +15,7 @@
     "hyparquet": "^1.0.0",
     "leaflet": "1.9.4",
     "playwright": "^1.50.0",
-    "proj4": "2.11.0"
+    "proj4": "2.11.0",
+    "zarrita": "^0.7.5"
   }
 }

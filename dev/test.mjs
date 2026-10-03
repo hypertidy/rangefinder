@@ -1,5 +1,5 @@
 // Headless check: node test.mjs "<permalink hash>" out.png
-// Run from dev/ after `npm install && npm run bundle-hyparquet`, with
+// Run from dev/ after `npm install && npm run bundle-hyparquet && npm run bundle-zarrita`, with
 // `node server.mjs` running. CDN requests are served from node_modules.
 // BASE env var overrides the page URL (e.g. file:///.../explorer.html).
 // Optional STEPS env var: extra playwright code run after page load.
@@ -11,6 +11,7 @@ const map = {
   "proj4.min.js": NM + "proj4/dist/proj4.js",
   "geotiff.min.js": NM + "geotiff/dist-browser/geotiff.js",
   "hyparquet@1/+esm": process.cwd() + "/hyparquet.esm.js",
+  "zarrita@0.7/+esm": process.cwd() + "/zarrita.esm.js",
 };
 const hash = process.argv[2] || "";
 const shot = process.argv[3] || "shot.png";
@@ -26,7 +27,7 @@ await page.route(/cdnjs|jsdelivr/, r => {
 });
 await page.route(/arcgisonline/, r => r.abort());
 let bytes = 0, nreq = 0;
-page.on("response", async resp => { if (resp.url().includes("sentinel-cogs")) { nreq++; const l = +(resp.headers()["content-length"] || 0); bytes += l; } });
+page.on("response", async resp => { if (/sentinel-cogs|zarr/.test(resp.url())) { nreq++; const l = +(resp.headers()["content-length"] || 0); bytes += l; } });
 await page.goto((process.env.BASE || "http://localhost:8765/") + "#" + hash);
 await page.waitForTimeout(1000);
 if (process.env.STEPS) await eval("(async () => {" + process.env.STEPS + "})()");

@@ -4,3 +4,4 @@ dev/package-lock.json
 dev/hyparquet.esm.js
 dev/fixtures/wt/
 *.png.tmp
+dev/zarrita.esm.js
