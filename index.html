@@ -141,6 +141,13 @@
         <option value="43S_R0060_0005_0094">heard (60m)</option>
         <option value="57S_R0010_0049_0547">macquarie station</option>
       </datalist>
+      <label for="wtRegion">region</label>
+      <div class="row">
+        <select id="wtRegion"><option value="">(read the index first)</option></select>
+        <button id="readCube" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read index</button>
+      </div>
+      <div id="wtInfo" class="note">reads index/inventory.parquet, registry/tiles.parquet and
+        registry/BANDS.txt; the bucket itself cannot be listed</div>
     </div>
 
     <h2>region</h2>
@@ -335,6 +342,19 @@ function isoDay(d) { return d.toISOString().slice(0, 10); }
   sel.value = ["red", "green", "blue"][i];
 });
 
+// bands a source lists beyond the usual names (wildtiles BANDS.txt: cloud, snow ...)
+function addBands(list) {
+  ["bR", "bG", "bB"].forEach(function (id) {
+    var sel = $(id), have = Array.prototype.map.call(sel.options, function (o) { return o.value; });
+    (list || []).forEach(function (k) {
+      if (k === "visual" || have.indexOf(k) >= 0) return;
+      var o = document.createElement("option");
+      o.value = k; o.textContent = k;
+      sel.appendChild(o);
+    });
+  });
+}
+
 $("wtBucket").value = X.WILDTILES_BUCKET;
 var today = new Date();
 $("to").value = isoDay(today);
@@ -360,11 +380,15 @@ function sourceChanged() {
   coverLayer.clearLayers();
   clearScenes();
 }
-$("src").addEventListener("change", sourceChanged);
+$("src").addEventListener("change", function () {
+  sourceChanged();
+  if ($("src").value === "wildtiles") readCube(false).catch(fail);   // three small files
+});
 ["stacUrl", "coll", "wtBucket", "wtRes", "starcColl"].forEach(function (id) {
   $(id).addEventListener("change", clearScenes);
 });
 $("starcUrl").addEventListener("change", function () { coverLayer.clearLayers(); clearScenes(); });
+$("wtBucket").addEventListener("change", function () { coverLayer.clearLayers(); cubeRegions = []; });
 
 // Read a starc store's index: what it holds, its date span, and where its
 // tiles are (drawn faintly so the curated regions are easy to find).
@@ -401,6 +425,53 @@ async function readStore(fit, quiet) {
     (state.roi ? "" : "\ndraw a region over the purple tiles, then search"));
   return info;
 }
+// The wildtiles bucket describes itself: inventory (days), registry (tiles
+// and regions) and BANDS.txt. Regions go in the picker and on the map.
+var cubeRegions = [];
+async function readCube(quiet) {
+  var cat = makeCatalog();
+  if (!quiet) setStatus("reading the " + cat.label + " index ...");
+  var info = await cat.info();
+  addBands(info.bands);
+  cubeRegions = info.regions;
+  var sel = $("wtRegion");
+  sel.innerHTML = "";
+  var o = document.createElement("option");
+  o.value = ""; o.textContent = info.regions.length ? "pick a region (" + info.regions.length + ")"
+                                                    : "(no registry: draw a region)";
+  sel.appendChild(o);
+  info.regions.forEach(function (r, i) {
+    var op = document.createElement("option");
+    op.value = String(i); op.textContent = r.id + " (" + r.n + " tiles)";
+    sel.appendChild(op);
+  });
+  coverLayer.clearLayers();
+  info.regions.forEach(function (r) {
+    L.rectangle(roiLatLngBounds(r.bbox), { color: "#b39ddb", weight: 1, fill: false, opacity: 0.7,
+      interactive: false }).addTo(coverLayer);
+  });
+  $("wtInfo").textContent = info.tiles + " tiles with data at " + $("wtRes").value + " m in " +
+    info.regions.length + " regions, " + info.days + " days from " + (info.dayMin || "?") +
+    " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") +
+    (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic");
+  if (!quiet) setStatus("index read: pick a region or draw one, then search");
+  return info;
+}
+$("readCube").addEventListener("click", function () {
+  readCube(false).then(function (info) {
+    if (info.dayMin) { $("from").value = info.dayMin; $("to").value = info.dayMax; }
+  }).catch(fail);
+});
+$("wtRegion").addEventListener("change", function () {
+  var r = cubeRegions[+this.value];
+  if (!r || this.value === "") return;
+  setRoi(r.bbox);
+  map.fitBounds(roiLatLngBounds(r.bbox).pad(0.1));
+});
+$("wtRes").addEventListener("change", function () {
+  if (cubeRegions.length) readCube(true).catch(fail);
+});
+
 $("readStore").addEventListener("click", function () {
   readStore(true).then(function (info) {
     if (info.dayMin) { $("from").value = info.dayMin; $("to").value = info.dayMax; }
@@ -1054,14 +1125,15 @@ async function readHash() {
   sourceChanged();
   if (h.get("store")) $("starcUrl").value = h.get("store");
   if (h.get("scoll")) $("starcColl").value = h.get("scoll");
+  if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
+  if (h.get("res")) $("wtRes").value = h.get("res");
   if (!h.has("roi")) {
     if (h.get("src") === "starc" && h.get("store")) await readStore(true);
+    if (h.get("src") === "wildtiles") await readCube(false);
     return;
   }
   if (h.get("url")) $("stacUrl").value = h.get("url");
   if (h.get("coll")) $("coll").value = h.get("coll");
-  if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
-  if (h.get("res")) $("wtRes").value = h.get("res");
   ["cloud", "preset"].forEach(function (k) { if (h.get(k)) $(k).value = h.get(k); });
   ["from", "to"].forEach(function (k) { if (h.has(k)) $(k).value = h.get(k); });
   if (h.get("bands")) {
@@ -1084,6 +1156,7 @@ async function readHash() {
   map.fitBounds(roiLatLngBounds(roi).pad(0.1));
   await searchScenes();
   if (h.get("src") === "starc") readStore(false, true).catch(fail);
+  if (h.get("src") === "wildtiles") readCube(true).catch(fail);
   var want = h.get("day");
   var i = state.days.findIndex(function (d) { return d.day === want; });
   if (i >= 0) await selectDay(i, true);

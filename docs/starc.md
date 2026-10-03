@@ -9,6 +9,11 @@ catalogue round trip, no API, and any curated archive someone has harvested
 becomes explorable from a static page. This is option C in
 `docs/design.md`.
 
+Status (Oct 2026): no starc store is public yet. Publishing the wildtiles
+store, and possibly making that bucket listable, is future work in the
+starc / wildtiles project. Until then the wildtiles cube itself is
+explorable through its inventory and tile registry (the wildtiles source).
+
 ## Publishing a store
 
 Copy the store directory to any static host that allows anonymous GET with

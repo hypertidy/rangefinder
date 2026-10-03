@@ -3,11 +3,16 @@
 items.json: real Earth Search v1 items (stored next to each scene) for a few
 MGRS squares in Tasmania (Jan 2025) and across the UTM 54/55 seam in
 Victoria (Feb 2025). wt/: a 2x2 block of wildtiles-format tiles cut from two
-55GEN scenes plus an inventory.parquet, to exercise the wildtiles binding.
+55GEN scenes plus index/inventory.parquet, registry/tiles.parquet and
+registry/BANDS.txt (the bucket's three well-known keys), to exercise the
+wildtiles binding. The registry also lists a 1x2 block in zone 54 with no
+inventory rows, standing in for a second region.
 
 Needs: pip install rasterio pyarrow
+Run: python3 make_fixtures.py            (everything)
+     python3 make_fixtures.py wildtiles  (wt/ only; items.json is committed)
 """
-import datetime, json, os, re, urllib.request
+import datetime, json, os, re, sys, urllib.request
 import pyarrow as pa, pyarrow.parquet as pq
 import rasterio
 from rasterio.transform import from_origin
@@ -62,9 +67,28 @@ def wildtiles():
         "tile_id": [r[0] for r in rows], "band": [r[1] for r in rows],
         "solarday": pa.array([datetime.date.fromisoformat(r[2]) for r in rows], type=pa.date32())}),
         os.path.join(HERE, "wt/index/inventory.parquet"))
-    print(len(rows), "wildtiles files")
+    reg = []
+    for c in (c0, c0 + 1):
+        for r in (r0, r0 + 1):
+            reg.append(("55S_R0010_%04d_%04d" % (c, r), "hobart", 32755, OX + c * TS, OY + r * TS))
+    xs, ys = transform("EPSG:4326", "EPSG:32754", [143.9], [-36.5])
+    c1, r1 = int((xs[0] - OX) // TS), int((ys[0] - OY) // TS)
+    for c in (c1, c1 + 1):
+        reg.append(("54S_R0010_%04d_%04d" % (c, r1), "vic_seam", 32754, OX + c * TS, OY + r1 * TS))
+    os.makedirs(os.path.join(HERE, "wt/registry"), exist_ok=True)
+    pq.write_table(pa.table({
+        "tile_id": [t[0] for t in reg], "region_id": [t[1] for t in reg],
+        "zone_epsg": pa.array([t[2] for t in reg], type=pa.int32()),
+        "res": pa.array([10] * len(reg), type=pa.int32()),
+        "xmin": [float(t[3]) for t in reg], "xmax": [float(t[3] + TS) for t in reg],
+        "ymin": [float(t[4]) for t in reg], "ymax": [float(t[4] + TS) for t in reg]}),
+        os.path.join(HERE, "wt/registry/tiles.parquet"))
+    open(os.path.join(HERE, "wt/registry/BANDS.txt"), "w").write(
+        "\n".join(["visual", "red", "green", "blue", "nir", "swir16", "scl", "cloud", "snow"]) + "\n")
+    print(len(rows), "wildtiles files,", len(reg), "registry tiles")
 
 if __name__ == "__main__":
     os.makedirs(HERE, exist_ok=True)
-    items()
+    if sys.argv[1:] != ["wildtiles"]:
+        items()
     wildtiles()

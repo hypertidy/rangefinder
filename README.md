@@ -25,7 +25,11 @@ Two ways to open it locally:
 1. **Source.** STAC API URL + collection (the `list` button reads
    `/collections`); a starc store URL (`read store` shows what it holds,
    draws its tiles and sets the dates to its span; see `docs/starc.md`);
-   or the wildtiles bucket and tile resolution.
+   or the wildtiles bucket and tile resolution. Choosing wildtiles reads the
+   bucket's three well-known keys (`index/inventory.parquet`,
+   `registry/tiles.parquet`, `registry/BANDS.txt`): its regions fill the
+   region picker and are outlined on the map, and extra bands such as
+   `cloud` and `snow` join the band pickers.
 2. **Region.** `draw on map`, then drag a box; or `use view`.
 3. **Scenes.** Date range (a blank date is an open end), max cloud,
    `Search scenes`. Results are grouped by solar day (local date at the
@@ -59,7 +63,7 @@ lib/explorer.js          entry point; re-exports, groupByDay(), loadComposite()
 lib/geo.js               layer 1: CRS helpers, OutputGrid, solar day
 lib/sources/stac.js      layers 1+2: STAC API binding (Catalog interface doc)
 lib/sources/starc.js     layers 1+2: starc store binding (acquisitions/products/assets)
-lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory.parquet)
+lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory, tile registry, BANDS.txt)
 lib/cog.js               layer 3: windowed overview reads warped to the grid
 lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma -> RGBA
 dev/                     mock STAC server, headless test, fixture and standalone builders
@@ -143,6 +147,9 @@ Extension points left for the next pieces of work:
 - A starc store without `footprint_wkb` matches scenes by their full MGRS
   tile, so a partial-swath scene can be listed for a region its data does
   not reach (that day then loads as "no pixels in the region").
+- The wildtiles region picker lists regions with data at the chosen
+  resolution; without `registry/tiles.parquet` the binding falls back to
+  computing tiles from the aatgrid id (UTM south, one zone per region).
 - Drawing a region uses mouse events; on touch devices use `use view`.
 
 ## Working on it
@@ -158,11 +165,13 @@ explorer itself has no dependencies to install).
 
 - `server.mjs` serves the page on port 8765, a mock STAC `/search` over real
   Earth Search items (`fixtures/items.json`: Tasmania Jan 2025 and the UTM
-  54/55 seam in Victoria Feb 2025), a mock wildtiles bucket under `/wt/`,
+  54/55 seam in Victoria Feb 2025), a mock wildtiles bucket under `/wt/`
+  (cube, inventory, registry and BANDS.txt),
   and mock starc stores under `/starc/` (manifest), `/starc-flat/`
   (consolidated) and `/s3/store/` (bucket listing only).
 - `make_fixtures.py` rebuilds the fixtures from the public bucket
-  (`pip install rasterio pyarrow`); the wildtiles tiles are not committed.
+  (`pip install rasterio pyarrow`); the wildtiles tiles are not committed
+  (`python3 make_fixtures.py wildtiles` rebuilds just those).
   `make_starc_fixture.py` builds the starc stores from `items.json`
   (`pip install pyarrow`); those are committed.
 - `test.mjs` drives the page headless from a permalink hash and prints the

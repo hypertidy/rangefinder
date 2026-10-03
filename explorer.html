@@ -142,6 +142,13 @@
         <option value="43S_R0060_0005_0094">heard (60m)</option>
         <option value="57S_R0010_0049_0547">macquarie station</option>
       </datalist>
+      <label for="wtRegion">region</label>
+      <div class="row">
+        <select id="wtRegion"><option value="">(read the index first)</option></select>
+        <button id="readCube" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read index</button>
+      </div>
+      <div id="wtInfo" class="note">reads index/inventory.parquet, registry/tiles.parquet and
+        registry/BANDS.txt; the bucket itself cannot be listed</div>
     </div>
 
     <h2>region</h2>
@@ -1495,79 +1502,198 @@ function wildtilesCatalog(opts) {
   var bucket = (opts.bucket || WILDTILES_BUCKET).replace(/\/+$/, "");
   var res = opts.res || 10;
   var inventory = null;
-  function loadInventory() {
-    if (inventory) return inventory;
-    inventory = (async function() {
-      var hp = await import(HYPARQUET2);
-      var file = await hp.asyncBufferFromUrl({ url: bucket + "/index/inventory.parquet" });
-      var rows = await hp.parquetReadObjects({ file, columns: ["tile_id", "band", "solarday"] });
-      var idx = /* @__PURE__ */ new Map();
-      rows.forEach(function(row) {
-        var d = row.solarday instanceof Date ? row.solarday.toISOString().slice(0, 10) : String(row.solarday).slice(0, 10);
-        var t = idx.get(row.tile_id);
-        if (!t) {
-          t = /* @__PURE__ */ new Map();
-          idx.set(row.tile_id, t);
-        }
-        var s = t.get(d);
-        if (!s) {
-          s = /* @__PURE__ */ new Set();
-          t.set(d, s);
-        }
-        s.add(row.band);
-      });
-      return idx;
-    })();
-    inventory.catch(function() {
-      inventory = null;
-    });
-    return inventory;
+  var registry = null;
+  var bandList = null;
+  function once(make) {
+    var p = null;
+    return function() {
+      if (!p) {
+        p = make();
+        p.catch(function() {
+          p = null;
+        });
+      }
+      return p;
+    };
   }
-  return {
+  var loadInventory = once(async function() {
+    var hp = await import(HYPARQUET2);
+    var file = await hp.asyncBufferFromUrl({ url: bucket + "/index/inventory.parquet" });
+    var rows = await hp.parquetReadObjects({ file, columns: ["tile_id", "band", "solarday"] });
+    var idx = /* @__PURE__ */ new Map();
+    rows.forEach(function(row) {
+      var d = row.solarday instanceof Date ? row.solarday.toISOString().slice(0, 10) : String(row.solarday).slice(0, 10);
+      var t = idx.get(row.tile_id);
+      if (!t) {
+        t = /* @__PURE__ */ new Map();
+        idx.set(row.tile_id, t);
+      }
+      var s = t.get(d);
+      if (!s) {
+        s = /* @__PURE__ */ new Set();
+        t.set(d, s);
+      }
+      s.add(row.band);
+    });
+    return idx;
+  });
+  var loadRegistry = once(async function() {
+    var hp = await import(HYPARQUET2);
+    var file;
+    try {
+      file = await hp.asyncBufferFromUrl({ url: bucket + "/registry/tiles.parquet" });
+    } catch (e) {
+      return null;
+    }
+    var rows = await hp.parquetReadObjects({ file });
+    var m = /* @__PURE__ */ new Map();
+    rows.forEach(function(r) {
+      var epsg = String(r.zone_epsg || r.epsg || "").replace(/^EPSG:/i, "");
+      var t;
+      try {
+        t = parseTileId(r.tile_id);
+      } catch (e) {
+        t = null;
+      }
+      var ext = [r.xmin, r.ymin, r.xmax, r.ymax].map(Number);
+      if (!ext.every(isFinite) && t) ext = tileExtent(t);
+      var crs = epsg ? "EPSG:" + epsg : t ? utmCode(t.zone, true) : null;
+      if (!crs || !ext.every(isFinite)) return;
+      m.set(r.tile_id, {
+        id: r.tile_id,
+        region: r.region_id || null,
+        crs,
+        res: Number(r.res) || t && t.res || null,
+        extent: ext,
+        bbox: null
+      });
+    });
+    return m;
+  });
+  var loadBands = once(async function() {
+    var r = await fetch(bucket + "/registry/BANDS.txt");
+    if (!r.ok) return BANDS;
+    var b = (await r.text()).split(/\r?\n/).map(function(x) {
+      return x.trim();
+    }).filter(function(x) {
+      return x && x[0] !== "#";
+    });
+    return b.length ? b : BANDS;
+  });
+  function lonlat(t) {
+    if (!t.bbox) t.bbox = transformBbox(t.extent, t.crs, "EPSG:4326", 4);
+    return t.bbox;
+  }
+  async function registryTiles(bbox, maxTiles) {
+    var reg = await loadRegistry().catch(function() {
+      return null;
+    });
+    if (!reg) return null;
+    var out = [];
+    reg.forEach(function(t) {
+      if (t.res === res && bboxIntersects(lonlat(t), bbox)) out.push(t);
+    });
+    if (out.length > (maxTiles || 400)) {
+      throw new Error("region covers " + out.length + " wildtiles; draw a smaller one");
+    }
+    return out;
+  }
+  var catalog = {
     kind: "wildtiles",
     label: "wildtiles " + bucket,
     bands: BANDS,
+    // Bucket summary for the page: { bands, tiles, days, dayMin, dayMax,
+    // regions: [{ id, n, bbox }] (empty without a registry), registry: bool }
+    info: async function() {
+      var parts = await Promise.all([
+        loadInventory(),
+        loadRegistry().catch(function() {
+          return null;
+        }),
+        loadBands()
+      ]);
+      var idx = parts[0], reg = parts[1], bands = parts[2];
+      catalog.bands = bands;
+      var days = /* @__PURE__ */ new Set();
+      idx.forEach(function(dm) {
+        dm.forEach(function(b, d) {
+          days.add(d);
+        });
+      });
+      var sorted = Array.from(days).sort();
+      var regions = /* @__PURE__ */ new Map();
+      if (reg) reg.forEach(function(t) {
+        if (t.res !== res || !idx.has(t.id)) return;
+        var k = t.region || "(no region)", bb = lonlat(t), g = regions.get(k);
+        if (!g) regions.set(k, { id: k, n: 1, bbox: bb.slice() });
+        else {
+          g.n++;
+          g.bbox = [
+            Math.min(g.bbox[0], bb[0]),
+            Math.min(g.bbox[1], bb[1]),
+            Math.max(g.bbox[2], bb[2]),
+            Math.max(g.bbox[3], bb[3])
+          ];
+        }
+      });
+      return {
+        bands,
+        registry: !!reg,
+        tiles: idx.size,
+        days: sorted.length,
+        dayMin: sorted[0] || null,
+        dayMax: sorted[sorted.length - 1] || null,
+        regions: Array.from(regions.values()).sort(function(a, b) {
+          return a.id < b.id ? -1 : 1;
+        })
+      };
+    },
     search: async function(q) {
-      var tiles = tilesForBbox(q.bbox, res);
+      var tiles = await registryTiles(q.bbox);
+      if (!tiles) {
+        tiles = tilesForBbox(q.bbox, res).map(function(t) {
+          return {
+            id: makeTileId(t),
+            region: null,
+            crs: utmCode(t.zone, true),
+            res,
+            extent: tileExtent(t),
+            bbox: null
+          };
+        });
+      }
       var idx = await loadInventory();
       var range = (q.datetime || "../..").split("/");
       if (!range[0] || range[0] === "..") range[0] = "0000-01-01";
       if (!range[1] || range[1] === "..") range[1] = "9999-12-31";
       var scenes = [];
       tiles.forEach(function(t) {
-        var id = makeTileId(t);
-        var days = idx.get(id);
+        var days = idx.get(t.id);
         if (!days) return;
-        var crs = utmCode(t.zone, true);
-        var bb = transformBbox(tileExtent(t), crs, "EPSG:4326");
+        var bb = lonlat(t), geom = boxPolygon(t.extent, t.crs, 2);
         days.forEach(function(bandSet, day) {
           if (day < range[0] || day > range[1]) return;
           var assets = {};
           bandSet.forEach(function(b) {
-            assets[b] = bucket + "/cube/" + id + "/" + b + "/" + day + ".tif";
+            assets[b] = bucket + "/cube/" + t.id + "/" + b + "/" + day + ".tif";
           });
           scenes.push({
-            id: id + "/" + day,
+            id: t.id + "/" + day,
             day,
             datetime: day + "T12:00:00Z",
-            geometry: { type: "Polygon", coordinates: [[
-              [bb[0], bb[1]],
-              [bb[2], bb[1]],
-              [bb[2], bb[3]],
-              [bb[0], bb[3]],
-              [bb[0], bb[1]]
-            ]] },
+            geometry: geom,
             bbox: bb,
             cloud: null,
-            crs,
+            crs: t.crs,
             assets,
-            meta: { tile: id, grid: id }
+            meta: { tile: t.id, grid: t.id, region: t.region }
           });
         });
       });
       return scenes;
     }
   };
+  return catalog;
 }
 
 // lib/explorer.js
@@ -1771,6 +1897,20 @@ function isoDay(d) {
   });
   sel.value = ["red", "green", "blue"][i];
 });
+function addBands(list) {
+  ["bR", "bG", "bB"].forEach(function(id) {
+    var sel = $(id), have = Array.prototype.map.call(sel.options, function(o) {
+      return o.value;
+    });
+    (list || []).forEach(function(k) {
+      if (k === "visual" || have.indexOf(k) >= 0) return;
+      var o = document.createElement("option");
+      o.value = k;
+      o.textContent = k;
+      sel.appendChild(o);
+    });
+  });
+}
 $("wtBucket").value = WILDTILES_BUCKET;
 var today = /* @__PURE__ */ new Date();
 $("to").value = isoDay(today);
@@ -1793,13 +1933,20 @@ function sourceChanged() {
   coverLayer.clearLayers();
   clearScenes();
 }
-$("src").addEventListener("change", sourceChanged);
+$("src").addEventListener("change", function() {
+  sourceChanged();
+  if ($("src").value === "wildtiles") readCube(false).catch(fail);
+});
 ["stacUrl", "coll", "wtBucket", "wtRes", "starcColl"].forEach(function(id) {
   $(id).addEventListener("change", clearScenes);
 });
 $("starcUrl").addEventListener("change", function() {
   coverLayer.clearLayers();
   clearScenes();
+});
+$("wtBucket").addEventListener("change", function() {
+  coverLayer.clearLayers();
+  cubeRegions = [];
 });
 async function readStore(fit, quiet) {
   var cat = makeCatalog();
@@ -1839,6 +1986,56 @@ async function readStore(fit, quiet) {
   if (!quiet) setStatus("store read: " + info.acquisitions + " acquisitions" + (state.roi ? "" : "\ndraw a region over the purple tiles, then search"));
   return info;
 }
+var cubeRegions = [];
+async function readCube(quiet) {
+  var cat = makeCatalog();
+  if (!quiet) setStatus("reading the " + cat.label + " index ...");
+  var info = await cat.info();
+  addBands(info.bands);
+  cubeRegions = info.regions;
+  var sel = $("wtRegion");
+  sel.innerHTML = "";
+  var o = document.createElement("option");
+  o.value = "";
+  o.textContent = info.regions.length ? "pick a region (" + info.regions.length + ")" : "(no registry: draw a region)";
+  sel.appendChild(o);
+  info.regions.forEach(function(r, i) {
+    var op = document.createElement("option");
+    op.value = String(i);
+    op.textContent = r.id + " (" + r.n + " tiles)";
+    sel.appendChild(op);
+  });
+  coverLayer.clearLayers();
+  info.regions.forEach(function(r) {
+    L.rectangle(roiLatLngBounds(r.bbox), {
+      color: "#b39ddb",
+      weight: 1,
+      fill: false,
+      opacity: 0.7,
+      interactive: false
+    }).addTo(coverLayer);
+  });
+  $("wtInfo").textContent = info.tiles + " tiles with data at " + $("wtRes").value + " m in " + info.regions.length + " regions, " + info.days + " days from " + (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") + (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic");
+  if (!quiet) setStatus("index read: pick a region or draw one, then search");
+  return info;
+}
+$("readCube").addEventListener("click", function() {
+  readCube(false).then(function(info) {
+    if (info.dayMin) {
+      $("from").value = info.dayMin;
+      $("to").value = info.dayMax;
+    }
+  }).catch(fail);
+});
+$("wtRegion").addEventListener("change", function() {
+  var r = cubeRegions[+this.value];
+  if (!r || this.value === "") return;
+  setRoi(r.bbox);
+  map.fitBounds(roiLatLngBounds(r.bbox).pad(0.1));
+});
+$("wtRes").addEventListener("change", function() {
+  if (cubeRegions.length) readCube(true).catch(fail);
+});
 $("readStore").addEventListener("click", function() {
   readStore(true).then(function(info) {
     if (info.dayMin) {
@@ -2556,14 +2753,15 @@ async function readHash() {
   sourceChanged();
   if (h.get("store")) $("starcUrl").value = h.get("store");
   if (h.get("scoll")) $("starcColl").value = h.get("scoll");
+  if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
+  if (h.get("res")) $("wtRes").value = h.get("res");
   if (!h.has("roi")) {
     if (h.get("src") === "starc" && h.get("store")) await readStore(true);
+    if (h.get("src") === "wildtiles") await readCube(false);
     return;
   }
   if (h.get("url")) $("stacUrl").value = h.get("url");
   if (h.get("coll")) $("coll").value = h.get("coll");
-  if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
-  if (h.get("res")) $("wtRes").value = h.get("res");
   ["cloud", "preset"].forEach(function(k) {
     if (h.get(k)) $(k).value = h.get(k);
   });
@@ -2600,6 +2798,7 @@ async function readHash() {
   map.fitBounds(roiLatLngBounds(roi).pad(0.1));
   await searchScenes();
   if (h.get("src") === "starc") readStore(false, true).catch(fail);
+  if (h.get("src") === "wildtiles") readCube(true).catch(fail);
   var want = h.get("day");
   var i = state.days.findIndex(function(d) {
     return d.day === want;
