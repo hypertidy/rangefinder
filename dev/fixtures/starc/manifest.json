@@ -1,0 +1,17 @@
+{
+ "starc": 1,
+ "files": [
+  "acquisitions/0ffe296c54da3413.parquet",
+  "acquisitions/311e544b255d3970.parquet",
+  "acquisitions/3c82becc420c5915.parquet",
+  "assets/collection=sentinel-2-l2a/0ffe296c54da3413.parquet",
+  "assets/collection=sentinel-2-l2a/311e544b255d3970.parquet",
+  "assets/collection=sentinel-2-l2a/3c82becc420c5915.parquet",
+  "products/collection=sentinel-2-l2a/0ffe296c54da3413.parquet",
+  "products/collection=sentinel-2-l2a/311e544b255d3970.parquet",
+  "products/collection=sentinel-2-l2a/3c82becc420c5915.parquet",
+  "queries/0ffe296c54da3413.parquet",
+  "queries/311e544b255d3970.parquet",
+  "queries/3c82becc420c5915.parquet"
+ ]
+}

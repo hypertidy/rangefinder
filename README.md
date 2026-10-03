@@ -2,9 +2,10 @@
 
 A static, server-free explorer for online satellite imagery, starting with
 Sentinel-2. Point it at a STAC API (default:
-Earth Search v1, `sentinel-2-l2a`) or at the wildtiles cube, draw a region on
-the map, search scenes, pick a day, and the page reads the COGs directly by
-HTTP range request and composes the image in the browser.
+Earth Search v1, `sentinel-2-l2a`), a published starc store or the wildtiles
+cube, draw a region on the map, search scenes, scrub through the days, and
+the page reads the COGs directly by HTTP range request and composes the
+image in the browser.
 
 Live: https://hypertidy.github.io/rangefinder/ (deployed from `main` by
 `.github/workflows/pages.yml`).
@@ -22,18 +23,27 @@ Two ways to open it locally:
 ## Using it
 
 1. **Source.** STAC API URL + collection (the `list` button reads
-   `/collections`), or the wildtiles bucket and tile resolution.
+   `/collections`); a starc store URL (`read store` shows what it holds,
+   draws its tiles and sets the dates to its span; see `docs/starc.md`);
+   or the wildtiles bucket and tile resolution.
 2. **Region.** `draw on map`, then drag a box; or `use view`.
-3. **Scenes.** Date range, max cloud, `Search scenes`. Results are grouped by
-   solar day (local date at the scene centre). Click a day to load it.
-4. **Composite.** TCI (the baked 3-band Byte product, fastest) or any three
+3. **Scenes.** Date range (a blank date is an open end), max cloud,
+   `Search scenes`. Results are grouped by solar day (local date at the
+   scene centre). Click a day to load it, or use the timeline.
+4. **Timeline.** Under the map once a search returns: one bar per day on a
+   true time axis, taller for clearer days, brighter once read. Drag or
+   click it, `<` / `>` (or the arrow keys, `[` / `]`), or `play` (key `p`)
+   to step through the days, reading the next one ahead. Days already read
+   come back from a cache without refetching. "hold limits" keeps the
+   current min/max for every day so dates compare like for like.
+5. **Composite.** TCI (the baked 3-band Byte product, fastest) or any three
    raw bands. Limits are percentiles over the whole region (default 2-98%,
    so mosaics stay seamless) or manual per-band min/max; "same limits for
    all bands" keeps true-colour balance. Then a stretch curve (linear, sqrt,
    log), gamma, and the L2A -1000 offset (auto from scene metadata, always,
    or off). Everything re-renders the cached pixels without refetching, and
    "show imagery" (key `i`) toggles the overlay.
-5. **Output size** caps the longer side of the output grid; it is also never
+6. **Output size** caps the longer side of the output grid; it is also never
    finer than 10 m. **Max scenes** caps how many scenes one load reads.
 
 The URL hash is a permalink (source, region, dates, composite, day).
@@ -48,18 +58,20 @@ explorer.html            generated single-file copy (works from file://)
 lib/explorer.js          entry point; re-exports, groupByDay(), loadComposite()
 lib/geo.js               layer 1: CRS helpers, OutputGrid, solar day
 lib/sources/stac.js      layers 1+2: STAC API binding (Catalog interface doc)
+lib/sources/starc.js     layers 1+2: starc store binding (acquisitions/products/assets)
 lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory.parquet)
 lib/cog.js               layer 3: windowed overview reads warped to the grid
 lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma -> RGBA
 dev/                     mock STAC server, headless test, fixture and standalone builders
 docs/design.md           the original design notes (four layers, minimal path)
 docs/rgb-compositing.md  compositing controls and the L2A offset findings
+docs/starc.md            publishing and reading a starc store
 docs/sources-brainstorm.md  beyond Sentinel-2: other sources, tile servers
 ```
 
 Dependencies are globals loaded by the page from cdnjs/jsdelivr: Leaflet
-1.9.4, proj4 2.11.0, geotiff.js 2.1.3. The wildtiles source imports
-hyparquet from jsdelivr on demand. No build step.
+1.9.4, proj4 2.11.0, geotiff.js 2.1.3. The wildtiles and starc sources
+import hyparquet from jsdelivr on demand. No build step.
 
 ## How a load works
 
@@ -108,11 +120,15 @@ Extension points left for the next pieces of work:
   `sceneOffset()` decides the L2A offset (a source can force it with
   `scene.meta.dnOffset`). Details and the pixel checks behind the offset
   rule are in `docs/rgb-compositing.md`.
-- **Time scrubber**: `state.days` is `[{ day, scenes, cloudMin }]` and
-  `selectDay(i, true)` loads a day; a slider only needs those two
-  (`window.explorer` exposes them).
-- **starc store source**: implement the Catalog interface (acquisitions give
-  `day`, assets give hrefs); pixels and render need no change.
+- **Time scrubber** (done): a canvas timeline over `state.days`; loads go
+  through `dayComposite(i)`, a per-day cache keyed by day, bands, grid and
+  scene cap (400 MB, least recently used out), which `play` also uses to
+  read one day ahead. `window.explorer` exposes `stepDay`, `play`,
+  `stopPlay`, `selectDay`.
+- **starc store source** (done): `starcCatalog({ url, collection })`, plus
+  `info()` for the store summary. Footprints come from `footprint_wkb` or
+  the MGRS tile code (`mgrsExtent()` in geo.js). Details in
+  `docs/starc.md`.
 
 ## Notes and limits
 
@@ -124,6 +140,9 @@ Extension points left for the next pieces of work:
   TCI is one file per scene instead of three.
 - Catalogues that need signed URLs (Planetary Computer) or credentials (CDSE
   S3) are not supported yet; the hrefs must be public and CORS-enabled.
+- A starc store without `footprint_wkb` matches scenes by their full MGRS
+  tile, so a partial-swath scene can be listed for a region its data does
+  not reach (that day then loads as "no pixels in the region").
 - Drawing a region uses mouse events; on touch devices use `use view`.
 
 ## Working on it
@@ -139,9 +158,13 @@ explorer itself has no dependencies to install).
 
 - `server.mjs` serves the page on port 8765, a mock STAC `/search` over real
   Earth Search items (`fixtures/items.json`: Tasmania Jan 2025 and the UTM
-  54/55 seam in Victoria Feb 2025) and a mock wildtiles bucket under `/wt/`.
+  54/55 seam in Victoria Feb 2025), a mock wildtiles bucket under `/wt/`,
+  and mock starc stores under `/starc/` (manifest), `/starc-flat/`
+  (consolidated) and `/s3/store/` (bucket listing only).
 - `make_fixtures.py` rebuilds the fixtures from the public bucket
   (`pip install rasterio pyarrow`); the wildtiles tiles are not committed.
+  `make_starc_fixture.py` builds the starc stores from `items.json`
+  (`pip install pyarrow`); those are committed.
 - `test.mjs` drives the page headless from a permalink hash and prints the
   status line and bytes read; pixels always come from the real
   sentinel-cogs bucket.

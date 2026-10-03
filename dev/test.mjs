@@ -27,7 +27,7 @@ await page.route(/cdnjs|jsdelivr/, r => {
 await page.route(/arcgisonline/, r => r.abort());
 let bytes = 0, nreq = 0;
 page.on("response", async resp => { if (resp.url().includes("sentinel-cogs")) { nreq++; const l = +(resp.headers()["content-length"] || 0); bytes += l; } });
-await page.goto("http://localhost:8765/#" + hash);
+await page.goto((process.env.BASE || "http://localhost:8765/") + "#" + hash);
 await page.waitForTimeout(1000);
 if (process.env.STEPS) await eval("(async () => {" + process.env.STEPS + "})()");
 const t0 = Date.now();

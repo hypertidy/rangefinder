@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rangefinder</title>
 <!--
-  rangefinder: point at a STAC API (or the wildtiles cube), draw a
-  region on the map, search scenes, and compose imagery client-side from
+  rangefinder: point at a STAC API (or a starc store, or the wildtiles
+  cube), draw a region on the map, search scenes, scrub through the days
+  with the timeline under the map, and compose imagery client-side from
   the raw COGs with windowed overview reads. No server, no credentials,
   no build step. The layers live in lib/ (see README.md).
 -->
@@ -22,7 +23,20 @@
   #app { display: flex; height: 100%; }
   #panel { width: 320px; min-width: 320px; padding: 14px 16px; background: var(--panel);
            border-right: 1px solid var(--edge); overflow-y: auto; box-sizing: border-box; }
+  #mapwrap { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   #map { flex: 1; background: #000; }
+  #scrub { background: var(--panel); border-top: 1px solid var(--edge); padding: 6px 10px 4px; }
+  #scrub .srow { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+  #scrub button { width: auto; margin: 0; padding: 3px 10px; }
+  #scrubLabel { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #scrubLabel .n { color: var(--muted); font-size: 12px; }
+  #scrub label { margin: 0; color: var(--muted); font-size: 12px; display: flex; gap: 4px;
+                 text-transform: none; letter-spacing: 0;
+                 align-items: center; white-space: nowrap; }
+  #scrub input[type=checkbox] { width: auto; margin: 0; }
+  #timeline { display: block; width: 100%; height: 46px; margin-top: 4px; cursor: pointer;
+              touch-action: none; outline: none; }
+  #timeline:focus-visible { box-shadow: 0 0 0 1px var(--accent); }
   #map.drawing, #map.drawing .leaflet-interactive { cursor: crosshair; }
   .coords { background: rgba(16,20,26,0.8); color: var(--text); padding: 2px 6px;
             border-radius: 4px; font: 12px ui-monospace, monospace; }
@@ -49,7 +63,7 @@
   .row span { font-size: 13px; }
   .hide { display: none; }
   .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
-  #days { margin-top: 8px; max-height: 210px; overflow-y: auto; border: 1px solid var(--edge);
+  #days { position: relative; margin-top: 8px; max-height: 210px; overflow-y: auto; border: 1px solid var(--edge);
           border-radius: 6px; }
   #days:empty { display: none; }
   .day { display: flex; justify-content: space-between; padding: 4px 9px; font-size: 13px;
@@ -88,6 +102,7 @@
     <h2>source</h2>
     <select id="src">
       <option value="stac">STAC API</option>
+      <option value="starc">starc store</option>
       <option value="wildtiles">wildtiles cube</option>
     </select>
     <div id="stacbox">
@@ -99,6 +114,18 @@
         <button id="listColl" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">list</button>
       </div>
       <datalist id="colls"></datalist>
+    </div>
+    <div id="starcbox" class="hide">
+      <label for="starcUrl">store URL</label>
+      <input id="starcUrl" placeholder="https://host/bucket/starc-store" spellcheck="false">
+      <label for="starcColl">collection (blank: any)</label>
+      <div class="row">
+        <input id="starcColl" list="starcColls" spellcheck="false">
+        <button id="readStore" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read store</button>
+      </div>
+      <datalist id="starcColls"></datalist>
+      <div id="starcInfo" class="note">a published starc store: manifest.json, a listable
+        bucket, or consolidated tables (see docs/starc.md)</div>
     </div>
     <div id="wtbox" class="hide">
       <label for="wtBucket">bucket</label>
@@ -132,6 +159,7 @@
       <div><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
       <div><label for="maxItems">max items</label><input id="maxItems" type="number" value="300" min="1"></div>
     </div>
+    <div class="note">leave a date blank for an open range</div>
     <button id="search">Search scenes</button>
     <div id="days"></div>
 
@@ -212,14 +240,29 @@
 
     <div class="foot">
       Scenes come from a STAC <code>/search</code> (default Earth Search,
-      Sentinel-2 L2A on AWS Open Data) or the wildtiles inventory. Pixels
+      Sentinel-2 L2A on AWS Open Data), a published starc store or the
+      wildtiles inventory. The timeline under the map scrubs the days
+      (drag it, or the arrow keys); days already read come back instantly. Pixels
       are read straight from the COGs by HTTP range request at the overview
       level that suits the region, warped onto one Web Mercator grid and
       mosaicked least-cloudy-first. Stretch and composition happen here on
       the raw numbers. The URL hash is a permalink.
     </div>
   </div>
-  <div id="map"></div>
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="scrub" class="hide">
+      <div class="srow">
+        <button id="prevDay" class="minor" title="previous day (left arrow or [)">&lt;</button>
+        <button id="playDay" class="minor" title="step through the days (p)">play</button>
+        <button id="nextDay" class="minor" title="next day (right arrow or ])">&gt;</button>
+        <span id="scrubLabel"></span>
+        <label title="keep the current min/max for every day, so dates compare like for like">
+          <input type="checkbox" id="holdLim"> hold limits</label>
+      </div>
+      <canvas id="timeline" tabindex="0"></canvas>
+    </div>
+  </div>
 </div>
 
 <script type="module">
@@ -254,11 +297,14 @@ map.on("mousemove", function (e) {
     e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom();
 });
 var footLayer = L.layerGroup().addTo(map);
+var coverLayer = L.layerGroup().addTo(map);   // a starc store's tiles
 
 var state = {
   catalog: null, roi: null, roiRect: null,
   scenes: [], days: [], dayIndex: -1,
-  comp: null, overlay: null, loading: null
+  comp: null, overlay: null, loading: null,
+  cache: new Map(), cacheBytes: 0,            // composites per day, see dayComposite()
+  playing: false, prefetch: null
 };
 
 // --- small helpers -----------------------------------------------------------
@@ -300,17 +346,65 @@ function makeCatalog() {
   if ($("src").value === "wildtiles") {
     return X.wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
   }
+  if ($("src").value === "starc") {
+    if (!$("starcUrl").value.trim()) throw new Error("enter the starc store URL");
+    return X.starcCatalog({ url: $("starcUrl").value.trim(), collection: $("starcColl").value.trim() });
+  }
   return X.stacCatalog({ url: $("stacUrl").value.trim(), collection: $("coll").value.trim() });
 }
 function sourceChanged() {
-  var wt = $("src").value === "wildtiles";
-  $("stacbox").classList.toggle("hide", wt);
-  $("wtbox").classList.toggle("hide", !wt);
+  var src = $("src").value;
+  $("stacbox").classList.toggle("hide", src !== "stac");
+  $("starcbox").classList.toggle("hide", src !== "starc");
+  $("wtbox").classList.toggle("hide", src !== "wildtiles");
+  coverLayer.clearLayers();
   clearScenes();
 }
 $("src").addEventListener("change", sourceChanged);
-["stacUrl", "coll", "wtBucket", "wtRes"].forEach(function (id) {
+["stacUrl", "coll", "wtBucket", "wtRes", "starcColl"].forEach(function (id) {
   $(id).addEventListener("change", clearScenes);
+});
+$("starcUrl").addEventListener("change", function () { coverLayer.clearLayers(); clearScenes(); });
+
+// Read a starc store's index: what it holds, its date span, and where its
+// tiles are (drawn faintly so the curated regions are easy to find).
+async function readStore(fit, quiet) {
+  var cat = makeCatalog();
+  if (!quiet) setStatus("reading " + cat.label + " ...");
+  var info = await cat.info(quiet ? null : function (table, n, of) {
+    setStatus("reading " + table + " " + n + "/" + of + " files ...");
+  });
+  var dl = $("starcColls");
+  dl.innerHTML = "";
+  info.collections.forEach(function (c) {
+    var o = document.createElement("option");
+    o.value = c[0]; o.textContent = c[1] + " products";
+    dl.appendChild(o);
+  });
+  $("starcInfo").textContent = info.acquisitions + " acquisitions, " + info.products +
+    " products from " + (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; " +
+    info.collections.map(function (c) { return c[0] + " (" + c[1] + ")"; }).join(", ") +
+    "; " + info.tiles.length + " tiles; found by " + info.how;
+  coverLayer.clearLayers();
+  info.tiles.forEach(function (t) {
+    L.geoJSON(t.geometry, { style: { color: "#b39ddb", weight: 1, fill: false, opacity: 0.6 },
+                            interactive: false }).addTo(coverLayer);
+  });
+  if (fit && info.tiles.length && !state.roi) {
+    var b = info.tiles.reduce(function (a, t) {
+      return [Math.min(a[0], t.bbox[0]), Math.min(a[1], t.bbox[1]),
+              Math.max(a[2], t.bbox[2]), Math.max(a[3], t.bbox[3])];
+    }, [180, 90, -180, -90]);
+    map.fitBounds(roiLatLngBounds(b));
+  }
+  if (!quiet) setStatus("store read: " + info.acquisitions + " acquisitions" +
+    (state.roi ? "" : "\ndraw a region over the purple tiles, then search"));
+  return info;
+}
+$("readStore").addEventListener("click", function () {
+  readStore(true).then(function (info) {
+    if (info.dayMin) { $("from").value = info.dayMin; $("to").value = info.dayMax; }
+  }).catch(fail);
 });
 $("listColl").addEventListener("click", function () {
   setStatus("listing collections ...");
@@ -397,9 +491,13 @@ $("useView").addEventListener("click", function () {
 // point a time scrubber needs.
 
 function clearScenes() {
+  stopPlay();
+  if (state.prefetch) { state.prefetch.abort(); state.prefetch = null; }
   state.scenes = []; state.days = []; state.dayIndex = -1;
+  state.cache.clear(); state.cacheBytes = 0;
   $("days").innerHTML = "";
   footLayer.clearLayers();
+  renderScrub();
 }
 
 async function searchScenes() {
@@ -413,7 +511,7 @@ async function searchScenes() {
     var t0 = performance.now();
     var scenes = await state.catalog.search({
       bbox: state.roi,
-      datetime: $("from").value + "/" + $("to").value,
+      datetime: ($("from").value || "..") + "/" + ($("to").value || ".."),
       cloudMax: +$("cloud").value,
       maxItems: +$("maxItems").value || 300
     });
@@ -441,9 +539,10 @@ function renderDays() {
     row.innerHTML = "<span></span><span class='n'></span>";
     row.firstChild.textContent = d.day;
     row.lastChild.textContent = d.scenes.length + " scene" + (d.scenes.length > 1 ? "s" : "") + cl;
-    row.addEventListener("click", function () { selectDay(i, true); });
+    row.addEventListener("click", function () { stopPlay(); selectDay(i, true); });
     box.appendChild(row);
   });
+  renderScrub();
 }
 
 function drawFootprints() {
@@ -458,14 +557,215 @@ function drawFootprints() {
 }
 
 function selectDay(i, load) {
+  if (i < 0 || i >= state.days.length) return Promise.resolve();
   state.dayIndex = i;
   Array.prototype.forEach.call($("days").children, function (row) {
-    row.classList.toggle("sel", +row.dataset.i === i);
+    var on = +row.dataset.i === i;
+    row.classList.toggle("sel", on);
+    if (on) {   // scroll the day list only, never the panel
+      var box = $("days");
+      if (row.offsetTop < box.scrollTop) box.scrollTop = row.offsetTop;
+      else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) {
+        box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
+      }
+    }
   });
   drawFootprints();
+  renderScrub();
   writeHash();
   if (load) return loadImagery().catch(fail);
+  return Promise.resolve();
 }
+
+// --- time scrubber -------------------------------------------------------------
+//
+// A timeline of the searched days under the map: one bar per day on a true
+// time axis, taller for clearer days (100 - least cloud %), brighter once the
+// day's composite is cached. Dragging moves the selection at once and loads
+// when the pointer rests; play steps through the days, reading the next one
+// ahead while the current one shows.
+
+var TL = { pad: 10, axis: 13 };
+
+function dayTime(d) { return Date.parse(d + "T00:00:00Z"); }
+function tlRange() {
+  var t0 = dayTime(state.days[0].day), t1 = dayTime(state.days[state.days.length - 1].day);
+  var pad = Math.max(864e5, (t1 - t0) * 0.01);
+  return [t0 - pad, t1 + pad];
+}
+function tlX(t, w, r) { return TL.pad + (t - r[0]) / (r[1] - r[0]) * (w - 2 * TL.pad); }
+
+function axisTicks(r) {
+  var span = (r[1] - r[0]) / 864e5, out = [], d = new Date(r[0]);
+  var step = span > 1500 ? "year" : span > 75 ? "month" : "week";
+  d = new Date(Date.UTC(d.getUTCFullYear(), step === "year" ? 0 : d.getUTCMonth(),
+                        step === "week" ? d.getUTCDate() : 1));
+  while (d.getTime() <= r[1]) {
+    if (d.getTime() >= r[0]) {
+      var iso = d.toISOString();
+      out.push({ t: d.getTime(), label: step === "year" ? iso.slice(0, 4) :
+                 step === "month" ? (d.getUTCMonth() === 0 ? iso.slice(0, 7) : iso.slice(5, 7)) :
+                 iso.slice(5, 10) });
+    }
+    if (step === "year") d.setUTCFullYear(d.getUTCFullYear() + 1);
+    else if (step === "month") d.setUTCMonth(d.getUTCMonth() + 1);
+    else d.setUTCDate(d.getUTCDate() + 7);
+  }
+  // thin labels so they never overlap
+  var every = Math.ceil(out.length / 14);
+  return out.filter(function (k, i) { return i % every === 0; });
+}
+
+function cachedDay(i) {
+  var e = state.cache.get(cacheKey(i));
+  return e && e.done;
+}
+
+function drawTimeline() {
+  var cv = $("timeline");
+  if (!state.days.length || !cv.offsetWidth) return;
+  var dpr = window.devicePixelRatio || 1, w = cv.offsetWidth, h = cv.offsetHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  var g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  var css = getComputedStyle(document.documentElement);
+  var muted = css.getPropertyValue("--muted").trim(), text = css.getPropertyValue("--text").trim();
+  var accent = css.getPropertyValue("--accent").trim(), edge = css.getPropertyValue("--edge").trim();
+  var r = tlRange(), base = h - TL.axis, top = 3;
+  g.strokeStyle = edge; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(TL.pad, base + 0.5); g.lineTo(w - TL.pad, base + 0.5); g.stroke();
+  g.fillStyle = muted; g.font = "10px system-ui, sans-serif"; g.textAlign = "center";
+  axisTicks(r).forEach(function (k) {
+    var x = Math.round(tlX(k.t, w, r)) + 0.5;
+    g.beginPath(); g.moveTo(x, base); g.lineTo(x, base + 3); g.stroke();
+    var tw = g.measureText(k.label).width / 2;
+    g.fillText(k.label, Math.min(Math.max(x, tw + 1), w - tw - 1), h - 1);
+  });
+  var bw = Math.max(1, Math.min(4, (w - 2 * TL.pad) / state.days.length * 0.6));
+  state.days.forEach(function (d, i) {
+    var x = tlX(dayTime(d.day), w, r);
+    var clear = d.cloudMin === null ? 0.6 : 1 - Math.min(100, d.cloudMin) / 100;
+    var bh = 4 + clear * (base - top - 4);
+    g.fillStyle = cachedDay(i) ? text : muted;
+    g.globalAlpha = i === state.dayIndex ? 1 : 0.75;
+    g.fillRect(x - bw / 2, base - bh, bw, bh);
+  });
+  g.globalAlpha = 1;
+  if (state.dayIndex >= 0) {
+    var x = tlX(dayTime(state.days[state.dayIndex].day), w, r);
+    g.fillStyle = accent;
+    g.fillRect(x - Math.max(1, bw / 2) - 0.5, top, Math.max(2, bw) + 1, base - top);
+    g.beginPath(); g.moveTo(x - 5, 0); g.lineTo(x + 5, 0); g.lineTo(x, 5); g.fill();
+  }
+}
+
+function renderScrub() {
+  var has = state.days.length > 0;
+  $("scrub").classList.toggle("hide", !has);
+  if (!has) { map.invalidateSize(); return; }
+  var i = state.dayIndex, d = state.days[i];
+  var lab = $("scrubLabel");
+  lab.innerHTML = "<span></span> <span class='n'></span>";
+  if (d) {
+    lab.firstChild.textContent = d.day;
+    lab.lastChild.textContent = (i + 1) + "/" + state.days.length + ", " + d.scenes.length +
+      " scene" + (d.scenes.length > 1 ? "s" : "") +
+      (d.cloudMin === null ? "" : ", cloud " + Math.round(d.cloudMin) + "%");
+  } else {
+    lab.firstChild.textContent = state.days.length + " days";
+    lab.lastChild.textContent = "click or drag the timeline";
+  }
+  $("prevDay").disabled = i <= 0;
+  $("nextDay").disabled = i >= state.days.length - 1;
+  $("playDay").textContent = state.playing ? "stop" : "play";
+  map.invalidateSize();
+  drawTimeline();
+}
+
+function nearestDay(clientX) {
+  var cv = $("timeline"), rect = cv.getBoundingClientRect(), r = tlRange();
+  var best = -1, bd = Infinity;
+  state.days.forEach(function (d, i) {
+    var dx = Math.abs(tlX(dayTime(d.day), rect.width, r) - (clientX - rect.left));
+    if (dx < bd) { bd = dx; best = i; }
+  });
+  return best;
+}
+
+var scrubTimer = null;
+function scrubTo(i, wait) {
+  if (i < 0 || i === state.dayIndex && state.comp && !scrubTimer) return;
+  stopPlay();
+  selectDay(i, false);
+  clearTimeout(scrubTimer);
+  scrubTimer = setTimeout(function () { scrubTimer = null; loadImagery().catch(fail); },
+                          cachedDay(i) ? 0 : wait);
+}
+(function () {
+  var cv = $("timeline"), down = false;
+  cv.addEventListener("pointerdown", function (e) {
+    if (!state.days.length) return;
+    down = true; cv.setPointerCapture(e.pointerId); cv.focus();
+    scrubTo(nearestDay(e.clientX), 250);
+  });
+  cv.addEventListener("pointermove", function (e) {
+    if (!state.days.length) return;
+    var i = nearestDay(e.clientX), d = state.days[i];
+    cv.title = d ? d.day + ": " + d.scenes.length + " scene(s)" +
+      (d.cloudMin === null ? "" : ", cloud " + Math.round(d.cloudMin) + "%") : "";
+    if (down && i !== state.dayIndex) scrubTo(i, 250);
+  });
+  cv.addEventListener("pointerup", function () {
+    if (!down) return;
+    down = false;
+    if (scrubTimer) { clearTimeout(scrubTimer); scrubTimer = null; loadImagery().catch(fail); }
+  });
+  new ResizeObserver(function () { drawTimeline(); }).observe(cv);
+})();
+
+function stepDay(k) {
+  if (!state.days.length) return;
+  var i = state.dayIndex < 0 ? (k > 0 ? 0 : state.days.length - 1) : state.dayIndex + k;
+  if (i < 0 || i >= state.days.length) return;
+  scrubTo(i, 120);
+}
+$("prevDay").addEventListener("click", function () { stepDay(-1); });
+$("nextDay").addEventListener("click", function () { stepDay(1); });
+
+// The read-ahead is left to finish when play stops: it may be the very day
+// on screen. Only a new search or region drops it (clearScenes).
+function stopPlay() {
+  if (!state.playing) return;
+  state.playing = false;
+  $("playDay").textContent = "play";
+}
+async function play() {
+  state.playing = true;
+  $("playDay").textContent = "stop";
+  if (state.dayIndex < 0 || state.dayIndex >= state.days.length - 1) await selectDay(0, true);
+  while (state.playing && state.dayIndex < state.days.length - 1) {
+    var next = state.dayIndex + 1;
+    var dwell = new Promise(function (ok) { setTimeout(ok, 700); });
+    await dwell;
+    if (!state.playing) break;
+    await selectDay(next, true);
+    if (state.playing && next + 1 < state.days.length) prefetchDay(next + 1);
+  }
+  stopPlay();
+}
+$("playDay").addEventListener("click", function () {
+  if (state.playing) stopPlay(); else play().catch(fail);
+});
+
+$("holdLim").addEventListener("change", function () {
+  // holding = manual limits taken from the current day; releasing goes back
+  // to percentiles of each day
+  $("limits").value = this.checked ? "man" : "pct";
+  paint(); writeHash();
+});
 
 // --- composite ---------------------------------------------------------------
 
@@ -528,6 +828,7 @@ function renderParams(comp) {
   if (comp.kind === "rgb8") return {};
   var off = offsetFor(comp), stretch;
   offsetNote(comp);
+  $("holdLim").checked = $("limits").value === "man";
   if ($("limits").value === "pct" || $("minR").value.trim() === "") {
     stretch = pctStretch(comp, off);
     writeLimits(stretch);
@@ -569,6 +870,65 @@ function paint() {
   state.overlay.setBounds(roiLatLngBounds(X.gridLonLatBounds(g)));
 }
 
+// Composites are cached per (day, bands, grid, cap), so scrubbing back to a
+// day is a repaint, not a refetch. Only complete, error-free loads are kept,
+// least recently used first out once they pass CACHE_BYTES.
+var CACHE_BYTES = 400e6;
+
+function currentGrid() { return X.makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 }); }
+function cacheKey(i) {
+  var d = state.days[i];
+  if (!d || !state.roi) return "";
+  var g = currentGrid();
+  return [d.day, currentKeys().join(","), g.width, g.height, g.bbox.join(","),
+          +$("maxScenes").value || 6].join("|");
+}
+
+function dayComposite(i, ctl, onProgress) {
+  var key = cacheKey(i), hit = state.cache.get(key);
+  if (hit) {
+    state.cache.delete(key); state.cache.set(key, hit);   // most recently used
+    return hit.promise;
+  }
+  var day = state.days[i], keys = currentKeys();
+  var entry = { done: false, bytes: 0 };
+  entry.promise = X.loadComposite({
+    scenes: day.scenes, keys: keys, grid: currentGrid(),
+    maxScenes: +$("maxScenes").value || 6, signal: ctl.signal, onProgress: onProgress
+  }).then(function (r) {
+    if (r.composite) {
+      r.composite.offsetInfo = X.scenesOffset(day.scenes.filter(function (sc) {
+        return keys.every(function (k) { return sc.assets[k]; });
+      }));
+    }
+    if (ctl.signal.aborted || r.stats.errors.length) {
+      if (state.cache.get(key) === entry) state.cache.delete(key);
+      return r;
+    }
+    entry.done = true;
+    entry.bytes = r.composite ? r.composite.channels.reduce(function (a, c) { return a + c.byteLength; },
+                                                            r.composite.valid.byteLength) : 0;
+    state.cacheBytes += entry.bytes;
+    while (state.cacheBytes > CACHE_BYTES && state.cache.size > 1) {
+      var oldest = state.cache.keys().next().value, e = state.cache.get(oldest);
+      state.cache.delete(oldest);
+      state.cacheBytes -= e.bytes;
+    }
+    drawTimeline();
+    return r;
+  }, function (e) {
+    if (state.cache.get(key) === entry) state.cache.delete(key);
+    throw e;
+  });
+  state.cache.set(key, entry);
+  return entry.promise;
+}
+
+function prefetchDay(i) {
+  state.prefetch = new AbortController();
+  dayComposite(i, state.prefetch).catch(function () {});
+}
+
 async function loadImagery() {
   if (state.dayIndex < 0) throw new Error("search scenes and pick a day first");
   if (state.loading) state.loading.abort();
@@ -576,34 +936,31 @@ async function loadImagery() {
   state.loading = ctl;
   var day = state.days[state.dayIndex];
   var keys = currentKeys();
-  var grid = X.makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 });
+  var grid = currentGrid();
+  var cached = cachedDay(state.dayIndex);
   $("load").disabled = true;
-  setStatus(day.day + ": reading " + keys.join("/") + " ...");
+  setStatus(day.day + ": " + (cached ? "from cache" : "reading " + keys.join("/")) + " ...");
   try {
-    var r = await X.loadComposite({
-      scenes: day.scenes, keys: keys, grid: grid,
-      maxScenes: +$("maxScenes").value || 6, signal: ctl.signal,
-      onProgress: function (n, of) {
-        if (state.loading === ctl) setStatus(day.day + ": " + n + "/" + of + " scenes read ...");
-      }
+    var r = await dayComposite(state.dayIndex, ctl, function (n, of) {
+      if (state.loading === ctl) setStatus(day.day + ": " + n + "/" + of + " scenes read ...");
     });
     if (state.loading !== ctl) return;
     var s = r.stats;
     var errs = s.errors.map(function (e) { return e.id + ": " + e.message; });
     if (s.lackingAssets) errs.push(s.lackingAssets + " scene(s) lack " + keys.join("/") + " or miss the region");
     if (!r.composite) {
+      // never leave another day's image on screen under this day's label
+      if (state.overlay) { map.removeLayer(state.overlay); state.overlay = null; }
+      state.comp = null;
       setStatus(day.day + ": no pixels in the region", errs);
       return;
     }
     state.comp = r.composite;
-    state.comp.offsetInfo = X.scenesOffset(day.scenes.filter(function (sc) {
-      return keys.every(function (k) { return sc.assets[k]; });
-    }));
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
     setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + s.files + " files, " +
       grid.width + "x" + grid.height + " px at " + X.gridGroundRes(grid).toFixed(0) +
-      " m, overview " + lv + ", " + s.ms + " ms" +
+      " m, overview " + lv + ", " + s.ms + " ms" + (cached ? " (cached)" : "") +
       (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {
@@ -653,10 +1010,14 @@ function showImagery() {
 $("showImg").addEventListener("change", showImagery);
 document.addEventListener("keydown", function (e) {
   var tag = (e.target.tagName || "").toLowerCase();
-  if (e.key !== "i" || e.ctrlKey || e.metaKey || e.altKey ||
+  if (e.ctrlKey || e.metaKey || e.altKey ||
       tag === "input" || tag === "select" || tag === "textarea") return;
-  $("showImg").checked = !$("showImg").checked;
-  showImagery();
+  // arrows belong to the map (panning) unless the map does not have focus
+  var onMap = $("map").contains(e.target);
+  if (e.key === "i") { $("showImg").checked = !$("showImg").checked; showImagery(); }
+  else if (e.key === "[" || (e.key === "ArrowLeft" && !onMap)) { e.preventDefault(); stepDay(-1); }
+  else if (e.key === "]" || (e.key === "ArrowRight" && !onMap)) { e.preventDefault(); stepDay(1); }
+  else if (e.key === "p" && state.days.length) { if (state.playing) stopPlay(); else play().catch(fail); }
 });
 
 // --- permalink ---------------------------------------------------------------
@@ -665,6 +1026,10 @@ function writeHash() {
   var h = new URLSearchParams();
   h.set("src", $("src").value);
   if ($("src").value === "stac") { h.set("url", $("stacUrl").value.trim()); h.set("coll", $("coll").value.trim()); }
+  else if ($("src").value === "starc") {
+    h.set("store", $("starcUrl").value.trim());
+    if ($("starcColl").value.trim()) h.set("scoll", $("starcColl").value.trim());
+  }
   else { h.set("bucket", $("wtBucket").value.trim()); h.set("res", $("wtRes").value); }
   if (state.roi) h.set("roi", state.roi.map(function (v) { return v.toFixed(5); }).join(","));
   h.set("from", $("from").value); h.set("to", $("to").value); h.set("cloud", $("cloud").value);
@@ -685,14 +1050,20 @@ function writeHash() {
 
 async function readHash() {
   var h = new URLSearchParams(location.hash.slice(1));
-  if (!h.has("roi")) return;
   if (h.get("src")) $("src").value = h.get("src");
   sourceChanged();
+  if (h.get("store")) $("starcUrl").value = h.get("store");
+  if (h.get("scoll")) $("starcColl").value = h.get("scoll");
+  if (!h.has("roi")) {
+    if (h.get("src") === "starc" && h.get("store")) await readStore(true);
+    return;
+  }
   if (h.get("url")) $("stacUrl").value = h.get("url");
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
   if (h.get("res")) $("wtRes").value = h.get("res");
-  ["from", "to", "cloud", "preset"].forEach(function (k) { if (h.get(k)) $(k).value = h.get(k); });
+  ["cloud", "preset"].forEach(function (k) { if (h.get(k)) $(k).value = h.get(k); });
+  ["from", "to"].forEach(function (k) { if (h.has(k)) $(k).value = h.get(k); });
   if (h.get("bands")) {
     var b = h.get("bands").split(",");
     $("bR").value = b[0]; $("bG").value = b[1]; $("bB").value = b[2];
@@ -712,6 +1083,7 @@ async function readHash() {
   setRoi(roi);
   map.fitBounds(roiLatLngBounds(roi).pad(0.1));
   await searchScenes();
+  if (h.get("src") === "starc") readStore(false, true).catch(fail);
   var want = h.get("day");
   var i = state.days.findIndex(function (d) { return d.day === want; });
   if (i >= 0) await selectDay(i, true);
@@ -721,7 +1093,8 @@ presetChanged();
 readHash().catch(fail);
 
 // exposed for debugging and for later UI layers (time scrubber, etc.)
-window.explorer = { X: X, map: map, state: state, selectDay: selectDay,
+window.explorer = { X: X, map: map, state: state, selectDay: selectDay, stepDay: stepDay,
+                    play: play, stopPlay: stopPlay, readStore: readStore,
                     loadImagery: loadImagery, searchScenes: searchScenes, setRoi: setRoi };
 </script>
 </body>

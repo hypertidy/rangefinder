@@ -6,8 +6,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rangefinder</title>
 <!--
-  rangefinder: point at a STAC API (or the wildtiles cube), draw a
-  region on the map, search scenes, and compose imagery client-side from
+  rangefinder: point at a STAC API (or a starc store, or the wildtiles
+  cube), draw a region on the map, search scenes, scrub through the days
+  with the timeline under the map, and compose imagery client-side from
   the raw COGs with windowed overview reads. No server, no credentials,
   no build step. The layers live in lib/ (see README.md).
 -->
@@ -23,7 +24,20 @@
   #app { display: flex; height: 100%; }
   #panel { width: 320px; min-width: 320px; padding: 14px 16px; background: var(--panel);
            border-right: 1px solid var(--edge); overflow-y: auto; box-sizing: border-box; }
+  #mapwrap { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   #map { flex: 1; background: #000; }
+  #scrub { background: var(--panel); border-top: 1px solid var(--edge); padding: 6px 10px 4px; }
+  #scrub .srow { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+  #scrub button { width: auto; margin: 0; padding: 3px 10px; }
+  #scrubLabel { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #scrubLabel .n { color: var(--muted); font-size: 12px; }
+  #scrub label { margin: 0; color: var(--muted); font-size: 12px; display: flex; gap: 4px;
+                 text-transform: none; letter-spacing: 0;
+                 align-items: center; white-space: nowrap; }
+  #scrub input[type=checkbox] { width: auto; margin: 0; }
+  #timeline { display: block; width: 100%; height: 46px; margin-top: 4px; cursor: pointer;
+              touch-action: none; outline: none; }
+  #timeline:focus-visible { box-shadow: 0 0 0 1px var(--accent); }
   #map.drawing, #map.drawing .leaflet-interactive { cursor: crosshair; }
   .coords { background: rgba(16,20,26,0.8); color: var(--text); padding: 2px 6px;
             border-radius: 4px; font: 12px ui-monospace, monospace; }
@@ -50,7 +64,7 @@
   .row span { font-size: 13px; }
   .hide { display: none; }
   .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
-  #days { margin-top: 8px; max-height: 210px; overflow-y: auto; border: 1px solid var(--edge);
+  #days { position: relative; margin-top: 8px; max-height: 210px; overflow-y: auto; border: 1px solid var(--edge);
           border-radius: 6px; }
   #days:empty { display: none; }
   .day { display: flex; justify-content: space-between; padding: 4px 9px; font-size: 13px;
@@ -89,6 +103,7 @@
     <h2>source</h2>
     <select id="src">
       <option value="stac">STAC API</option>
+      <option value="starc">starc store</option>
       <option value="wildtiles">wildtiles cube</option>
     </select>
     <div id="stacbox">
@@ -100,6 +115,18 @@
         <button id="listColl" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">list</button>
       </div>
       <datalist id="colls"></datalist>
+    </div>
+    <div id="starcbox" class="hide">
+      <label for="starcUrl">store URL</label>
+      <input id="starcUrl" placeholder="https://host/bucket/starc-store" spellcheck="false">
+      <label for="starcColl">collection (blank: any)</label>
+      <div class="row">
+        <input id="starcColl" list="starcColls" spellcheck="false">
+        <button id="readStore" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read store</button>
+      </div>
+      <datalist id="starcColls"></datalist>
+      <div id="starcInfo" class="note">a published starc store: manifest.json, a listable
+        bucket, or consolidated tables (see docs/starc.md)</div>
     </div>
     <div id="wtbox" class="hide">
       <label for="wtBucket">bucket</label>
@@ -133,6 +160,7 @@
       <div><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
       <div><label for="maxItems">max items</label><input id="maxItems" type="number" value="300" min="1"></div>
     </div>
+    <div class="note">leave a date blank for an open range</div>
     <button id="search">Search scenes</button>
     <div id="days"></div>
 
@@ -213,14 +241,29 @@
 
     <div class="foot">
       Scenes come from a STAC <code>/search</code> (default Earth Search,
-      Sentinel-2 L2A on AWS Open Data) or the wildtiles inventory. Pixels
+      Sentinel-2 L2A on AWS Open Data), a published starc store or the
+      wildtiles inventory. The timeline under the map scrubs the days
+      (drag it, or the arrow keys); days already read come back instantly. Pixels
       are read straight from the COGs by HTTP range request at the overview
       level that suits the region, warped onto one Web Mercator grid and
       mosaicked least-cloudy-first. Stretch and composition happen here on
       the raw numbers. The URL hash is a permalink.
     </div>
   </div>
-  <div id="map"></div>
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="scrub" class="hide">
+      <div class="srow">
+        <button id="prevDay" class="minor" title="previous day (left arrow or [)">&lt;</button>
+        <button id="playDay" class="minor" title="step through the days (p)">play</button>
+        <button id="nextDay" class="minor" title="next day (right arrow or ])">&gt;</button>
+        <span id="scrubLabel"></span>
+        <label title="keep the current min/max for every day, so dates compare like for like">
+          <input type="checkbox" id="holdLim"> hold limits</label>
+      </div>
+      <canvas id="timeline" tabindex="0"></canvas>
+    </div>
+  </div>
 </div>
 
 <script type="module">
@@ -240,6 +283,7 @@ __export(explorer_exports, {
   WILDTILES_BUCKET: () => WILDTILES_BUCKET,
   autoStretch: () => autoStretch,
   bboxIntersects: () => bboxIntersects,
+  boxPolygon: () => boxPolygon,
   ensureCrs: () => ensureCrs,
   geometryBbox: () => geometryBbox,
   gridGroundRes: () => gridGroundRes,
@@ -249,17 +293,20 @@ __export(explorer_exports, {
   loadComposite: () => loadComposite,
   makeGrid: () => makeGrid,
   makeTileId: () => makeTileId,
+  mgrsExtent: () => mgrsExtent,
   mosaic: () => mosaic,
   openCog: () => openCog,
   parseTileId: () => parseTileId,
   percentiles: () => percentiles,
   readWarped: () => readWarped,
   renderRGBA: () => renderRGBA,
+  resolveAssets: () => resolveAssets,
   rgbaToCanvas: () => rgbaToCanvas,
   sceneOffset: () => sceneOffset,
   scenesOffset: () => scenesOffset,
   solarDay: () => solarDay,
   stacCatalog: () => stacCatalog,
+  starcCatalog: () => starcCatalog,
   tileLonLatBbox: () => tileLonLatBbox,
   tilesForBbox: () => tilesForBbox,
   transform: () => transform,
@@ -367,6 +414,41 @@ function solarDay(datetime, lon) {
   var t = Date.parse(datetime);
   if (!isFinite(t)) return String(datetime).slice(0, 10);
   return new Date(t + (lon || 0) / 15 * 36e5).toISOString().slice(0, 10);
+}
+var MGRS_COLS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+var MGRS_ROWS = "ABCDEFGHJKLMNPQRSTUV";
+var MGRS_BANDS = "CDEFGHJKLMNPQRSTUVWX";
+function mgrsExtent(code) {
+  var m = /^(?:MGRS-)?(\d{1,2})([C-X])([A-Z])([A-V])$/.exec(String(code).trim().toUpperCase());
+  if (!m) throw new Error("bad MGRS tile: " + code);
+  var zone = +m[1], band = MGRS_BANDS.indexOf(m[2]);
+  var col = MGRS_COLS.indexOf(m[3]) - (zone - 1) % 3 * 8;
+  var row = MGRS_ROWS.indexOf(m[4]) - (zone % 2 === 0 ? 5 : 0);
+  if (band < 0 || col < 0 || col > 7 || MGRS_ROWS.indexOf(m[4]) < 0) throw new Error("bad MGRS tile: " + code);
+  var south = band < 10;
+  var crs = utmCode(zone, south);
+  var e0 = (col + 1) * 1e5;
+  var n0 = (row % 20 + 20) % 20 * 1e5;
+  var lat0 = -80 + band * 8;
+  var cm = (zone - 1) * 6 - 180 + 3;
+  var nmin = transform("EPSG:4326", crs, [cm, lat0])[1];
+  while (n0 + 1e5 < nmin - 5e4) n0 += 2e6;
+  var x0 = e0 - 20, y1 = n0 + 100020;
+  return { zone, south, crs, extent: [x0, y1 - 109800, x0 + 109800, y1] };
+}
+function boxPolygon(extent, crs, n) {
+  n = n || 8;
+  var f = proj()(ensureCrs(crs), "EPSG:4326");
+  var e = extent, ring = [];
+  for (var i = 0; i < n; i++) ring.push([e[0] + (e[2] - e[0]) * i / n, e[1]]);
+  for (i = 0; i < n; i++) ring.push([e[2], e[1] + (e[3] - e[1]) * i / n]);
+  for (i = 0; i < n; i++) ring.push([e[2] - (e[2] - e[0]) * i / n, e[3]]);
+  for (i = 0; i < n; i++) ring.push([e[0], e[3] - (e[3] - e[1]) * i / n]);
+  ring = ring.map(function(p) {
+    return f.forward(p);
+  });
+  ring.push(ring[0]);
+  return { type: "Polygon", coordinates: [ring] };
 }
 
 // lib/render.js
@@ -742,9 +824,9 @@ function commonName(asset) {
   if (b && b.length === 1) return b[0].common_name || b[0]["eo:common_name"] || b[0].name;
   return null;
 }
-function resolveAssets(item) {
+function resolveAssets(assets) {
   var out = {};
-  var assets = item.assets || {};
+  assets = assets || {};
   var lower = {};
   Object.keys(assets).forEach(function(k) {
     lower[k.toLowerCase()] = k;
@@ -778,7 +860,7 @@ function itemToScene(item) {
     bbox,
     cloud: p["eo:cloud_cover"] !== void 0 ? p["eo:cloud_cover"] : null,
     crs: epsg,
-    assets: resolveAssets(item),
+    assets: resolveAssets(item.assets),
     meta: {
       collection: item.collection,
       platform: p.platform,
@@ -854,6 +936,498 @@ async function listCollections(url, signal) {
   });
 }
 
+// lib/sources/starc.js
+var HYPARQUET = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
+var TABLES = ["acquisitions", "products", "assets", "queries"];
+var COLUMNS = {
+  acquisitions: [
+    "acquisition_id",
+    "platform",
+    "datetime",
+    "solarday",
+    "centroid_lon",
+    "centroid_lat",
+    "tile",
+    "footprint_wkb"
+  ],
+  products: [
+    "product_id",
+    "acquisition_id",
+    "collection",
+    "item_id",
+    "epsg",
+    "cloud_cover",
+    "baseline",
+    "query_id"
+  ],
+  assets: ["product_id", "asset_key", "href", "media_type"]
+};
+var hpPromise = null;
+function hyparquet() {
+  if (!hpPromise) {
+    hpPromise = import(HYPARQUET);
+    hpPromise.catch(function() {
+      hpPromise = null;
+    });
+  }
+  return hpPromise;
+}
+function trimSlash2(u) {
+  return String(u).trim().replace(/\/+$/, "");
+}
+function cached(cache, key, make) {
+  if (!cache.has(key)) {
+    var p = make();
+    cache.set(key, p);
+    p.catch(function() {
+      cache.delete(key);
+    });
+  }
+  return cache.get(key);
+}
+async function pool(items, n, fn) {
+  var out = new Array(items.length), next = 0;
+  async function worker() {
+    while (next < items.length) {
+      var i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  var ws = [];
+  for (var k = 0; k < Math.min(n, items.length); k++) ws.push(worker());
+  await Promise.all(ws);
+  return out;
+}
+function classify(root, path) {
+  var url = /^https?:\/\//.test(path) ? path : root + "/" + path.replace(/^\/+/, "");
+  var rel = url.indexOf(root + "/") === 0 ? url.slice(root.length + 1) : path;
+  if (!/\.parquet$/i.test(rel)) return null;
+  var segs = rel.split("/");
+  var table = segs[0].replace(/\.parquet$/i, "");
+  if (TABLES.indexOf(table) < 0) return null;
+  var part = {};
+  segs.slice(1, -1).forEach(function(s) {
+    var m = /^([^=]+)=(.*)$/.exec(s);
+    if (m) part[m[1]] = decodeURIComponent(m[2]);
+  });
+  return {
+    url,
+    table,
+    part,
+    base: segs[segs.length - 1].replace(/\.parquet$/i, "")
+  };
+}
+async function fromManifest(root) {
+  var r = await fetch(root + "/manifest.json", { cache: "no-cache" });
+  if (!r.ok) return null;
+  var j = await r.json();
+  var files = Array.isArray(j) ? j : j.files || [];
+  return files.map(function(f) {
+    return typeof f === "string" ? f : f.path;
+  });
+}
+async function fromListing(root) {
+  var u = new URL(root + "/");
+  var segs = u.pathname.split("/").filter(Boolean);
+  var virtual = /^[^.]+\.s3[.-]/.test(u.hostname);
+  var bucketUrl = u.origin + (virtual ? "" : "/" + segs[0]);
+  var prefix = (virtual ? segs : segs.slice(1)).join("/");
+  if (!virtual && !segs.length) return null;
+  if (prefix) prefix += "/";
+  var keys = [], token = null, pages = 0;
+  do {
+    var q = "?list-type=2&prefix=" + encodeURIComponent(prefix) + (token ? "&continuation-token=" + encodeURIComponent(token) : "");
+    var r = await fetch(bucketUrl + "/" + q);
+    if (!r.ok) return null;
+    var xml = await r.text();
+    if (!/<ListBucketResult/.test(xml)) return null;
+    xml.replace(/<Key>([^<]*)<\/Key>/g, function(m, k) {
+      keys.push(k.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"));
+    });
+    var t = /<NextContinuationToken>([^<]*)<\/NextContinuationToken>/.exec(xml);
+    token = /<IsTruncated>true<\/IsTruncated>/.test(xml) && t ? t[1] : null;
+  } while (token && ++pages < 200);
+  return keys.map(function(k) {
+    return k.slice(prefix.length);
+  });
+}
+async function findFiles(root) {
+  var how = "manifest.json", list = null;
+  try {
+    list = await fromManifest(root);
+  } catch (e) {
+    list = null;
+  }
+  if (!list) {
+    how = "bucket listing";
+    try {
+      list = await fromListing(root);
+    } catch (e) {
+      list = null;
+    }
+  }
+  if (!list || !list.length) {
+    how = "consolidated tables";
+    list = ["acquisitions.parquet", "products.parquet", "assets.parquet"];
+  }
+  var byTable = { acquisitions: [], products: [], assets: [], queries: [] };
+  list.forEach(function(p) {
+    var f = classify(root, p);
+    if (f) byTable[f.table].push(f);
+  });
+  if (!byTable.acquisitions.length || !byTable.products.length) {
+    throw new Error("starc store " + root + ": no acquisitions/products files found (tried manifest.json, a bucket listing and consolidated tables)");
+  }
+  return { how, files: byTable };
+}
+var fileCache = /* @__PURE__ */ new Map();
+var storeCache = /* @__PURE__ */ new Map();
+var tableCache = /* @__PURE__ */ new Map();
+function dayString(v) {
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "number") return new Date(v * 864e5).toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
+}
+function isoString(v) {
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "bigint") return new Date(Number(v / 1000n)).toISOString();
+  return v === null || v === void 0 ? null : String(v);
+}
+function num(v) {
+  if (v === null || v === void 0) return null;
+  var n = Number(v);
+  return isFinite(n) ? n : null;
+}
+function readFile(f, want) {
+  return cached(fileCache, f.url + "|" + want.join(","), async function() {
+    var hp = await hyparquet();
+    var file = await hp.asyncBufferFromUrl({ url: f.url });
+    var md = await hp.parquetMetadataAsync(file);
+    var have = md.schema.slice(1).map(function(s) {
+      return s.name;
+    });
+    var cols = want.filter(function(c) {
+      return have.indexOf(c) >= 0;
+    });
+    var rows = await hp.parquetReadObjects({ file, metadata: md, columns: cols, utf8: false });
+    var text = cols.filter(function(c) {
+      return c !== "footprint_wkb";
+    });
+    var dec = new TextDecoder();
+    rows.forEach(function(r) {
+      for (var i = 0; i < text.length; i++) {
+        var v = r[text[i]];
+        if (v instanceof Uint8Array) r[text[i]] = dec.decode(v);
+      }
+    });
+    Object.keys(f.part).forEach(function(k) {
+      if (want.indexOf(k) >= 0 && have.indexOf(k) < 0) rows.forEach(function(r) {
+        r[k] = f.part[k];
+      });
+    });
+    return rows;
+  });
+}
+async function readAll(files, want, onFile) {
+  var done = 0;
+  var parts = await pool(files, 6, async function(f) {
+    var rows = await readFile(f, want);
+    done++;
+    if (onFile) onFile(done, files.length);
+    return rows;
+  });
+  return [].concat.apply([], parts);
+}
+function wkbGeometry(bytes) {
+  if (!bytes || !bytes.length) return null;
+  if (typeof bytes === "string") return null;
+  var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), o = 0;
+  function geom() {
+    var le = dv.getUint8(o) === 1;
+    o += 1;
+    var t = dv.getUint32(o, le);
+    o += 4;
+    var dims = 2;
+    if (t & 536870912) o += 4;
+    if (t & 2147483648) dims++;
+    if (t & 1073741824) dims++;
+    t = t & 65535;
+    if (t > 3e3) {
+      dims = 4;
+      t -= 3e3;
+    } else if (t > 2e3) {
+      dims = 3;
+      t -= 2e3;
+    } else if (t > 1e3) {
+      dims = 3;
+      t -= 1e3;
+    }
+    function ring() {
+      var n2 = dv.getUint32(o, le), pts = [];
+      o += 4;
+      for (var i2 = 0; i2 < n2; i2++) {
+        pts.push([dv.getFloat64(o, le), dv.getFloat64(o + 8, le)]);
+        o += 8 * dims;
+      }
+      return pts;
+    }
+    function poly() {
+      var n2 = dv.getUint32(o, le), rs = [];
+      o += 4;
+      for (var i2 = 0; i2 < n2; i2++) rs.push(ring());
+      return rs;
+    }
+    if (t === 3) return { type: "Polygon", coordinates: poly() };
+    if (t === 6) {
+      var n = dv.getUint32(o, le), ps = [];
+      o += 4;
+      for (var i = 0; i < n; i++) {
+        var g = geom();
+        if (g) ps.push(g.coordinates);
+      }
+      return { type: "MultiPolygon", coordinates: ps };
+    }
+    return null;
+  }
+  try {
+    return geom();
+  } catch (e) {
+    return null;
+  }
+}
+function centroidBox(lon, lat) {
+  var dlat = 0.5, dlon = 0.5 / Math.max(0.05, Math.cos(lat * Math.PI / 180));
+  return [lon - dlon, lat - dlat, lon + dlon, lat + dlat];
+}
+var footCache = /* @__PURE__ */ new Map();
+function footprint(a) {
+  if (a.geometry) {
+    if (!a.fp) a.fp = { bbox: geometryBbox(a.geometry), geometry: a.geometry, crs: null };
+    return a.fp;
+  }
+  return tileFootprint(a);
+}
+function tileFootprint(a) {
+  if (a.tile && footCache.has(a.tile)) return footCache.get(a.tile);
+  var fp = null;
+  if (a.tile) {
+    try {
+      var m = mgrsExtent(a.tile);
+      fp = {
+        bbox: transformBbox(m.extent, m.crs, "EPSG:4326"),
+        geometry: boxPolygon(m.extent, m.crs),
+        crs: m.crs
+      };
+    } catch (e) {
+      fp = null;
+    }
+    if (fp) {
+      footCache.set(a.tile, fp);
+      return fp;
+    }
+  }
+  if (a.lon === null || a.lat === null) return null;
+  var bb = centroidBox(a.lon, a.lat);
+  return { bbox: bb, crs: null, geometry: { type: "Polygon", coordinates: [[
+    [bb[0], bb[1]],
+    [bb[2], bb[1]],
+    [bb[2], bb[3]],
+    [bb[0], bb[3]],
+    [bb[0], bb[1]]
+  ]] } };
+}
+function loadAcquisitions(root, store, onFile) {
+  return cached(tableCache, root + "|acquisitions", async function() {
+    var rows = await readAll(store.files.acquisitions, COLUMNS.acquisitions, onFile);
+    var m = /* @__PURE__ */ new Map();
+    rows.forEach(function(r) {
+      if (m.has(r.acquisition_id)) return;
+      var lon = num(r.centroid_lon);
+      var dt = isoString(r.datetime);
+      m.set(r.acquisition_id, {
+        id: r.acquisition_id,
+        platform: r.platform || null,
+        datetime: dt,
+        day: r.solarday !== null && r.solarday !== void 0 ? dayString(r.solarday) : dt ? dt.slice(0, 10) : null,
+        tile: r.tile || null,
+        lon,
+        lat: num(r.centroid_lat),
+        geometry: wkbGeometry(r.footprint_wkb)
+      });
+    });
+    return Array.from(m.values());
+  });
+}
+function loadProducts(root, store, onFile) {
+  return cached(tableCache, root + "|products", async function() {
+    var rows = await readAll(store.files.products, COLUMNS.products, onFile);
+    var seen = /* @__PURE__ */ new Set(), byAcq = /* @__PURE__ */ new Map(), collections = /* @__PURE__ */ new Map();
+    rows.forEach(function(r) {
+      if (seen.has(r.product_id)) return;
+      seen.add(r.product_id);
+      var p = {
+        id: r.product_id,
+        acq: r.acquisition_id,
+        collection: r.collection || null,
+        item: r.item_id || r.product_id,
+        epsg: num(r.epsg),
+        cloud: num(r.cloud_cover),
+        baseline: r.baseline || null,
+        query: r.query_id || null
+      };
+      if (!byAcq.has(p.acq)) byAcq.set(p.acq, []);
+      byAcq.get(p.acq).push(p);
+      collections.set(p.collection, (collections.get(p.collection) || 0) + 1);
+    });
+    return { byAcq, collections, n: seen.size };
+  });
+}
+async function loadAssets(store, products) {
+  var files = store.files.assets;
+  var byBase = /* @__PURE__ */ new Map();
+  files.forEach(function(f) {
+    if (!byBase.has(f.base)) byBase.set(f.base, []);
+    byBase.get(f.base).push(f);
+  });
+  var need = /* @__PURE__ */ new Set(), use = /* @__PURE__ */ new Set(), all = false;
+  products.forEach(function(p) {
+    need.add(p.id);
+    var fs = p.query && byBase.get(p.query);
+    if (fs) fs.forEach(function(f) {
+      use.add(f);
+    });
+    else all = true;
+  });
+  var list = all ? files : Array.from(use);
+  var rows = await readAll(list, COLUMNS.assets);
+  var out = /* @__PURE__ */ new Map();
+  rows.forEach(function(r) {
+    if (!need.has(r.product_id)) return;
+    if (!out.has(r.product_id)) out.set(r.product_id, {});
+    var d = out.get(r.product_id);
+    if (!d[r.asset_key]) d[r.asset_key] = { href: r.href, type: r.media_type || void 0 };
+  });
+  return { assets: out, files: list.length };
+}
+function baselineOf(p) {
+  var n = parseFloat(p.baseline);
+  return isFinite(n) ? n : -1;
+}
+function starcCatalog(opts) {
+  var root = trimSlash2(opts.url);
+  var collection = (opts.collection || "").trim();
+  var prefer = opts.prefer || ["sentinel-2-c1-l2a", "sentinel-2-l2a"];
+  function store() {
+    return cached(storeCache, root, function() {
+      return findFiles(root);
+    });
+  }
+  function pickProduct(list) {
+    if (collection) list = list.filter(function(p) {
+      return p.collection === collection;
+    });
+    if (!list.length) return null;
+    return list.slice().sort(function(a, b) {
+      var ra = prefer.indexOf(a.collection), rb = prefer.indexOf(b.collection);
+      ra = ra < 0 ? 99 : ra;
+      rb = rb < 0 ? 99 : rb;
+      return ra - rb || baselineOf(b) - baselineOf(a);
+    })[0];
+  }
+  return {
+    kind: "starc",
+    label: "starc " + root + (collection ? " : " + collection : ""),
+    bands: Object.keys(BAND_ALIASES),
+    // Store summary for the page: { how, files, acquisitions, products,
+    // collections: [[id, n]], dayMin, dayMax, tiles: [{ tile, n, geometry, bbox }] }
+    info: async function(onProgress) {
+      var st = await store();
+      var acqs = await loadAcquisitions(root, st, onProgress && function(n, of) {
+        onProgress("acquisitions", n, of);
+      });
+      var prods = await loadProducts(root, st, onProgress && function(n, of) {
+        onProgress("products", n, of);
+      });
+      var days = acqs.map(function(a) {
+        return a.day;
+      }).filter(Boolean).sort();
+      var tiles = /* @__PURE__ */ new Map();
+      acqs.forEach(function(a) {
+        var k = a.tile || (a.lon !== null ? a.lon.toFixed(1) + "," + (a.lat || 0).toFixed(1) : null);
+        if (!k) return;
+        var t = tiles.get(k);
+        if (!t) {
+          var fp = tileFootprint(a);
+          if (!fp) return;
+          t = { tile: k, n: 0, geometry: fp.geometry, bbox: fp.bbox };
+          tiles.set(k, t);
+        }
+        t.n++;
+      });
+      return {
+        how: st.how,
+        files: TABLES.reduce(function(o, t) {
+          o[t] = st.files[t].length;
+          return o;
+        }, {}),
+        acquisitions: acqs.length,
+        products: prods.n,
+        collections: Array.from(prods.collections.entries()),
+        dayMin: days[0] || null,
+        dayMax: days[days.length - 1] || null,
+        tiles: Array.from(tiles.values())
+      };
+    },
+    search: async function(q) {
+      var st = await store();
+      var acqs = await loadAcquisitions(root, st);
+      var prods = await loadProducts(root, st);
+      var range = (q.datetime || "../..").split("/");
+      var d0 = range[0] && range[0] !== ".." ? range[0].slice(0, 10) : "0000-01-01";
+      var d1 = range[1] && range[1] !== ".." ? range[1].slice(0, 10) : "9999-12-31";
+      var cloudMax = q.cloudMax !== void 0 && q.cloudMax < 100 ? q.cloudMax : null;
+      var hits = [];
+      acqs.forEach(function(a) {
+        if (!a.day || a.day < d0 || a.day > d1) return;
+        var fp = footprint(a);
+        if (q.bbox && fp && !bboxIntersects(fp.bbox, q.bbox)) return;
+        var p = pickProduct(prods.byAcq.get(a.id) || []);
+        if (!p) return;
+        if (cloudMax !== null && p.cloud !== null && p.cloud > cloudMax) return;
+        hits.push({ a, p, fp });
+      });
+      hits.sort(function(x, y) {
+        return x.a.day < y.a.day ? 1 : x.a.day > y.a.day ? -1 : 0;
+      });
+      hits = hits.slice(0, q.maxItems || 500);
+      var got = await loadAssets(st, hits.map(function(h) {
+        return h.p;
+      }));
+      return hits.map(function(h) {
+        var a = h.a, p = h.p, fp = h.fp;
+        return {
+          id: p.item,
+          day: a.day,
+          datetime: a.datetime || a.day + "T12:00:00Z",
+          geometry: fp ? fp.geometry : null,
+          bbox: fp ? fp.bbox : null,
+          cloud: p.cloud,
+          crs: p.epsg ? "EPSG:" + p.epsg : (tileFootprint(a) || {}).crs || null,
+          assets: resolveAssets(got.assets.get(p.id)),
+          meta: {
+            collection: p.collection,
+            platform: a.platform,
+            grid: a.tile,
+            processingBaseline: p.baseline,
+            acquisitionId: a.id,
+            productId: p.id
+          }
+        };
+      });
+    }
+  };
+}
+
 // lib/sources/wildtiles.js
 var WILDTILES_BUCKET = "https://projects.pawsey.org.au/wildtiles";
 var OX = 14e4;
@@ -876,7 +1450,7 @@ var BANDS = [
   "aot",
   "wvp"
 ];
-var HYPARQUET = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
+var HYPARQUET2 = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
 function parseTileId(id) {
   var m = /^(\d{2})S_R(\d{4})_(\d{4})_(\d{4})$/.exec(String(id).trim());
   if (!m) throw new Error("bad tile id: " + id);
@@ -924,7 +1498,7 @@ function wildtilesCatalog(opts) {
   function loadInventory() {
     if (inventory) return inventory;
     inventory = (async function() {
-      var hp = await import(HYPARQUET);
+      var hp = await import(HYPARQUET2);
       var file = await hp.asyncBufferFromUrl({ url: bucket + "/index/inventory.parquet" });
       var rows = await hp.parquetReadObjects({ file, columns: ["tile_id", "band", "solarday"] });
       var idx = /* @__PURE__ */ new Map();
@@ -956,7 +1530,9 @@ function wildtilesCatalog(opts) {
     search: async function(q) {
       var tiles = tilesForBbox(q.bbox, res);
       var idx = await loadInventory();
-      var range = (q.datetime || "0000-01-01/9999-12-31").split("/");
+      var range = (q.datetime || "../..").split("/");
+      if (!range[0] || range[0] === "..") range[0] = "0000-01-01";
+      if (!range[1] || range[1] === "..") range[1] = "9999-12-31";
       var scenes = [];
       tiles.forEach(function(t) {
         var id = makeTileId(t);
@@ -1022,7 +1598,7 @@ function groupByDay(scenes) {
     };
   });
 }
-async function pool(tasks, n) {
+async function pool2(tasks, n) {
   var out = new Array(tasks.length), next = 0;
   async function worker() {
     while (next < tasks.length) {
@@ -1081,7 +1657,7 @@ async function loadComposite(o) {
       };
     };
   });
-  var results = await pool(tasks, o.concurrency || 4);
+  var results = await pool2(tasks, o.concurrency || 4);
   var layers = [], errors = [], levels2 = [];
   results.forEach(function(r, i) {
     if (!r.ok) {
@@ -1149,6 +1725,7 @@ map.on("mousemove", function(e) {
   document.querySelector(".coords").textContent = e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom();
 });
 var footLayer = L.layerGroup().addTo(map);
+var coverLayer = L.layerGroup().addTo(map);
 var state = {
   catalog: null,
   roi: null,
@@ -1158,7 +1735,12 @@ var state = {
   dayIndex: -1,
   comp: null,
   overlay: null,
-  loading: null
+  loading: null,
+  cache: /* @__PURE__ */ new Map(),
+  cacheBytes: 0,
+  // composites per day, see dayComposite()
+  playing: false,
+  prefetch: null
 };
 function setStatus(msg, errs) {
   statusEl.textContent = msg;
@@ -1197,17 +1779,73 @@ function makeCatalog() {
   if ($("src").value === "wildtiles") {
     return wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
   }
+  if ($("src").value === "starc") {
+    if (!$("starcUrl").value.trim()) throw new Error("enter the starc store URL");
+    return starcCatalog({ url: $("starcUrl").value.trim(), collection: $("starcColl").value.trim() });
+  }
   return stacCatalog({ url: $("stacUrl").value.trim(), collection: $("coll").value.trim() });
 }
 function sourceChanged() {
-  var wt = $("src").value === "wildtiles";
-  $("stacbox").classList.toggle("hide", wt);
-  $("wtbox").classList.toggle("hide", !wt);
+  var src = $("src").value;
+  $("stacbox").classList.toggle("hide", src !== "stac");
+  $("starcbox").classList.toggle("hide", src !== "starc");
+  $("wtbox").classList.toggle("hide", src !== "wildtiles");
+  coverLayer.clearLayers();
   clearScenes();
 }
 $("src").addEventListener("change", sourceChanged);
-["stacUrl", "coll", "wtBucket", "wtRes"].forEach(function(id) {
+["stacUrl", "coll", "wtBucket", "wtRes", "starcColl"].forEach(function(id) {
   $(id).addEventListener("change", clearScenes);
+});
+$("starcUrl").addEventListener("change", function() {
+  coverLayer.clearLayers();
+  clearScenes();
+});
+async function readStore(fit, quiet) {
+  var cat = makeCatalog();
+  if (!quiet) setStatus("reading " + cat.label + " ...");
+  var info = await cat.info(quiet ? null : function(table, n, of) {
+    setStatus("reading " + table + " " + n + "/" + of + " files ...");
+  });
+  var dl = $("starcColls");
+  dl.innerHTML = "";
+  info.collections.forEach(function(c) {
+    var o = document.createElement("option");
+    o.value = c[0];
+    o.textContent = c[1] + " products";
+    dl.appendChild(o);
+  });
+  $("starcInfo").textContent = info.acquisitions + " acquisitions, " + info.products + " products from " + (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; " + info.collections.map(function(c) {
+    return c[0] + " (" + c[1] + ")";
+  }).join(", ") + "; " + info.tiles.length + " tiles; found by " + info.how;
+  coverLayer.clearLayers();
+  info.tiles.forEach(function(t) {
+    L.geoJSON(t.geometry, {
+      style: { color: "#b39ddb", weight: 1, fill: false, opacity: 0.6 },
+      interactive: false
+    }).addTo(coverLayer);
+  });
+  if (fit && info.tiles.length && !state.roi) {
+    var b = info.tiles.reduce(function(a, t) {
+      return [
+        Math.min(a[0], t.bbox[0]),
+        Math.min(a[1], t.bbox[1]),
+        Math.max(a[2], t.bbox[2]),
+        Math.max(a[3], t.bbox[3])
+      ];
+    }, [180, 90, -180, -90]);
+    map.fitBounds(roiLatLngBounds(b));
+  }
+  if (!quiet) setStatus("store read: " + info.acquisitions + " acquisitions" + (state.roi ? "" : "\ndraw a region over the purple tiles, then search"));
+  return info;
+}
+$("readStore").addEventListener("click", function() {
+  readStore(true).then(function(info) {
+    if (info.dayMin) {
+      $("from").value = info.dayMin;
+      $("to").value = info.dayMax;
+    }
+  }).catch(fail);
 });
 $("listColl").addEventListener("click", function() {
   setStatus("listing collections ...");
@@ -1298,11 +1936,19 @@ $("useView").addEventListener("click", function() {
   setRoi([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
 });
 function clearScenes() {
+  stopPlay();
+  if (state.prefetch) {
+    state.prefetch.abort();
+    state.prefetch = null;
+  }
   state.scenes = [];
   state.days = [];
   state.dayIndex = -1;
+  state.cache.clear();
+  state.cacheBytes = 0;
   $("days").innerHTML = "";
   footLayer.clearLayers();
+  renderScrub();
 }
 async function searchScenes() {
   if (!state.roi) throw new Error("draw a region first");
@@ -1315,7 +1961,7 @@ async function searchScenes() {
     var t0 = performance.now();
     var scenes = await state.catalog.search({
       bbox: state.roi,
-      datetime: $("from").value + "/" + $("to").value,
+      datetime: ($("from").value || "..") + "/" + ($("to").value || ".."),
       cloudMax: +$("cloud").value,
       maxItems: +$("maxItems").value || 300
     });
@@ -1341,10 +1987,12 @@ function renderDays() {
     row.firstChild.textContent = d.day;
     row.lastChild.textContent = d.scenes.length + " scene" + (d.scenes.length > 1 ? "s" : "") + cl;
     row.addEventListener("click", function() {
+      stopPlay();
       selectDay(i, true);
     });
     box.appendChild(row);
   });
+  renderScrub();
 }
 function drawFootprints() {
   footLayer.clearLayers();
@@ -1359,14 +2007,236 @@ function drawFootprints() {
   });
 }
 function selectDay(i, load) {
+  if (i < 0 || i >= state.days.length) return Promise.resolve();
   state.dayIndex = i;
   Array.prototype.forEach.call($("days").children, function(row) {
-    row.classList.toggle("sel", +row.dataset.i === i);
+    var on = +row.dataset.i === i;
+    row.classList.toggle("sel", on);
+    if (on) {
+      var box = $("days");
+      if (row.offsetTop < box.scrollTop) box.scrollTop = row.offsetTop;
+      else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) {
+        box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
+      }
+    }
   });
   drawFootprints();
+  renderScrub();
   writeHash();
   if (load) return loadImagery().catch(fail);
+  return Promise.resolve();
 }
+var TL = { pad: 10, axis: 13 };
+function dayTime(d) {
+  return Date.parse(d + "T00:00:00Z");
+}
+function tlRange() {
+  var t0 = dayTime(state.days[0].day), t1 = dayTime(state.days[state.days.length - 1].day);
+  var pad = Math.max(864e5, (t1 - t0) * 0.01);
+  return [t0 - pad, t1 + pad];
+}
+function tlX(t, w, r) {
+  return TL.pad + (t - r[0]) / (r[1] - r[0]) * (w - 2 * TL.pad);
+}
+function axisTicks(r) {
+  var span = (r[1] - r[0]) / 864e5, out = [], d = new Date(r[0]);
+  var step = span > 1500 ? "year" : span > 75 ? "month" : "week";
+  d = new Date(Date.UTC(
+    d.getUTCFullYear(),
+    step === "year" ? 0 : d.getUTCMonth(),
+    step === "week" ? d.getUTCDate() : 1
+  ));
+  while (d.getTime() <= r[1]) {
+    if (d.getTime() >= r[0]) {
+      var iso = d.toISOString();
+      out.push({ t: d.getTime(), label: step === "year" ? iso.slice(0, 4) : step === "month" ? d.getUTCMonth() === 0 ? iso.slice(0, 7) : iso.slice(5, 7) : iso.slice(5, 10) });
+    }
+    if (step === "year") d.setUTCFullYear(d.getUTCFullYear() + 1);
+    else if (step === "month") d.setUTCMonth(d.getUTCMonth() + 1);
+    else d.setUTCDate(d.getUTCDate() + 7);
+  }
+  var every = Math.ceil(out.length / 14);
+  return out.filter(function(k, i) {
+    return i % every === 0;
+  });
+}
+function cachedDay(i) {
+  var e = state.cache.get(cacheKey(i));
+  return e && e.done;
+}
+function drawTimeline() {
+  var cv = $("timeline");
+  if (!state.days.length || !cv.offsetWidth) return;
+  var dpr = window.devicePixelRatio || 1, w = cv.offsetWidth, h = cv.offsetHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+  }
+  var g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  var css = getComputedStyle(document.documentElement);
+  var muted = css.getPropertyValue("--muted").trim(), text = css.getPropertyValue("--text").trim();
+  var accent = css.getPropertyValue("--accent").trim(), edge = css.getPropertyValue("--edge").trim();
+  var r = tlRange(), base = h - TL.axis, top = 3;
+  g.strokeStyle = edge;
+  g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(TL.pad, base + 0.5);
+  g.lineTo(w - TL.pad, base + 0.5);
+  g.stroke();
+  g.fillStyle = muted;
+  g.font = "10px system-ui, sans-serif";
+  g.textAlign = "center";
+  axisTicks(r).forEach(function(k) {
+    var x2 = Math.round(tlX(k.t, w, r)) + 0.5;
+    g.beginPath();
+    g.moveTo(x2, base);
+    g.lineTo(x2, base + 3);
+    g.stroke();
+    var tw = g.measureText(k.label).width / 2;
+    g.fillText(k.label, Math.min(Math.max(x2, tw + 1), w - tw - 1), h - 1);
+  });
+  var bw = Math.max(1, Math.min(4, (w - 2 * TL.pad) / state.days.length * 0.6));
+  state.days.forEach(function(d, i) {
+    var x2 = tlX(dayTime(d.day), w, r);
+    var clear = d.cloudMin === null ? 0.6 : 1 - Math.min(100, d.cloudMin) / 100;
+    var bh = 4 + clear * (base - top - 4);
+    g.fillStyle = cachedDay(i) ? text : muted;
+    g.globalAlpha = i === state.dayIndex ? 1 : 0.75;
+    g.fillRect(x2 - bw / 2, base - bh, bw, bh);
+  });
+  g.globalAlpha = 1;
+  if (state.dayIndex >= 0) {
+    var x = tlX(dayTime(state.days[state.dayIndex].day), w, r);
+    g.fillStyle = accent;
+    g.fillRect(x - Math.max(1, bw / 2) - 0.5, top, Math.max(2, bw) + 1, base - top);
+    g.beginPath();
+    g.moveTo(x - 5, 0);
+    g.lineTo(x + 5, 0);
+    g.lineTo(x, 5);
+    g.fill();
+  }
+}
+function renderScrub() {
+  var has = state.days.length > 0;
+  $("scrub").classList.toggle("hide", !has);
+  if (!has) {
+    map.invalidateSize();
+    return;
+  }
+  var i = state.dayIndex, d = state.days[i];
+  var lab = $("scrubLabel");
+  lab.innerHTML = "<span></span> <span class='n'></span>";
+  if (d) {
+    lab.firstChild.textContent = d.day;
+    lab.lastChild.textContent = i + 1 + "/" + state.days.length + ", " + d.scenes.length + " scene" + (d.scenes.length > 1 ? "s" : "") + (d.cloudMin === null ? "" : ", cloud " + Math.round(d.cloudMin) + "%");
+  } else {
+    lab.firstChild.textContent = state.days.length + " days";
+    lab.lastChild.textContent = "click or drag the timeline";
+  }
+  $("prevDay").disabled = i <= 0;
+  $("nextDay").disabled = i >= state.days.length - 1;
+  $("playDay").textContent = state.playing ? "stop" : "play";
+  map.invalidateSize();
+  drawTimeline();
+}
+function nearestDay(clientX) {
+  var cv = $("timeline"), rect = cv.getBoundingClientRect(), r = tlRange();
+  var best = -1, bd = Infinity;
+  state.days.forEach(function(d, i) {
+    var dx = Math.abs(tlX(dayTime(d.day), rect.width, r) - (clientX - rect.left));
+    if (dx < bd) {
+      bd = dx;
+      best = i;
+    }
+  });
+  return best;
+}
+var scrubTimer = null;
+function scrubTo(i, wait) {
+  if (i < 0 || i === state.dayIndex && state.comp && !scrubTimer) return;
+  stopPlay();
+  selectDay(i, false);
+  clearTimeout(scrubTimer);
+  scrubTimer = setTimeout(
+    function() {
+      scrubTimer = null;
+      loadImagery().catch(fail);
+    },
+    cachedDay(i) ? 0 : wait
+  );
+}
+(function() {
+  var cv = $("timeline"), down = false;
+  cv.addEventListener("pointerdown", function(e) {
+    if (!state.days.length) return;
+    down = true;
+    cv.setPointerCapture(e.pointerId);
+    cv.focus();
+    scrubTo(nearestDay(e.clientX), 250);
+  });
+  cv.addEventListener("pointermove", function(e) {
+    if (!state.days.length) return;
+    var i = nearestDay(e.clientX), d = state.days[i];
+    cv.title = d ? d.day + ": " + d.scenes.length + " scene(s)" + (d.cloudMin === null ? "" : ", cloud " + Math.round(d.cloudMin) + "%") : "";
+    if (down && i !== state.dayIndex) scrubTo(i, 250);
+  });
+  cv.addEventListener("pointerup", function() {
+    if (!down) return;
+    down = false;
+    if (scrubTimer) {
+      clearTimeout(scrubTimer);
+      scrubTimer = null;
+      loadImagery().catch(fail);
+    }
+  });
+  new ResizeObserver(function() {
+    drawTimeline();
+  }).observe(cv);
+})();
+function stepDay(k) {
+  if (!state.days.length) return;
+  var i = state.dayIndex < 0 ? k > 0 ? 0 : state.days.length - 1 : state.dayIndex + k;
+  if (i < 0 || i >= state.days.length) return;
+  scrubTo(i, 120);
+}
+$("prevDay").addEventListener("click", function() {
+  stepDay(-1);
+});
+$("nextDay").addEventListener("click", function() {
+  stepDay(1);
+});
+function stopPlay() {
+  if (!state.playing) return;
+  state.playing = false;
+  $("playDay").textContent = "play";
+}
+async function play() {
+  state.playing = true;
+  $("playDay").textContent = "stop";
+  if (state.dayIndex < 0 || state.dayIndex >= state.days.length - 1) await selectDay(0, true);
+  while (state.playing && state.dayIndex < state.days.length - 1) {
+    var next = state.dayIndex + 1;
+    var dwell = new Promise(function(ok) {
+      setTimeout(ok, 700);
+    });
+    await dwell;
+    if (!state.playing) break;
+    await selectDay(next, true);
+    if (state.playing && next + 1 < state.days.length) prefetchDay(next + 1);
+  }
+  stopPlay();
+}
+$("playDay").addEventListener("click", function() {
+  if (state.playing) stopPlay();
+  else play().catch(fail);
+});
+$("holdLim").addEventListener("change", function() {
+  $("limits").value = this.checked ? "man" : "pct";
+  paint();
+  writeHash();
+});
 function currentKeys() {
   var p = $("preset").value;
   if (p === "visual") return ["visual"];
@@ -1417,6 +2287,7 @@ function renderParams(comp) {
   if (comp.kind === "rgb8") return {};
   var off = offsetFor(comp), stretch;
   offsetNote(comp);
+  $("holdLim").checked = $("limits").value === "man";
   if ($("limits").value === "pct" || $("minR").value.trim() === "") {
     stretch = pctStretch(comp, off);
     writeLimits(stretch);
@@ -1459,6 +2330,78 @@ function paint() {
   }
   state.overlay.setBounds(roiLatLngBounds(gridLonLatBounds(g)));
 }
+var CACHE_BYTES = 4e8;
+function currentGrid() {
+  return makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 });
+}
+function cacheKey(i) {
+  var d = state.days[i];
+  if (!d || !state.roi) return "";
+  var g = currentGrid();
+  return [
+    d.day,
+    currentKeys().join(","),
+    g.width,
+    g.height,
+    g.bbox.join(","),
+    +$("maxScenes").value || 6
+  ].join("|");
+}
+function dayComposite(i, ctl, onProgress) {
+  var key = cacheKey(i), hit = state.cache.get(key);
+  if (hit) {
+    state.cache.delete(key);
+    state.cache.set(key, hit);
+    return hit.promise;
+  }
+  var day = state.days[i], keys = currentKeys();
+  var entry = { done: false, bytes: 0 };
+  entry.promise = loadComposite({
+    scenes: day.scenes,
+    keys,
+    grid: currentGrid(),
+    maxScenes: +$("maxScenes").value || 6,
+    signal: ctl.signal,
+    onProgress
+  }).then(function(r) {
+    if (r.composite) {
+      r.composite.offsetInfo = scenesOffset(day.scenes.filter(function(sc) {
+        return keys.every(function(k) {
+          return sc.assets[k];
+        });
+      }));
+    }
+    if (ctl.signal.aborted || r.stats.errors.length) {
+      if (state.cache.get(key) === entry) state.cache.delete(key);
+      return r;
+    }
+    entry.done = true;
+    entry.bytes = r.composite ? r.composite.channels.reduce(
+      function(a, c) {
+        return a + c.byteLength;
+      },
+      r.composite.valid.byteLength
+    ) : 0;
+    state.cacheBytes += entry.bytes;
+    while (state.cacheBytes > CACHE_BYTES && state.cache.size > 1) {
+      var oldest = state.cache.keys().next().value, e = state.cache.get(oldest);
+      state.cache.delete(oldest);
+      state.cacheBytes -= e.bytes;
+    }
+    drawTimeline();
+    return r;
+  }, function(e) {
+    if (state.cache.get(key) === entry) state.cache.delete(key);
+    throw e;
+  });
+  state.cache.set(key, entry);
+  return entry.promise;
+}
+function prefetchDay(i) {
+  state.prefetch = new AbortController();
+  dayComposite(i, state.prefetch).catch(function() {
+  });
+}
 async function loadImagery() {
   if (state.dayIndex < 0) throw new Error("search scenes and pick a day first");
   if (state.loading) state.loading.abort();
@@ -1466,19 +2409,13 @@ async function loadImagery() {
   state.loading = ctl;
   var day = state.days[state.dayIndex];
   var keys = currentKeys();
-  var grid = makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 });
+  var grid = currentGrid();
+  var cached2 = cachedDay(state.dayIndex);
   $("load").disabled = true;
-  setStatus(day.day + ": reading " + keys.join("/") + " ...");
+  setStatus(day.day + ": " + (cached2 ? "from cache" : "reading " + keys.join("/")) + " ...");
   try {
-    var r = await loadComposite({
-      scenes: day.scenes,
-      keys,
-      grid,
-      maxScenes: +$("maxScenes").value || 6,
-      signal: ctl.signal,
-      onProgress: function(n, of) {
-        if (state.loading === ctl) setStatus(day.day + ": " + n + "/" + of + " scenes read ...");
-      }
+    var r = await dayComposite(state.dayIndex, ctl, function(n, of) {
+      if (state.loading === ctl) setStatus(day.day + ": " + n + "/" + of + " scenes read ...");
     });
     if (state.loading !== ctl) return;
     var s = r.stats;
@@ -1487,18 +2424,18 @@ async function loadImagery() {
     });
     if (s.lackingAssets) errs.push(s.lackingAssets + " scene(s) lack " + keys.join("/") + " or miss the region");
     if (!r.composite) {
+      if (state.overlay) {
+        map.removeLayer(state.overlay);
+        state.overlay = null;
+      }
+      state.comp = null;
       setStatus(day.day + ": no pixels in the region", errs);
       return;
     }
     state.comp = r.composite;
-    state.comp.offsetInfo = scenesOffset(day.scenes.filter(function(sc) {
-      return keys.every(function(k) {
-        return sc.assets[k];
-      });
-    }));
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + s.files + " files, " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m, overview " + lv + ", " + s.ms + " ms" + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + s.files + " files, " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m, overview " + lv + ", " + s.ms + " ms" + (cached2 ? " (cached)" : "") + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) {
@@ -1562,9 +2499,21 @@ function showImagery() {
 $("showImg").addEventListener("change", showImagery);
 document.addEventListener("keydown", function(e) {
   var tag = (e.target.tagName || "").toLowerCase();
-  if (e.key !== "i" || e.ctrlKey || e.metaKey || e.altKey || tag === "input" || tag === "select" || tag === "textarea") return;
-  $("showImg").checked = !$("showImg").checked;
-  showImagery();
+  if (e.ctrlKey || e.metaKey || e.altKey || tag === "input" || tag === "select" || tag === "textarea") return;
+  var onMap = $("map").contains(e.target);
+  if (e.key === "i") {
+    $("showImg").checked = !$("showImg").checked;
+    showImagery();
+  } else if (e.key === "[" || e.key === "ArrowLeft" && !onMap) {
+    e.preventDefault();
+    stepDay(-1);
+  } else if (e.key === "]" || e.key === "ArrowRight" && !onMap) {
+    e.preventDefault();
+    stepDay(1);
+  } else if (e.key === "p" && state.days.length) {
+    if (state.playing) stopPlay();
+    else play().catch(fail);
+  }
 });
 function writeHash() {
   var h = new URLSearchParams();
@@ -1572,6 +2521,9 @@ function writeHash() {
   if ($("src").value === "stac") {
     h.set("url", $("stacUrl").value.trim());
     h.set("coll", $("coll").value.trim());
+  } else if ($("src").value === "starc") {
+    h.set("store", $("starcUrl").value.trim());
+    if ($("starcColl").value.trim()) h.set("scoll", $("starcColl").value.trim());
   } else {
     h.set("bucket", $("wtBucket").value.trim());
     h.set("res", $("wtRes").value);
@@ -1600,15 +2552,23 @@ function writeHash() {
 }
 async function readHash() {
   var h = new URLSearchParams(location.hash.slice(1));
-  if (!h.has("roi")) return;
   if (h.get("src")) $("src").value = h.get("src");
   sourceChanged();
+  if (h.get("store")) $("starcUrl").value = h.get("store");
+  if (h.get("scoll")) $("starcColl").value = h.get("scoll");
+  if (!h.has("roi")) {
+    if (h.get("src") === "starc" && h.get("store")) await readStore(true);
+    return;
+  }
   if (h.get("url")) $("stacUrl").value = h.get("url");
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
   if (h.get("res")) $("wtRes").value = h.get("res");
-  ["from", "to", "cloud", "preset"].forEach(function(k) {
+  ["cloud", "preset"].forEach(function(k) {
     if (h.get(k)) $(k).value = h.get(k);
+  });
+  ["from", "to"].forEach(function(k) {
+    if (h.has(k)) $(k).value = h.get(k);
   });
   if (h.get("bands")) {
     var b = h.get("bands").split(",");
@@ -1639,6 +2599,7 @@ async function readHash() {
   setRoi(roi);
   map.fitBounds(roiLatLngBounds(roi).pad(0.1));
   await searchScenes();
+  if (h.get("src") === "starc") readStore(false, true).catch(fail);
   var want = h.get("day");
   var i = state.days.findIndex(function(d) {
     return d.day === want;
@@ -1652,6 +2613,10 @@ window.explorer = {
   map,
   state,
   selectDay,
+  stepDay,
+  play,
+  stopPlay,
+  readStore,
   loadImagery,
   searchScenes,
   setRoi
