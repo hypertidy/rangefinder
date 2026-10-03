@@ -5480,13 +5480,22 @@ function useView() {
 $("useView").addEventListener("click", useView);
 var followTimer = null;
 var followSeq = 0;
+var following = false;
 async function followView() {
   var seq = ++followSeq;
   var day = state.days[state.dayIndex] ? state.days[state.dayIndex].day : null;
   var preset = $("preset").value;
-  useView();
-  writeHash();
-  await searchScenes(preset);
+  following = true;
+  try {
+    useView();
+    writeHash();
+    await searchScenes(preset);
+  } finally {
+    if (seq === followSeq) {
+      following = false;
+      renderScrub();
+    }
+  }
   if (seq !== followSeq || !datedDays()) return;
   var i = state.days.findIndex(function(d) {
     return d.day === day;
@@ -5500,7 +5509,7 @@ function followSoon() {
     followView().catch(fail);
   }, 600);
 }
-map.on("moveend", followSoon);
+map.on("dragend zoomend", followSoon);
 $("follow").addEventListener("change", function() {
   followSoon();
   writeHash();
@@ -5777,11 +5786,11 @@ function drawTimeline() {
 }
 function renderScrub() {
   var has = datedDays();
-  $("scrub").classList.toggle("hide", !has);
-  if (!has) {
-    map.invalidateSize();
-    return;
-  }
+  var hide = !has && !(following && !$("scrub").classList.contains("hide"));
+  var was = $("scrub").classList.contains("hide");
+  $("scrub").classList.toggle("hide", hide);
+  if (was !== hide) map.invalidateSize({ pan: false });
+  if (!has) return;
   var i = state.dayIndex, d = state.days[i];
   var lab = $("scrubLabel");
   lab.innerHTML = "<span></span> <span class='n'></span>";

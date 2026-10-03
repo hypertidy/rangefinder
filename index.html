@@ -1033,14 +1033,19 @@ $("useView").addEventListener("click", useView);
 // again, so zooming in reads finer data (a finer overview, or the full
 // resolution files) and zooming out reads coarser. The day and composite
 // stay as they were.
-var followTimer = null, followSeq = 0;
+var followTimer = null, followSeq = 0, following = false;
 async function followView() {
   var seq = ++followSeq;
   var day = state.days[state.dayIndex] ? state.days[state.dayIndex].day : null;
   var preset = $("preset").value;
-  useView();
-  writeHash();
-  await searchScenes(preset);
+  following = true;
+  try {
+    useView();
+    writeHash();
+    await searchScenes(preset);
+  } finally {
+    if (seq === followSeq) { following = false; renderScrub(); }
+  }
   if (seq !== followSeq || !datedDays()) return;
   var i = state.days.findIndex(function (d) { return d.day === day; });
   if (i >= 0) await selectDay(i, true);
@@ -1050,7 +1055,9 @@ function followSoon() {
   if (!$("follow").checked || drawing) return;
   followTimer = setTimeout(function () { followView().catch(fail); }, 600);
 }
-map.on("moveend", followSoon);
+// only a person's pan or zoom: a resize of the map (the timeline showing
+// or hiding) also moves the view, and following that would loop
+map.on("dragend zoomend", followSoon);
 $("follow").addEventListener("change", function () { followSoon(); writeHash(); });
 
 // --- map CRS ------------------------------------------------------------------
@@ -1309,8 +1316,13 @@ function drawTimeline() {
 
 function renderScrub() {
   var has = datedDays();
-  $("scrub").classList.toggle("hide", !has);
-  if (!has) { map.invalidateSize(); return; }
+  // while following the map re-searches, keep the timeline's space so the
+  // map does not resize (and jump) under the reader
+  var hide = !has && !(following && !$("scrub").classList.contains("hide"));
+  var was = $("scrub").classList.contains("hide");
+  $("scrub").classList.toggle("hide", hide);
+  if (was !== hide) map.invalidateSize({ pan: false });
+  if (!has) return;
   var i = state.dayIndex, d = state.days[i];
   var lab = $("scrubLabel");
   lab.innerHTML = "<span></span> <span class='n'></span>";
