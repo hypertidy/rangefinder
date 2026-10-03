@@ -105,6 +105,8 @@
       <option value="stac">STAC API</option>
       <option value="starc">starc store</option>
       <option value="wildtiles">wildtiles cube</option>
+      <option value="vrt">GDAL VRT mosaic</option>
+      <option value="cog">COG files (paste URLs)</option>
     </select>
     <div id="stacbox">
       <label for="stacUrl">STAC API URL</label>
@@ -151,6 +153,31 @@
         registry/BANDS.txt; the bucket itself cannot be listed</div>
     </div>
 
+    <div id="vrtbox" class="hide">
+      <label for="vrtUrl">VRT URL</label>
+      <div class="row">
+        <input id="vrtUrl" list="vrts" spellcheck="false"
+          value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/32m_dem_tiles.vrt">
+        <button id="readVrt" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
+      </div>
+      <datalist id="vrts">
+        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/32m_dem_tiles.vrt">REMA v2 32 m (Antarctica)</option>
+        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/10m_dem_tiles.vrt">REMA v2 10 m</option>
+        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/arcticdem/mosaics/v4.1/32m_dem_tiles.vrt">ArcticDEM v4.1 32 m</option>
+      </datalist>
+      <div id="vrtInfo" class="note">a GDAL VRT that mosaics many COGs: it is read once as the
+        index of every file and where it sits</div>
+    </div>
+    <div id="cogbox" class="hide">
+      <label for="cogUrls">COG URLs (one per line)</label>
+      <textarea id="cogUrls" rows="3" spellcheck="false"
+        style="width:100%;box-sizing:border-box;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:6px;font:12px ui-monospace,monospace;padding:6px"
+        placeholder="https://host/path/file.tif"></textarea>
+      <button id="readCogs" class="minor">read headers and zoom to them</button>
+      <div id="cogInfo" class="note">any public, CORS-enabled GeoTIFF; the header gives the
+        footprint, CRS and bands</div>
+    </div>
+
     <h2>region</h2>
     <div class="row">
       <button id="draw" class="minor">draw on map</button>
@@ -164,22 +191,15 @@
       <div><label for="to">to</label><input id="to" type="date"></div>
     </div>
     <div class="row">
-      <div><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
+      <div id="cloudBox"><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
       <div><label for="maxItems">max items</label><input id="maxItems" type="number" value="300" min="1"></div>
     </div>
-    <div class="note">leave a date blank for an open range</div>
+    <div class="note" id="dateNote">leave a date blank for an open range</div>
     <button id="search">Search scenes</button>
     <div id="days"></div>
 
     <h2>composite</h2>
-    <select id="preset">
-      <option value="visual">TCI (baked true color, fast)</option>
-      <option value="red,green,blue">true color (raw bands)</option>
-      <option value="nir,red,green">false color IR (vegetation)</option>
-      <option value="swir16,nir,red">SWIR (snow/ice vs cloud)</option>
-      <option value="swir22,swir16,nir">geology</option>
-      <option value="custom">custom...</option>
-    </select>
+    <select id="preset"></select>
     <div id="bands" class="hide">
       <div class="row">
         <div><label>R</label><select id="bR"></select></div>
@@ -187,7 +207,21 @@
         <div><label>B</label><select id="bB"></select></div>
       </div>
     </div>
+    <div id="classbox" class="hide">
+      <div id="legend" class="note"></div>
+    </div>
     <div id="stretchbox" class="hide">
+      <div id="rampbox" class="row hide">
+        <div><label for="ramp">colour ramp</label>
+          <select id="ramp"></select></div>
+        <div><label for="hs">hillshade</label>
+          <select id="hs">
+            <option value="0">off</option>
+            <option value="0.4">light</option>
+            <option value="0.6">medium</option>
+            <option value="0.85">strong</option>
+          </select></div>
+      </div>
       <div class="row">
         <div><label for="limits">limits</label>
           <select id="limits">
@@ -205,18 +239,19 @@
         <div><label for="plo">low %</label><input id="plo" type="number" value="2" min="0" max="50" step="0.5"></div>
         <div><label for="phi">high %</label><input id="phi" type="number" value="98" min="50" max="100" step="0.5"></div>
       </div>
-      <label class="row" style="margin-top:8px" title="one pair of limits from all three bands pooled, which keeps the colour balance">
+      <label id="jointBox" class="row" style="margin-top:8px" title="one pair of limits from all three bands pooled, which keeps the colour balance">
         <input type="checkbox" id="joint"> <span>same limits for all bands</span>
       </label>
       <table class="lims">
         <tr><th></th><th>min</th><th>max</th></tr>
         <tr><th class="cR">R</th><td><input id="minR" spellcheck="false"></td><td><input id="maxR" spellcheck="false"></td></tr>
-        <tr><th class="cG">G</th><td><input id="minG" spellcheck="false"></td><td><input id="maxG" spellcheck="false"></td></tr>
-        <tr><th class="cB">B</th><td><input id="minB" spellcheck="false"></td><td><input id="maxB" spellcheck="false"></td></tr>
+        <tr class="rgbOnly"><th class="cG">G</th><td><input id="minG" spellcheck="false"></td><td><input id="maxG" spellcheck="false"></td></tr>
+        <tr class="rgbOnly"><th class="cB">B</th><td><input id="minB" spellcheck="false"></td><td><input id="maxB" spellcheck="false"></td></tr>
       </table>
       <div class="note">limits fill in from the percentiles; typing one switches to manual</div>
       <label for="gamma">gamma <span id="gval">1.0</span></label>
       <input type="range" id="gamma" min="30" max="300" value="100">
+      <div id="offBox">
       <label for="offset">L2A offset</label>
       <select id="offset">
         <option value="auto">auto (from scene metadata)</option>
@@ -224,6 +259,7 @@
         <option value="0">off (stored DN)</option>
       </select>
       <div class="note" id="offNote"></div>
+      </div>
       <button id="resetStretch" class="minor">reset to 2-98% auto</button>
     </div>
     <div class="row">
@@ -285,17 +321,28 @@ var explorer_exports = {};
 __export(explorer_exports, {
   BAND_ALIASES: () => BAND_ALIASES,
   HARMONISED_ARCHIVES: () => HARMONISED_ARCHIVES,
+  KNOWN_CLASSES: () => KNOWN_CLASSES,
+  KNOWN_CRS: () => KNOWN_CRS,
   L2A_OFFSET: () => L2A_OFFSET,
+  RAMPS: () => RAMPS,
   TRANSFERS: () => TRANSFERS,
   WILDTILES_BUCKET: () => WILDTILES_BUCKET,
+  assetHref: () => assetHref,
   autoStretch: () => autoStretch,
   bboxIntersects: () => bboxIntersects,
   boxPolygon: () => boxPolygon,
+  classCounts: () => classCounts,
+  classPalette: () => classPalette,
+  cogCatalog: () => cogCatalog,
+  cogInfo: () => cogInfo,
+  crsCode: () => crsCode,
+  crsFromWkt: () => crsFromWkt,
   ensureCrs: () => ensureCrs,
   geometryBbox: () => geometryBbox,
   gridGroundRes: () => gridGroundRes,
   gridLonLatBounds: () => gridLonLatBounds,
   groupByDay: () => groupByDay,
+  hillshade: () => hillshade,
   listCollections: () => listCollections,
   loadComposite: () => loadComposite,
   makeGrid: () => makeGrid,
@@ -303,8 +350,14 @@ __export(explorer_exports, {
   mgrsExtent: () => mgrsExtent,
   mosaic: () => mosaic,
   openCog: () => openCog,
+  parsePresetId: () => parsePresetId,
   parseTileId: () => parseTileId,
+  parseVrt: () => parseVrt,
   percentiles: () => percentiles,
+  presetId: () => presetId,
+  presetsFor: () => presetsFor,
+  rampTable: () => rampTable,
+  readAsset: () => readAsset,
   readWarped: () => readWarped,
   renderRGBA: () => renderRGBA,
   resolveAssets: () => resolveAssets,
@@ -320,7 +373,9 @@ __export(explorer_exports, {
   transformBbox: () => transformBbox,
   utmCode: () => utmCode,
   utmZoneOf: () => utmZoneOf,
-  wildtilesCatalog: () => wildtilesCatalog
+  vrtCatalog: () => vrtCatalog,
+  wildtilesCatalog: () => wildtilesCatalog,
+  wktEpsg: () => wktEpsg
 });
 
 // lib/geo.js
@@ -329,15 +384,59 @@ function proj() {
   if (!p) throw new Error("proj4 is not loaded");
   return p;
 }
+var KNOWN_CRS = {
+  "EPSG:3031": "+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3976": "+proj=stere +lat_0=-90 +lat_ts=-70 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3413": "+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3995": "+proj=stere +lat_0=90 +lat_ts=71 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
+  "EPSG:3577": "+proj=aea +lat_0=0 +lon_0=132 +lat_1=-18 +lat_2=-36 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs",
+  "EPSG:4283": "+proj=longlat +ellps=GRS80 +no_defs",
+  "EPSG:7844": "+proj=longlat +ellps=GRS80 +no_defs",
+  "EPSG:4269": "+proj=longlat +datum=NAD83 +no_defs",
+  "EPSG:6933": "+proj=cea +lat_ts=30 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+};
+function crsCode(c) {
+  if (c === null || c === void 0) return null;
+  var s = String(c).trim();
+  if (/^\d+$/.test(s)) return "EPSG:" + s;
+  if (/CRS:?84$/i.test(s)) return "EPSG:4326";
+  var m = /EPSG(?:::|:|\/\d+\/|\/)(\d+)$/i.exec(s);
+  if (m) return "EPSG:" + m[1];
+  m = /^EPSG:(\d+)$/i.exec(s);
+  return m ? "EPSG:" + m[1] : s;
+}
+function wktEpsg(wkt) {
+  var re = /(?:AUTHORITY|ID)\[\s*"EPSG"\s*,\s*"?(\d+)"?\s*\]/gi, m, last = null;
+  while (m = re.exec(wkt || "")) last = m[1];
+  return last ? "EPSG:" + last : null;
+}
 function ensureCrs(code) {
   var p = proj();
+  code = crsCode(code);
   if (p.defs(code)) return code;
+  if (KNOWN_CRS[code]) {
+    p.defs(code, KNOWN_CRS[code]);
+    return code;
+  }
   var m = /^EPSG:(32[67])(\d{2})$/.exec(code);
   if (m) {
     p.defs(code, "+proj=utm +zone=" + +m[2] + (m[1] === "327" ? " +south" : "") + " +datum=WGS84 +units=m +no_defs");
     return code;
   }
   throw new Error("unknown CRS " + code + " (register it with proj4.defs)");
+}
+var wktCount = 0;
+function crsFromWkt(wkt) {
+  var e = wktEpsg(wkt);
+  if (e) {
+    try {
+      return ensureCrs(e);
+    } catch (err) {
+    }
+  }
+  var name = "WKT:" + ++wktCount;
+  proj().defs(name, wkt);
+  return name;
 }
 function utmCode(zone, south) {
   return "EPSG:" + (south ? "327" : "326") + String(zone).padStart(2, "0");
@@ -485,7 +584,8 @@ function sceneOffset(scene) {
   if (b === null) return null;
   if (b < 4) return 0;
   var hrefs = Object.keys(scene.assets || {}).map(function(k) {
-    return scene.assets[k];
+    var a = scene.assets[k];
+    return typeof a === "string" ? a : a && (a.href || a.template) || "";
   });
   var harmonised = hrefs.some(function(h) {
     return HARMONISED_ARCHIVES.some(function(re) {
@@ -520,21 +620,21 @@ function mosaic(grid, layers, kind, keys) {
   var npx = grid.width * grid.height;
   var first = layers[0];
   var Ctor = first.bands[0].constructor;
-  var ch = [new Ctor(npx), new Ctor(npx), new Ctor(npx)];
+  var nc = kind === "single" || kind === "classes" ? 1 : 3;
+  var ch = [];
+  for (var c = 0; c < nc; c++) ch.push(new Ctor(npx));
   var valid = new Uint8Array(npx);
   layers.forEach(function(L2) {
     var v = L2.valid, b = L2.bands;
     for (var i = 0; i < npx; i++) {
       if (valid[i] || !v[i]) continue;
-      ch[0][i] = b[0][i];
-      ch[1][i] = b[1][i];
-      ch[2][i] = b[2][i];
+      for (var k = 0; k < nc; k++) ch[k][i] = b[k][i];
       valid[i] = 1;
     }
   });
   return { grid, kind, channels: ch, valid, keys: keys || [] };
 }
-function sample(channels, valid) {
+function sample(channels, valid, allowZero) {
   var n = channels[0].length;
   var stride = Math.max(1, Math.floor(n * channels.length / 25e4));
   var buf = new Float64Array(Math.ceil(n / stride) * channels.length);
@@ -542,7 +642,7 @@ function sample(channels, valid) {
   channels.forEach(function(channel) {
     for (var i = 0; i < n; i += stride) {
       var v = channel[i];
-      if (valid[i] && v > 0 && v === v) buf[m++] = v;
+      if (valid[i] && v === v && (allowZero || v > 0) && isFinite(v)) buf[m++] = v;
     }
   });
   return buf.subarray(0, m).sort();
@@ -554,32 +654,113 @@ function pick(s, lo, hi) {
   if (b <= a) b = a + 1;
   return [a, b];
 }
-function percentiles(channel, valid, lo, hi) {
-  return pick(sample([channel], valid), lo, hi);
+function percentiles(channel, valid, lo, hi, allowZero) {
+  return pick(sample([channel], valid, allowZero), lo, hi);
 }
 function autoStretch(comp, lo, hi, opts) {
   lo = lo === void 0 ? 0.02 : lo;
   hi = hi === void 0 ? 0.98 : hi;
   opts = opts || {};
   var off = offsets3(opts.offset);
+  var z = comp.kind === "single";
   var st;
-  if (opts.joint) {
+  if (opts.joint && comp.channels.length > 1) {
     var j = pick(sample(comp.channels, comp.valid), lo, hi);
     st = [j.slice(), j.slice(), j.slice()];
   } else {
     st = comp.channels.map(function(c) {
-      return percentiles(c, comp.valid, lo, hi);
+      return percentiles(c, comp.valid, lo, hi, z);
     });
   }
   return st.map(function(s, c) {
     return [s[0] + off[c], s[1] + off[c]];
   });
 }
+var RAMPS = {
+  greys: ["#000000", "#ffffff"],
+  viridis: ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"],
+  magma: ["#000004", "#3b0f70", "#8c2981", "#de4968", "#fe9f6d", "#fcfdbf"],
+  terrain: ["#1a5e35", "#4f9a3c", "#a6c96a", "#e9dd9a", "#c2a179", "#8e6e5a", "#f5f2ee"],
+  ice: ["#04142e", "#16467a", "#3f80b5", "#8cc0dd", "#d8edf6", "#ffffff"],
+  bathy: ["#08104d", "#0f3d82", "#1f73b4", "#4fb0d9", "#a8e1ee", "#e8f8fb"],
+  rdbu: ["#67001f", "#d6604d", "#fddbc7", "#f7f7f7", "#d1e5f0", "#4393c3", "#053061"],
+  spectral: ["#9e0142", "#f46d43", "#fee08b", "#ffffbf", "#e6f598", "#66c2a5", "#5e4fa2"]
+};
+function hexRgb(h) {
+  var n = parseInt(String(h).replace("#", ""), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+var rampCache = {};
+function rampTable(name) {
+  if (rampCache[name]) return rampCache[name];
+  var stops = (RAMPS[name] || RAMPS.greys).map(hexRgb), n = stops.length - 1;
+  var t = new Uint8ClampedArray(256 * 3);
+  for (var i = 0; i < 256; i++) {
+    var x = i / 255 * n, k = Math.min(n - 1, Math.floor(x)), f = x - k;
+    for (var c = 0; c < 3; c++) t[i * 3 + c] = Math.round(stops[k][c] + (stops[k + 1][c] - stops[k][c]) * f);
+  }
+  return rampCache[name] = t;
+}
+function classPalette(classes) {
+  var m = /* @__PURE__ */ new Map();
+  (classes || []).forEach(function(c) {
+    if (c.color) m.set(+c.value, hexRgb(c.color));
+  });
+  return function(v) {
+    var hit2 = m.get(v);
+    if (hit2) return hit2;
+    var h = v * 137.508 % 360, s = 0.65, l = 0.55;
+    var a = s * Math.min(l, 1 - l);
+    var f = function(n) {
+      var k = (n + h / 30) % 12;
+      return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+    };
+    var rgb = [f(0), f(8), f(4)];
+    m.set(v, rgb);
+    return rgb;
+  };
+}
+function classCounts(comp) {
+  var m = /* @__PURE__ */ new Map(), ch = comp.channels[0], valid = comp.valid;
+  var stride = Math.max(1, Math.floor(ch.length / 25e4));
+  for (var i = 0; i < ch.length; i += stride) {
+    if (!valid[i]) continue;
+    m.set(ch[i], (m.get(ch[i]) || 0) + 1);
+  }
+  return Array.from(m.entries()).sort(function(a, b) {
+    return b[1] - a[1];
+  }).slice(0, 64);
+}
+function hillshade(comp, groundRes, zFactor) {
+  var W = comp.grid.width, H = comp.grid.height, v = comp.channels[0], ok = comp.valid;
+  var out = new Float32Array(W * H).fill(1);
+  var zf = (zFactor || 1) / (8 * (groundRes || 1));
+  var az = 315 * Math.PI / 180, alt = 45 * Math.PI / 180;
+  var cz = Math.cos(Math.PI / 2 - alt), sz = Math.sin(Math.PI / 2 - alt);
+  for (var y = 1; y < H - 1; y++) {
+    for (var x = 1; x < W - 1; x++) {
+      var i = y * W + x;
+      if (!ok[i] || !ok[i - W - 1] || !ok[i + W + 1] || !ok[i - W + 1] || !ok[i + W - 1]) continue;
+      var a = v[i - W - 1], b = v[i - W], c = v[i - W + 1];
+      var d = v[i - 1], f = v[i + 1];
+      var g = v[i + W - 1], h = v[i + W], k = v[i + W + 1];
+      var dzdx = (c + 2 * f + k - (a + 2 * d + g)) * zf;
+      var dzdy = (g + 2 * h + k - (a + 2 * b + c)) * zf;
+      var slope = Math.atan(Math.hypot(dzdx, dzdy));
+      var aspect = Math.atan2(dzdy, -dzdx);
+      var sh = cz * Math.cos(slope) + sz * Math.sin(slope) * Math.cos(az - Math.PI / 2 - aspect);
+      out[i] = sh < 0 ? 0 : sh;
+    }
+  }
+  return out;
+}
 function renderRGBA(comp, params) {
   params = params || {};
   var npx = comp.grid.width * comp.grid.height;
   var out = new Uint8ClampedArray(npx * 4);
   var ch = comp.channels, valid = comp.valid;
+  if (comp.kind === "classes") return renderClasses(comp, out);
+  if (comp.kind === "single") return renderSingle(comp, params, out);
   if (comp.kind === "rgb8" && !params.stretch) {
     for (var i = 0; i < npx; i++) {
       var o = i * 4;
@@ -619,6 +800,44 @@ function renderRGBA(comp, params) {
   }
   return out;
 }
+function renderClasses(comp, out) {
+  var pal = classPalette(comp.classes), ch = comp.channels[0], valid = comp.valid;
+  for (var i = 0; i < ch.length; i++) {
+    var o = i * 4;
+    if (!valid[i]) continue;
+    var c = pal(ch[i]);
+    out[o] = c[0];
+    out[o + 1] = c[1];
+    out[o + 2] = c[2];
+    out[o + 3] = 255;
+  }
+  return out;
+}
+function renderSingle(comp, params, out) {
+  var ch = comp.channels[0], valid = comp.valid, npx = ch.length;
+  var st = params.stretch && params.stretch[0] || [0, 1];
+  var off = offsets3(params.offset)[0];
+  var inv = 1 / (params.gamma || 1);
+  var tf = TRANSFERS[params.transfer || "linear"] || TRANSFERS.linear;
+  var ramp = rampTable(params.ramp || "greys");
+  var N = 4096, lut = new Uint8ClampedArray(N + 1);
+  for (var k = 0; k <= N; k++) lut[k] = Math.round(255 * Math.pow(tf(k / N), inv));
+  var span = st[1] - st[0] || 1, A = N / span, B = (off - st[0]) * N / span;
+  var hs = params.hillshade ? params.shade : null, hw = params.hillshade || 0;
+  for (var j = 0; j < npx; j++) {
+    var p = j * 4;
+    if (!valid[j]) continue;
+    var x = ch[j] * A + B;
+    x = x < 0 ? 0 : x > N ? N : x;
+    var r = lut[Math.round(x)] * 3;
+    var m = hs ? 1 - hw + hw * hs[j] * 1.25 : 1;
+    out[p] = ramp[r] * m;
+    out[p + 1] = ramp[r + 1] * m;
+    out[p + 2] = ramp[r + 2] * m;
+    out[p + 3] = 255;
+  }
+  return out;
+}
 function rgbaToCanvas(rgba, width, height) {
   var cv = document.createElement("canvas");
   cv.width = width;
@@ -637,11 +856,11 @@ function geotiff() {
   return g;
 }
 function openCog(href) {
-  var hit = tiffCache.get(href);
-  if (hit) {
+  var hit2 = tiffCache.get(href);
+  if (hit2) {
     tiffCache.delete(href);
-    tiffCache.set(href, hit);
-    return hit;
+    tiffCache.set(href, hit2);
+    return hit2;
   }
   var p = geotiff().fromUrl(href, { allowFullFile: false });
   p.catch(function() {
@@ -672,7 +891,7 @@ async function levels(tiff) {
   }
   return out;
 }
-function lattice(grid, toSrc, origin, res) {
+function gridLattice(grid, toSrc, origin, res) {
   var W = grid.width, H = grid.height;
   var xs = [], ys = [];
   for (var px = 0; ; px += LATTICE) {
@@ -698,16 +917,7 @@ function lattice(grid, toSrc, origin, res) {
   }
   return { xs, ys, col, row };
 }
-async function readWarped(href, grid, opts) {
-  opts = opts || {};
-  var tiff = await openCog(href);
-  var lv = await levels(tiff);
-  var base = lv[0];
-  var W0 = base.getWidth(), H0 = base.getHeight();
-  var origin = base.getOrigin(), res = base.getResolution();
-  var crs = ensureCrs(opts.crs || crsFromKeys(base));
-  var toSrc = globalThis.proj4(ensureCrs(grid.crs), crs);
-  var lat = lattice(grid, toSrc, origin, res);
+function latticeWindow(lat, W, H) {
   var c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
   for (var k = 0; k < lat.col.length; k++) {
     var c = lat.col[k], r = lat.row[k];
@@ -719,44 +929,31 @@ async function readWarped(href, grid, opts) {
   }
   c0 = Math.max(0, Math.floor(c0));
   r0 = Math.max(0, Math.floor(r0));
-  c1 = Math.min(W0, Math.ceil(c1) + 1);
-  r1 = Math.min(H0, Math.ceil(r1) + 1);
-  if (!(c1 > c0 && r1 > r0)) return null;
+  c1 = Math.min(W, Math.ceil(c1) + 1);
+  r1 = Math.min(H, Math.ceil(r1) + 1);
+  return c1 > c0 && r1 > r0 ? [c0, r0, c1, r1] : null;
+}
+function latticeScale(lat) {
   var nx = lat.xs.length, ny = lat.ys.length;
   var mi = Math.floor((nx - 1) / 2), mj = Math.floor((ny - 1) / 2);
-  var scale = 1;
   if (nx > 1) {
     var a = mj * nx + mi, b = a + 1;
-    scale = Math.hypot(lat.col[b] - lat.col[a], lat.row[b] - lat.row[a]) / (lat.xs[mi + 1] - lat.xs[mi]);
+    return Math.hypot(lat.col[b] - lat.col[a], lat.row[b] - lat.row[a]) / (lat.xs[mi + 1] - lat.xs[mi]);
   }
-  var im = base, fx = 1, fy = 1;
-  for (var i = 1; i < lv.length; i++) {
-    var sx = W0 / lv[i].getWidth(), sy = H0 / lv[i].getHeight();
-    if (sx <= scale * 1.05) {
-      im = lv[i];
-      fx = sx;
-      fy = sy;
-    }
+  if (ny > 1) {
+    var a2 = mj * nx + mi, b2 = a2 + nx;
+    return Math.hypot(lat.col[b2] - lat.col[a2], lat.row[b2] - lat.row[a2]) / (lat.ys[mj + 1] - lat.ys[mj]);
   }
-  var Wl = im.getWidth(), Hl = im.getHeight();
-  var wx0 = Math.max(0, Math.floor(c0 / fx)), wy0 = Math.max(0, Math.floor(r0 / fy));
-  var wx1 = Math.min(Wl, Math.ceil(c1 / fx)), wy1 = Math.min(Hl, Math.ceil(r1 / fy));
-  if (!(wx1 > wx0 && wy1 > wy0)) return null;
-  var ww = wx1 - wx0, wh = wy1 - wy0;
-  var src = await im.readRasters({
-    window: [wx0, wy0, wx1, wy1],
-    interleave: false,
-    signal: opts.signal
-  });
-  var nb = src.length;
-  var nd = base.getGDALNoData();
-  if (nd === null || nd === void 0) nd = opts.nodata !== void 0 ? opts.nodata : 0;
+  return 1;
+}
+function resampleWindow(lat, grid, src, ww, wh, wx0, wy0, fx, fy, nd, alpha) {
   var W = grid.width, H = grid.height, npx = W * H;
+  var nb = src.length, nx = lat.xs.length, ny = lat.ys.length;
   var Ctor = src[0].constructor;
   var bands = [];
   for (var bi = 0; bi < nb; bi++) {
     var arr = new Ctor(npx);
-    if (nd !== 0) arr.fill(nd);
+    if (nd !== 0 && nd !== null && nd !== void 0) arr.fill(nd);
     bands.push(arr);
   }
   var valid = new Uint8Array(npx);
@@ -784,6 +981,7 @@ async function readWarped(href, grid, opts) {
           var sr = Math.floor((ql + (qr - ql) * tx) / fy) - wy0;
           if (sc < 0 || sr < 0 || sc >= ww || sr >= wh) continue;
           var si = sr * ww + sc, o = rowOff + x, ok = false;
+          if (alpha && !alpha[si]) continue;
           for (var b2 = 0; b2 < nb; b2++) {
             var v = src[b2][si];
             bands[b2][o] = v;
@@ -797,13 +995,341 @@ async function readWarped(href, grid, opts) {
       }
     }
   }
-  if (!any) return null;
+  return { bands, valid, any };
+}
+async function readWarped(href, grid, opts) {
+  opts = opts || {};
+  var tiff = await openCog(href);
+  var lv = await levels(tiff);
+  var base = lv[0];
+  var W0 = base.getWidth(), H0 = base.getHeight();
+  var origin = base.getOrigin(), res = base.getResolution();
+  var crs = ensureCrs(opts.crs || crsFromKeys(base));
+  var toSrc = globalThis.proj4(ensureCrs(grid.crs), crs);
+  var lat = gridLattice(grid, toSrc, origin, res);
+  var win = latticeWindow(lat, W0, H0);
+  if (!win) return null;
+  var scale = latticeScale(lat);
+  var im = base, fx = 1, fy = 1;
+  for (var i = 1; i < lv.length; i++) {
+    var sx = W0 / lv[i].getWidth(), sy = H0 / lv[i].getHeight();
+    if (sx <= scale * 1.05) {
+      im = lv[i];
+      fx = sx;
+      fy = sy;
+    }
+  }
+  var Wl = im.getWidth(), Hl = im.getHeight();
+  var wx0 = Math.max(0, Math.floor(win[0] / fx)), wy0 = Math.max(0, Math.floor(win[1] / fy));
+  var wx1 = Math.min(Wl, Math.ceil(win[2] / fx)), wy1 = Math.min(Hl, Math.ceil(win[3] / fy));
+  if (!(wx1 > wx0 && wy1 > wy0)) return null;
+  var src = await im.readRasters({
+    window: [wx0, wy0, wx1, wy1],
+    interleave: false,
+    signal: opts.signal
+  });
+  var nd = base.getGDALNoData();
+  if (nd === null || nd === void 0) nd = opts.nodata !== void 0 && opts.nodata !== null ? opts.nodata : 0;
+  var r = resampleWindow(
+    lat,
+    grid,
+    Array.prototype.slice.call(src),
+    wx1 - wx0,
+    wy1 - wy0,
+    wx0,
+    wy0,
+    fx,
+    fy,
+    nd,
+    null
+  );
+  if (!r.any) return null;
   return {
-    bands,
-    valid,
+    bands: r.bands,
+    valid: r.valid,
     nodata: nd,
     level: lv.indexOf(im),
     window: [wx0, wy0, wx1, wy1]
+  };
+}
+async function cogInfo(href) {
+  var tiff = await openCog(href);
+  var lv = await levels(tiff);
+  var base = lv[0];
+  var fd = base.fileDirectory;
+  var crs = ensureCrs(crsFromKeys(base));
+  var b = base.getBoundingBox();
+  var fmt = fd.SampleFormat && fd.SampleFormat[0] || 1;
+  var bits = fd.BitsPerSample && fd.BitsPerSample[0] || 8;
+  var dataType = (fmt === 3 ? "Float" : fmt === 2 ? "Int" : "UInt") + bits;
+  if (dataType === "UInt8") dataType = "Byte";
+  var dt = fd.DateTime ? /^(\d{4}):(\d\d):(\d\d)/.exec(fd.DateTime) : null;
+  return {
+    href,
+    crs,
+    extent: b,
+    bbox: transformBbox(b, crs, "EPSG:4326"),
+    width: base.getWidth(),
+    height: base.getHeight(),
+    bands: base.getSamplesPerPixel(),
+    dataType,
+    nodata: base.getGDALNoData(),
+    levels: lv.length,
+    tileSize: base.getTileWidth ? [base.getTileWidth(), base.getTileHeight()] : null,
+    date: dt ? dt[1] + "-" + dt[2] + "-" + dt[3] : null,
+    res: base.getResolution()
+  };
+}
+
+// lib/sources/cog.js
+var UNDATED = "undated";
+function sceneOf(info, i) {
+  var b = info.bbox, assets = {}, meta = {};
+  for (var k = 0; k < info.bands; k++) {
+    assets["b" + (k + 1)] = info.href;
+    meta["b" + (k + 1)] = { band: k, dataType: info.dataType };
+    if (info.nodata !== null && info.nodata !== void 0) meta["b" + (k + 1)].nodata = info.nodata;
+  }
+  if (info.bands >= 3 && info.dataType === "Byte") {
+    assets.visual = info.href;
+    meta.visual = { rgb: true };
+  }
+  var name = decodeURIComponent(info.href.split("?")[0].split("/").pop() || "file " + (i + 1));
+  return {
+    id: name,
+    day: info.date || UNDATED,
+    datetime: info.date ? info.date + "T00:00:00Z" : null,
+    geometry: { type: "Polygon", coordinates: [[
+      [b[0], b[1]],
+      [b[2], b[1]],
+      [b[2], b[3]],
+      [b[0], b[3]],
+      [b[0], b[1]]
+    ]] },
+    bbox: b,
+    cloud: null,
+    crs: info.crs,
+    assets,
+    assetMeta: meta,
+    meta: { info, res: Math.abs(info.res[0]) }
+  };
+}
+function cogCatalog(opts) {
+  var urls = opts.urls;
+  if (typeof urls === "string") urls = urls.split(/\s+/);
+  urls = (urls || []).map(function(u) {
+    return u.trim();
+  }).filter(Boolean);
+  var infos = null;
+  function read() {
+    if (!infos) {
+      infos = Promise.all(urls.map(function(u) {
+        return cogInfo(u).then(function(x) {
+          return x;
+        }, function(e) {
+          return { href: u, error: String(e && e.message || e) };
+        });
+      }));
+      infos.catch(function() {
+        infos = null;
+      });
+    }
+    return infos;
+  }
+  return {
+    kind: "cog",
+    label: urls.length === 1 ? urls[0] : urls.length + " COGs",
+    capabilities: { cloud: false, time: false },
+    // header facts for every file: { files: [info | {href, error}], bbox }
+    info: async function() {
+      var all = await read(), ok = all.filter(function(x) {
+        return !x.error;
+      });
+      var bb = ok.reduce(function(a, x) {
+        return [
+          Math.min(a[0], x.bbox[0]),
+          Math.min(a[1], x.bbox[1]),
+          Math.max(a[2], x.bbox[2]),
+          Math.max(a[3], x.bbox[3])
+        ];
+      }, [180, 90, -180, -90]);
+      return { files: all, bbox: ok.length ? bb : null };
+    },
+    search: async function(q) {
+      var all = await read();
+      var bad = all.filter(function(x) {
+        return x.error;
+      });
+      var scenes = all.filter(function(x) {
+        return !x.error;
+      }).map(sceneOf).filter(function(s) {
+        return !q.bbox || bboxIntersects(s.bbox, q.bbox);
+      });
+      if (!scenes.length && bad.length) throw new Error(bad[0].href + ": " + bad[0].error);
+      return scenes;
+    }
+  };
+}
+
+// lib/sources/vrt.js
+function vsiToHttps(name, vrtUrl, relative) {
+  var n = String(name).trim();
+  if (relative) return new URL(n, vrtUrl).href;
+  var m;
+  if (m = /^\/vsicurl(?:_streaming)?\/(.*)$/.exec(n)) return m[1];
+  if (m = /^\/vsis3(?:_streaming)?\/([^/]+)\/(.*)$/.exec(n)) {
+    var u = new URL(vrtUrl, location.href);
+    if (u.hostname.indexOf(m[1] + ".s3") === 0) return u.origin + "/" + m[2];
+    if (u.hostname.indexOf("s3") >= 0 && u.pathname.indexOf("/" + m[1] + "/") === 0) {
+      return u.origin + "/" + m[1] + "/" + m[2];
+    }
+    return "https://" + m[1] + ".s3.amazonaws.com/" + m[2];
+  }
+  if (m = /^\/vsigs\/(.*)$/.exec(n)) return "https://storage.googleapis.com/" + m[1];
+  if (/^https?:\/\//.test(n)) return n;
+  return new URL(n, vrtUrl).href;
+}
+function num(el, name, dflt) {
+  var v = el && el.getAttribute(name);
+  return v === null || v === void 0 || v === "" ? dflt : +v;
+}
+function parseVrt(text, vrtUrl) {
+  var doc = new DOMParser().parseFromString(text, "application/xml");
+  var root = doc.documentElement;
+  if (!root || root.nodeName !== "VRTDataset") throw new Error("not a GDAL VRT (no VRTDataset)");
+  var srs = root.getElementsByTagName("SRS")[0];
+  var srsText = srs ? srs.textContent.trim() : "";
+  var crs = /^(EPSG:\d+|urn:ogc)/i.test(srsText) ? ensureCrs(crsCode(srsText)) : crsFromWkt(srsText);
+  var gtEl = root.getElementsByTagName("GeoTransform")[0];
+  if (!gtEl) throw new Error("VRT has no GeoTransform");
+  var gt = gtEl.textContent.split(",").map(function(v) {
+    return +v;
+  });
+  var files = /* @__PURE__ */ new Map(), bands = [];
+  Array.prototype.forEach.call(root.getElementsByTagName("VRTRasterBand"), function(b) {
+    var bandNo = num(b, "band", bands.length + 1);
+    var ndEl = b.getElementsByTagName("NoDataValue")[0];
+    bands.push({
+      band: bandNo,
+      dataType: b.getAttribute("dataType") || "Byte",
+      nodata: ndEl ? +ndEl.textContent : null
+    });
+    Array.prototype.forEach.call(b.children, function(src) {
+      if (!/Source$/.test(src.nodeName)) return;
+      var fn = src.getElementsByTagName("SourceFilename")[0];
+      var dst = src.getElementsByTagName("DstRect")[0];
+      if (!fn || !dst) return;
+      var href = vsiToHttps(fn.textContent, vrtUrl, fn.getAttribute("relativeToVRT") === "1");
+      var sb = src.getElementsByTagName("SourceBand")[0];
+      var x0 = num(dst, "xOff", 0), y0 = num(dst, "yOff", 0);
+      var xs = num(dst, "xSize", 0), ys = num(dst, "ySize", 0);
+      var ext = [
+        gt[0] + x0 * gt[1],
+        gt[3] + (y0 + ys) * gt[5],
+        gt[0] + (x0 + xs) * gt[1],
+        gt[3] + y0 * gt[5]
+      ];
+      var f = files.get(href);
+      if (!f) {
+        f = { href, extent: ext, bands: {}, order: files.size };
+        files.set(href, f);
+      }
+      f.bands[bandNo] = sb ? +sb.textContent : 1;
+    });
+  });
+  return {
+    crs,
+    gt,
+    width: num(root, "rasterXSize", 0),
+    height: num(root, "rasterYSize", 0),
+    bands,
+    files: Array.from(files.values())
+  };
+}
+function hit(a, b) {
+  return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
+}
+function vrtCatalog(opts) {
+  var url = String(opts.url).trim();
+  var parsed = null;
+  function read() {
+    if (!parsed) {
+      parsed = fetch(url).then(function(r) {
+        if (!r.ok) throw new Error("VRT " + r.status + " " + url);
+        return r.text();
+      }).then(function(t) {
+        return parseVrt(t, url);
+      });
+      parsed.catch(function() {
+        parsed = null;
+      });
+    }
+    return parsed;
+  }
+  function sceneOf2(v, f) {
+    var assets = {}, meta = {};
+    v.bands.forEach(function(b) {
+      if (f.bands[b.band] === void 0) return;
+      var k = "b" + b.band;
+      assets[k] = f.href;
+      meta[k] = { band: f.bands[b.band] - 1, dataType: b.dataType };
+      if (b.nodata !== null) meta[k].nodata = b.nodata;
+    });
+    if (v.bands.length >= 3 && v.bands[0].dataType === "Byte" && f.bands[1] === 1 && f.bands[2] === 2 && f.bands[3] === 3) {
+      assets.visual = f.href;
+      meta.visual = { rgb: true };
+    }
+    var geom = boxPolygon(f.extent, v.crs, 4);
+    var name = decodeURIComponent(f.href.split("?")[0].split("/").pop());
+    return {
+      id: name,
+      day: UNDATED,
+      datetime: null,
+      geometry: geom,
+      bbox: transformBbox(f.extent, v.crs, "EPSG:4326"),
+      cloud: null,
+      crs: v.crs,
+      assets,
+      assetMeta: meta,
+      meta: { res: Math.abs(v.gt[1]), order: f.order }
+    };
+  }
+  return {
+    kind: "vrt",
+    label: url.split("/").pop(),
+    capabilities: { cloud: false, time: false },
+    // most mosaics need more files than a satellite day has scenes
+    maxScenes: 24,
+    // { crs, files, bands, dataType, res, bbox, footprints: [GeoJSON] }
+    info: async function() {
+      var v = await read();
+      var all = transformBbox(
+        [v.gt[0], v.gt[3] + v.height * v.gt[5], v.gt[0] + v.width * v.gt[1], v.gt[3]],
+        v.crs,
+        "EPSG:4326"
+      );
+      return {
+        crs: v.crs,
+        files: v.files.length,
+        bands: v.bands.length,
+        dataType: v.bands.length ? v.bands[0].dataType : "?",
+        res: Math.abs(v.gt[1]),
+        bbox: all,
+        footprints: v.files.map(function(f) {
+          return boxPolygon(f.extent, v.crs, 4);
+        })
+      };
+    },
+    search: async function(q) {
+      var v = await read();
+      var roi = q.bbox ? transformBbox(q.bbox, "EPSG:4326", v.crs, 32) : null;
+      var keep = v.files.filter(function(f) {
+        return !roi || hit(f.extent, roi);
+      });
+      return keep.reverse().map(function(f) {
+        return sceneOf2(v, f);
+      });
+    }
   };
 }
 
@@ -841,9 +1367,9 @@ function resolveAssets(assets) {
   Object.keys(BAND_ALIASES).forEach(function(key) {
     var names = BAND_ALIASES[key];
     for (var i = 0; i < names.length; i++) {
-      var hit = assets[names[i]] ? names[i] : lower[names[i].toLowerCase()];
-      if (hit && /tiff|tif/i.test(assets[hit].type || "image/tiff")) {
-        out[key] = assets[hit].href;
+      var hit2 = assets[names[i]] ? names[i] : lower[names[i].toLowerCase()];
+      if (hit2 && /tiff|tif/i.test(assets[hit2].type || "image/tiff")) {
+        out[key] = assets[hit2].href;
         return;
       }
     }
@@ -854,11 +1380,69 @@ function resolveAssets(assets) {
   });
   return out;
 }
+function httpsHref(h) {
+  var m = /^s3:\/\/([^/]+)\/(.*)$/.exec(h || "");
+  return m ? "https://" + m[1] + ".s3.amazonaws.com/" + m[2] : h;
+}
+function isCog(a) {
+  var t = a.type || "", roles = a.roles || [];
+  if (roles.indexOf("thumbnail") >= 0 || roles.indexOf("overview") >= 0) return false;
+  return /tiff/i.test(t) || !t && /\.tiff?(\?|$)/i.test(a.href || "");
+}
+function assetMetaOf(a) {
+  var rb = (a["raster:bands"] || a.bands || [])[0] || {};
+  var m = {};
+  if (rb.nodata !== void 0 && rb.nodata !== null) m.nodata = rb.nodata === "nan" ? NaN : +rb.nodata;
+  if (rb.scale !== void 0) m.scale = rb.scale;
+  if (rb.offset !== void 0) m.offset = rb.offset;
+  if (rb.data_type) m.dataType = rb.data_type;
+  if (rb.unit) m.unit = rb.unit;
+  var cls = a["classification:classes"] || rb["classification:classes"];
+  if (cls && cls.length) {
+    m.classes = cls.map(function(c) {
+      return {
+        value: c.value,
+        label: c.description || c.name || String(c.value),
+        color: c.color_hint ? "#" + String(c.color_hint).replace("#", "") : null
+      };
+    });
+  }
+  if ((a.roles || []).indexOf("visual") >= 0 && (a["eo:bands"] || []).length >= 3) m.rgb = true;
+  return m;
+}
+function extraAssets(assets, already) {
+  var out = { assets: {}, meta: {} };
+  var used = new Set(Object.keys(already || {}).map(function(k) {
+    return already[k];
+  }));
+  Object.keys(assets || {}).forEach(function(name) {
+    var a = assets[name];
+    if (!a || !isCog(a)) return;
+    var href = httpsHref(a.href);
+    var key = name.toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+    var meta = assetMetaOf(a);
+    if (used.has(a.href) || used.has(href)) {
+      Object.keys(already).forEach(function(k) {
+        if ((already[k] === a.href || already[k] === href) && Object.keys(meta).length) out.meta[k] = meta;
+      });
+      return;
+    }
+    if (already && already[key]) return;
+    out.assets[key] = href;
+    if (Object.keys(meta).length) out.meta[key] = meta;
+  });
+  return out;
+}
 function itemToScene(item) {
   var p = item.properties || {};
   var bbox = item.bbox || (item.geometry ? geometryBbox(item.geometry) : null);
   var lon = bbox ? (bbox[0] + bbox[2]) / 2 : 0;
   var epsg = p["proj:epsg"] ? "EPSG:" + p["proj:epsg"] : p["proj:code"] || null;
+  var assets = resolveAssets(item.assets);
+  var extra = extraAssets(item.assets, assets);
+  Object.keys(extra.assets).forEach(function(k) {
+    assets[k] = extra.assets[k];
+  });
   return {
     id: item.id,
     datetime: p.datetime,
@@ -867,8 +1451,10 @@ function itemToScene(item) {
     bbox,
     cloud: p["eo:cloud_cover"] !== void 0 ? p["eo:cloud_cover"] : null,
     crs: epsg,
-    assets: resolveAssets(item.assets),
+    assets,
+    assetMeta: extra.meta,
     meta: {
+      res: p.gsd || null,
       collection: item.collection,
       platform: p.platform,
       grid: p["grid:code"] || p["s2:mgrs_tile"] || null,
@@ -881,6 +1467,32 @@ function itemToScene(item) {
 function trimSlash(u) {
   return u.replace(/\/+$/, "");
 }
+var PC_TOKEN = "https://planetarycomputer.microsoft.com/api/sas/v1/token/";
+var pcTokens = /* @__PURE__ */ new Map();
+async function pcToken(collection, signal) {
+  var hit2 = pcTokens.get(collection);
+  if (hit2 && hit2.until > Date.now()) return hit2.token;
+  var r = await fetch(PC_TOKEN + encodeURIComponent(collection), { signal });
+  if (!r.ok) throw new Error("Planetary Computer token " + r.status);
+  var j = await r.json();
+  pcTokens.set(collection, { token: j.token, until: Date.now() + 30 * 6e4 });
+  return j.token;
+}
+function isPlanetaryComputer(url) {
+  return /planetarycomputer\.microsoft\.com/i.test(url || "");
+}
+async function signScenes(scenes, collection, signal) {
+  var token = await pcToken(collection, signal);
+  scenes.forEach(function(s) {
+    Object.keys(s.assets).forEach(function(k) {
+      var h = s.assets[k];
+      if (typeof h === "string" && /\.blob\.core\.windows\.net\//.test(h) && h.indexOf("?") < 0) {
+        s.assets[k] = h + "?" + token;
+      }
+    });
+  });
+  return scenes;
+}
 function stacCatalog(opts) {
   var root = trimSlash(opts.url);
   var collection = opts.collection;
@@ -888,6 +1500,7 @@ function stacCatalog(opts) {
     kind: "stac",
     label: root + " : " + collection,
     bands: Object.keys(BAND_ALIASES),
+    capabilities: { cloud: true, time: true },
     search: async function(q) {
       var maxItems = q.maxItems || 500;
       var body = { collections: [collection], bbox: q.bbox, limit: Math.min(100, maxItems) };
@@ -898,7 +1511,7 @@ function stacCatalog(opts) {
         body.query = { "eo:cloud_cover": { lte: q.cloudMax } };
       }
       var req = { url: root + "/search", method: "POST", body };
-      var items = [];
+      var items = [], retried = false;
       while (req && items.length < maxItems) {
         var r = await fetch(req.url, req.method === "GET" ? { signal: q.signal, headers: { Accept: "application/geo+json" } } : {
           method: "POST",
@@ -923,8 +1536,14 @@ function stacCatalog(opts) {
           body: next.body ? next.merge ? Object.assign({}, req.body, next.body) : next.body : null
         } : null;
         if (req && req.method === "POST" && !req.body) req.body = body;
+        if (!req && !items.length && body.query && !retried) {
+          retried = true;
+          delete body.query;
+          req = { url: root + "/search", method: "POST", body };
+        }
       }
       var scenes = items.slice(0, maxItems).map(itemToScene);
+      if (isPlanetaryComputer(root)) await signScenes(scenes, collection, q.signal);
       if (q.cloudMax !== void 0 && q.cloudMax < 100) {
         scenes = scenes.filter(function(s) {
           return s.cloud === null || s.cloud <= q.cloudMax;
@@ -1100,7 +1719,7 @@ function isoString(v) {
   if (typeof v === "bigint") return new Date(Number(v / 1000n)).toISOString();
   return v === null || v === void 0 ? null : String(v);
 }
-function num(v) {
+function num2(v) {
   if (v === null || v === void 0) return null;
   var n = Number(v);
   return isFinite(n) ? n : null;
@@ -1249,7 +1868,7 @@ function loadAcquisitions(root, store, onFile) {
     var m = /* @__PURE__ */ new Map();
     rows.forEach(function(r) {
       if (m.has(r.acquisition_id)) return;
-      var lon = num(r.centroid_lon);
+      var lon = num2(r.centroid_lon);
       var dt = isoString(r.datetime);
       m.set(r.acquisition_id, {
         id: r.acquisition_id,
@@ -1258,7 +1877,7 @@ function loadAcquisitions(root, store, onFile) {
         day: r.solarday !== null && r.solarday !== void 0 ? dayString(r.solarday) : dt ? dt.slice(0, 10) : null,
         tile: r.tile || null,
         lon,
-        lat: num(r.centroid_lat),
+        lat: num2(r.centroid_lat),
         geometry: wkbGeometry(r.footprint_wkb)
       });
     });
@@ -1277,8 +1896,8 @@ function loadProducts(root, store, onFile) {
         acq: r.acquisition_id,
         collection: r.collection || null,
         item: r.item_id || r.product_id,
-        epsg: num(r.epsg),
-        cloud: num(r.cloud_cover),
+        epsg: num2(r.epsg),
+        cloud: num2(r.cloud_cover),
         baseline: r.baseline || null,
         query: r.query_id || null
       };
@@ -1741,6 +2360,15 @@ async function pool2(tasks, n) {
   await Promise.all(ws);
   return out;
 }
+function assetHref(a) {
+  return typeof a === "string" ? a : a && (a.href || a.template) || "";
+}
+function assetMeta(scene, key) {
+  return scene.assetMeta && scene.assetMeta[key] || {};
+}
+function readAsset(a, grid, opts) {
+  return readWarped(assetHref(a), grid, opts);
+}
 async function loadComposite(o) {
   var t0 = performance.now();
   var keys = o.keys, grid = o.grid;
@@ -1753,30 +2381,39 @@ async function loadComposite(o) {
   }).sort(byCloud);
   var missing = o.scenes.length - cands.length;
   var use = cands.slice(0, maxScenes);
-  var done = 0;
+  var done = 0, log = [];
   var tasks = use.map(function(s) {
     return async function() {
+      var reads = /* @__PURE__ */ new Map();
       var parts = await Promise.all(keys.map(function(k) {
-        return readWarped(s.assets[k], grid, { crs: s.crs, signal: o.signal });
+        var a = s.assets[k], m = assetMeta(s, k), id = assetHref(a);
+        if (!reads.has(id)) {
+          reads.set(id, readAsset(a, grid, { crs: s.crs, signal: o.signal, nodata: m.nodata }));
+        }
+        return reads.get(id).then(function(p) {
+          if (p && p.log) log.push.apply(log, p.log);
+          return p;
+        });
       }));
       done++;
       if (o.onProgress) o.onProgress(done, use.length, s);
       if (parts.some(function(p) {
         return p === null;
       })) return null;
-      if (parts.length === 1) return {
-        bands: parts[0].bands.slice(0, 3),
-        valid: parts[0].valid,
-        level: parts[0].level
-      };
+      if (keys.length === 1) {
+        var p0 = parts[0], m0 = assetMeta(s, keys[0]);
+        var rgb = o.mode === "rgb" || !o.mode && p0.bands.length >= 3 && m0.band === void 0;
+        if (rgb) return { bands: p0.bands.slice(0, 3), valid: p0.valid, level: p0.level, rgb: true };
+        return { bands: [p0.bands[m0.band || 0]], valid: p0.valid, level: p0.level };
+      }
       var valid = parts[0].valid.slice();
       for (var i = 1; i < parts.length; i++) {
         var v = parts[i].valid;
         for (var j = 0; j < valid.length; j++) valid[j] = valid[j] & v[j];
       }
       return {
-        bands: parts.map(function(p) {
-          return p.bands[0];
+        bands: parts.map(function(p, i2) {
+          return p.bands[assetMeta(s, keys[i2]).band || 0];
         }),
         valid,
         level: parts[0].level
@@ -1795,11 +2432,21 @@ async function loadComposite(o) {
       levels2.push(r.value.level);
     }
   });
-  var kind = keys.length === 1 ? "rgb8" : "bands";
+  var kind = keys.length === 3 ? "bands" : "single";
+  if (keys.length === 1 && layers.length && layers[0].rgb) kind = "rgb8";
+  if (keys.length === 1 && o.mode === "classes") kind = "classes";
+  if (kind === "rgb8" && layers.length && layers[0].bands.length < 3) {
+    throw new Error(keys[0] + " is not a 3-band product");
+  }
   var comp = null;
   if (layers.length) {
-    if (kind === "rgb8" && layers[0].bands.length < 3) throw new Error(keys[0] + " is not a 3-band product");
     comp = mosaic(grid, layers, kind, keys);
+    if (kind === "classes") {
+      var withClasses = use.filter(function(s) {
+        return assetMeta(s, keys[0]).classes;
+      })[0];
+      comp.classes = o.classes || withClasses && assetMeta(withClasses, keys[0]).classes || null;
+    }
   }
   return {
     composite: comp,
@@ -1812,9 +2459,85 @@ async function loadComposite(o) {
       files: use.length * keys.length,
       errors,
       levels: levels2,
+      log,
       ms: Math.round(performance.now() - t0)
     }
   };
+}
+var S2_PRESETS = [
+  { keys: ["visual"], mode: "rgb", label: "TCI (baked true colour, fast)" },
+  { keys: ["red", "green", "blue"], mode: "bands", label: "true colour (raw bands)" },
+  { keys: ["nir", "red", "green"], mode: "bands", label: "false colour IR (vegetation)" },
+  { keys: ["swir16", "nir", "red"], mode: "bands", label: "SWIR (snow/ice vs cloud)" },
+  { keys: ["swir22", "swir16", "nir"], mode: "bands", label: "geology" }
+];
+var ELEVATION = /^(dem|data|elevation|height|dsm|dtm|bathymetry|topo|z)$/i;
+var KNOWN_CLASSES = {
+  // Sentinel-2 L2A scene classification, ESA's colours
+  scl: [
+    [0, "no data", "#000000"],
+    [1, "saturated or defective", "#ff0000"],
+    [2, "dark area / shadow", "#2f2f2f"],
+    [3, "cloud shadow", "#643200"],
+    [4, "vegetation", "#00a000"],
+    [5, "not vegetated", "#ffe65a"],
+    [6, "water", "#0000ff"],
+    [7, "unclassified", "#808080"],
+    [8, "cloud, medium probability", "#c0c0c0"],
+    [9, "cloud, high probability", "#ffffff"],
+    [10, "thin cirrus", "#64c8ff"],
+    [11, "snow or ice", "#ff96ff"]
+  ].map(function(c) {
+    return { value: c[0], label: c[1], color: c[2] };
+  })
+};
+function presetId(p) {
+  return p.mode + ":" + p.keys.join(",");
+}
+function parsePresetId(id) {
+  id = String(id || "");
+  var m = /^(rgb|bands|single|classes):(.+)$/.exec(id);
+  if (m) return { mode: m[1], keys: m[2].split(",") };
+  var keys = id.split(",");
+  if (keys.length === 3) return { mode: "bands", keys };
+  return { mode: keys[0] === "visual" ? "rgb" : "single", keys };
+}
+function presetsFor(catalog, scenes) {
+  var have = /* @__PURE__ */ new Map(), meta = {};
+  (scenes || []).forEach(function(s) {
+    Object.keys(s.assets || {}).forEach(function(k) {
+      have.set(k, (have.get(k) || 0) + 1);
+      if (!meta[k] && s.assetMeta && s.assetMeta[k]) meta[k] = s.assetMeta[k];
+    });
+  });
+  var out = [], seen = {};
+  function add(p) {
+    p.id = presetId(p);
+    if (seen[p.id]) return;
+    seen[p.id] = 1;
+    out.push(p);
+  }
+  (catalog && catalog.presets || []).forEach(add);
+  S2_PRESETS.forEach(function(p) {
+    if (p.keys.every(function(k) {
+      return have.has(k);
+    })) add(Object.assign({}, p));
+  });
+  Array.from(have.keys()).sort().forEach(function(k) {
+    if (k === "visual") return;
+    var m = meta[k] || {};
+    if (m.classes || KNOWN_CLASSES[k]) {
+      add({ keys: [k], mode: "classes", label: k + " (classes)", classes: m.classes || KNOWN_CLASSES[k] });
+    } else if (m.rgb) add({ keys: [k], mode: "rgb", label: k + " (RGB)" });
+    else add({
+      keys: [k],
+      mode: "single",
+      label: k + " (one band)",
+      ramp: ELEVATION.test(k) || m.elevation ? "terrain" : "greys",
+      hillshade: ELEVATION.test(k) || m.elevation ? 0.6 : 0
+    });
+  });
+  return out;
 }
 
 // page.js
@@ -1916,6 +2639,14 @@ var today = /* @__PURE__ */ new Date();
 $("to").value = isoDay(today);
 $("from").value = isoDay(new Date(today.getTime() - 60 * 864e5));
 function makeCatalog() {
+  if ($("src").value === "vrt") {
+    if (!$("vrtUrl").value.trim()) throw new Error("enter the VRT URL");
+    return vrtCatalog({ url: $("vrtUrl").value.trim() });
+  }
+  if ($("src").value === "cog") {
+    if (!$("cogUrls").value.trim()) throw new Error("paste at least one COG URL");
+    return cogCatalog({ urls: $("cogUrls").value });
+  }
   if ($("src").value === "wildtiles") {
     return wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
   }
@@ -1930,14 +2661,25 @@ function sourceChanged() {
   $("stacbox").classList.toggle("hide", src !== "stac");
   $("starcbox").classList.toggle("hide", src !== "starc");
   $("wtbox").classList.toggle("hide", src !== "wildtiles");
+  $("vrtbox").classList.toggle("hide", src !== "vrt");
+  $("cogbox").classList.toggle("hide", src !== "cog");
   coverLayer.clearLayers();
+  state.catalog = null;
+  capabilitiesChanged(null);
   clearScenes();
+}
+function capabilitiesChanged(cat) {
+  var src = $("src").value;
+  var caps = cat && cat.capabilities || { cloud: src === "stac" || src === "starc", time: src !== "vrt" && src !== "cog" };
+  $("cloudBox").classList.toggle("hide", !caps.cloud);
+  $("from").parentNode.parentNode.classList.toggle("hide", !caps.time);
+  $("dateNote").classList.toggle("hide", !caps.time);
 }
 $("src").addEventListener("change", function() {
   sourceChanged();
   if ($("src").value === "wildtiles") readCube(false).catch(fail);
 });
-["stacUrl", "coll", "wtBucket", "wtRes", "starcColl"].forEach(function(id) {
+["stacUrl", "coll", "wtBucket", "wtRes", "starcColl", "vrtUrl", "cogUrls"].forEach(function(id) {
   $(id).addEventListener("change", clearScenes);
 });
 $("starcUrl").addEventListener("change", function() {
@@ -2035,6 +2777,51 @@ $("wtRegion").addEventListener("change", function() {
 });
 $("wtRes").addEventListener("change", function() {
   if (cubeRegions.length) readCube(true).catch(fail);
+});
+async function readVrt(fit, quiet) {
+  var cat = makeCatalog();
+  if (!quiet) setStatus("reading " + cat.label + " ...");
+  var info = await cat.info();
+  coverLayer.clearLayers();
+  var style = { color: "#b39ddb", weight: 1, fill: false, opacity: 0.6 };
+  L.geoJSON(
+    { type: "GeometryCollection", geometries: info.footprints },
+    { style, interactive: false }
+  ).addTo(coverLayer);
+  $("vrtInfo").textContent = info.files + " files, " + info.bands + " band(s) of " + info.dataType + " at " + info.res + " (" + info.crs + ")";
+  if (fit && !state.roi) map.fitBounds(roiLatLngBounds(info.bbox));
+  if (!quiet) setStatus("VRT read: " + info.files + " files\ndraw a region over the purple tiles, then search");
+  return info;
+}
+$("readVrt").addEventListener("click", function() {
+  readVrt(true).catch(fail);
+});
+async function readCogs(fit) {
+  var cat = makeCatalog();
+  setStatus("reading " + cat.label + " headers ...");
+  var info = await cat.info();
+  coverLayer.clearLayers();
+  var lines = info.files.map(function(f) {
+    if (f.error) return f.href.split("/").pop() + ": " + f.error;
+    L.rectangle(roiLatLngBounds(f.bbox), {
+      color: "#b39ddb",
+      weight: 1,
+      fill: false,
+      interactive: false
+    }).addTo(coverLayer);
+    return f.href.split("/").pop() + ": " + f.width + "x" + f.height + ", " + f.bands + " x " + f.dataType + ", " + f.crs + ", " + f.levels + " level(s)" + (f.tileSize ? ", " + f.tileSize.join("x") + " tiles" : "") + (f.nodata !== null ? ", nodata " + f.nodata : "") + (f.date ? ", " + f.date : "");
+  });
+  $("cogInfo").textContent = lines.join("\n");
+  $("cogInfo").style.whiteSpace = "pre-wrap";
+  if (fit && info.bbox) {
+    setRoi(info.bbox);
+    map.fitBounds(roiLatLngBounds(info.bbox).pad(0.1));
+  }
+  setStatus(info.bbox ? "headers read: search to list the files" : "", info.bbox ? [] : ["no readable file"]);
+  return info;
+}
+$("readCogs").addEventListener("click", function() {
+  readCogs(true).catch(fail);
 });
 $("readStore").addEventListener("click", function() {
   readStore(true).then(function(info) {
@@ -2147,9 +2934,10 @@ function clearScenes() {
   footLayer.clearLayers();
   renderScrub();
 }
-async function searchScenes() {
+async function searchScenes(wantPreset) {
   if (!state.roi) throw new Error("draw a region first");
   state.catalog = makeCatalog();
+  capabilitiesChanged(state.catalog);
   clearScenes();
   var btn = $("search");
   btn.disabled = true;
@@ -2164,12 +2952,25 @@ async function searchScenes() {
     });
     state.scenes = scenes;
     state.days = groupByDay(scenes);
+    rebuildPresets(wantPreset);
+    addBands(Object.keys(scenes.reduce(function(a, sc) {
+      return Object.assign(a, sc.assets);
+    }, {})));
+    if (state.catalog.maxScenes && +$("maxScenes").value < state.catalog.maxScenes) {
+      $("maxScenes").value = state.catalog.maxScenes;
+    }
     renderDays();
     var ms = Math.round(performance.now() - t0);
     setStatus(scenes.length + " scenes on " + state.days.length + " days in " + ms + " ms" + (scenes.length >= (+$("maxItems").value || 300) ? " (hit max items; narrow the dates)" : "") + (state.days.length ? "\nclick a day to load it" : ""));
   } finally {
     btn.disabled = false;
   }
+  if (state.days.length === 1 && !datedDays()) return selectDay(0, true);
+}
+function datedDays() {
+  return state.days.length > 0 && state.days.every(function(d) {
+    return /^\d{4}-\d\d-\d\d$/.test(d.day);
+  });
 }
 function renderDays() {
   var box = $("days");
@@ -2316,7 +3117,7 @@ function drawTimeline() {
   }
 }
 function renderScrub() {
-  var has = state.days.length > 0;
+  var has = datedDays();
   $("scrub").classList.toggle("hide", !has);
   if (!has) {
     map.invalidateSize();
@@ -2434,16 +3235,87 @@ $("holdLim").addEventListener("change", function() {
   paint();
   writeHash();
 });
-function currentKeys() {
+var presetInfo = {};
+var DEFAULT_PRESETS = presetsFor(null, [{ assets: {
+  visual: 1,
+  red: 1,
+  green: 1,
+  blue: 1,
+  nir: 1,
+  swir16: 1,
+  swir22: 1
+} }]).filter(function(p) {
+  return p.mode !== "single";
+});
+function rebuildPresets(want) {
+  var sel = $("preset"), cur = want || sel.value;
+  var list = state.scenes.length ? presetsFor(state.catalog, state.scenes) : DEFAULT_PRESETS;
+  if (!list.length) list = DEFAULT_PRESETS;
+  sel.innerHTML = "";
+  presetInfo = {};
+  list.forEach(function(p) {
+    presetInfo[p.id] = p;
+    var o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label;
+    sel.appendChild(o);
+  });
+  if (cur && cur !== "custom" && !presetInfo[cur]) {
+    var q = parsePresetId(cur);
+    q.id = presetId(q);
+    q.label = q.keys.join(",") + " (" + q.mode + ")";
+    presetInfo[q.id] = q;
+    var o2 = document.createElement("option");
+    o2.value = q.id;
+    o2.textContent = q.label;
+    sel.appendChild(o2);
+    cur = q.id;
+  }
+  var c = document.createElement("option");
+  c.value = "custom";
+  c.textContent = "custom RGB...";
+  sel.appendChild(c);
+  sel.value = cur && (presetInfo[cur] || cur === "custom") ? cur : list[0].id;
+  presetChanged(!want && sel.value !== cur);
+}
+function currentPreset() {
   var p = $("preset").value;
-  if (p === "visual") return ["visual"];
-  if (p === "custom") return [$("bR").value, $("bG").value, $("bB").value];
-  return p.split(",");
+  if (p === "custom") return { mode: "bands", keys: [$("bR").value, $("bG").value, $("bB").value] };
+  return presetInfo[p] || parsePresetId(p);
 }
-function presetChanged() {
+function currentKeys() {
+  return currentPreset().keys;
+}
+function currentMode() {
+  return currentPreset().mode;
+}
+function presetChanged(applyDefaults) {
+  var p = currentPreset(), mode = p.mode;
   $("bands").classList.toggle("hide", $("preset").value !== "custom");
-  $("stretchbox").classList.toggle("hide", $("preset").value === "visual");
+  $("stretchbox").classList.toggle("hide", mode === "rgb" || mode === "classes");
+  $("classbox").classList.toggle("hide", mode !== "classes");
+  var single = mode === "single";
+  $("rampbox").classList.toggle("hide", !single);
+  $("jointBox").classList.toggle("hide", single);
+  Array.prototype.forEach.call(document.querySelectorAll(".rgbOnly"), function(r) {
+    r.classList.toggle("hide", single);
+  });
+  document.querySelector("th.cR").textContent = single ? "value" : "R";
+  if (applyDefaults && single) {
+    if (p.ramp) $("ramp").value = p.ramp;
+    $("hs").value = String(p.hillshade || 0);
+  }
+  if (applyDefaults) {
+    $("limits").value = "pct";
+    $("minR").value = "";
+  }
 }
+Object.keys(RAMPS).forEach(function(k) {
+  var o = document.createElement("option");
+  o.value = k;
+  o.textContent = k;
+  $("ramp").appendChild(o);
+});
 var CH = ["R", "G", "B"];
 function offsetFor(comp) {
   var m = $("offset").value;
@@ -2460,9 +3332,9 @@ function offsetNote(comp) {
   $("offNote").textContent = t;
 }
 function writeLimits(st) {
-  CH.forEach(function(c, i) {
-    $("min" + c).value = Math.round(st[i][0]);
-    $("max" + c).value = Math.round(st[i][1]);
+  CH.slice(0, st.length).forEach(function(c, i) {
+    $("min" + c).value = +st[i][0].toPrecision(5);
+    $("max" + c).value = +st[i][1].toPrecision(5);
   });
 }
 function readLimits() {
@@ -2482,8 +3354,13 @@ function pctStretch(comp, off) {
 }
 function renderParams(comp) {
   if (comp.kind === "rgb8") return {};
+  if (comp.kind === "classes") {
+    legend(comp);
+    return {};
+  }
   var off = offsetFor(comp), stretch;
   offsetNote(comp);
+  $("offBox").classList.toggle("hide", !(comp.offsetInfo && comp.offsetInfo.known) && $("offset").value === "auto");
   $("holdLim").checked = $("limits").value === "man";
   if ($("limits").value === "pct" || $("minR").value.trim() === "") {
     stretch = pctStretch(comp, off);
@@ -2491,12 +3368,38 @@ function renderParams(comp) {
   } else {
     stretch = readLimits();
   }
-  return {
+  var out = {
     stretch,
     offset: off,
     gamma: $("gamma").value / 100,
     transfer: $("curve").value
   };
+  if (comp.kind === "single") {
+    out.ramp = $("ramp").value;
+    out.hillshade = +$("hs").value;
+    if (out.hillshade && !comp.shade) comp.shade = hillshade(comp, gridGroundRes(comp.grid));
+    out.shade = comp.shade;
+  }
+  return out;
+}
+function legend(comp) {
+  var pal = classPalette(comp.classes), names = {};
+  (comp.classes || []).forEach(function(c) {
+    names[c.value] = c.label;
+  });
+  var counts = classCounts(comp), tot = counts.reduce(function(a, c) {
+    return a + c[1];
+  }, 0);
+  var box = $("legend");
+  box.innerHTML = "";
+  counts.forEach(function(c) {
+    var rgb = pal(c[0]), row = document.createElement("div");
+    var sw = document.createElement("span");
+    sw.style.cssText = "display:inline-block;width:10px;height:10px;margin-right:6px;background:rgb(" + rgb.join(",") + ")";
+    row.appendChild(sw);
+    row.appendChild(document.createTextNode((names[c[0]] || "class " + c[0]) + " (" + c[0] + "): " + (100 * c[1] / tot).toFixed(1) + "%"));
+    box.appendChild(row);
+  });
 }
 var CanvasOverlay = L.ImageOverlay.extend({
   _initImage: function() {
@@ -2528,8 +3431,16 @@ function paint() {
   state.overlay.setBounds(roiLatLngBounds(gridLonLatBounds(g)));
 }
 var CACHE_BYTES = 4e8;
+function minRes() {
+  var rs = state.scenes.map(function(sc) {
+    return sc.meta && sc.meta.res;
+  }).filter(function(r) {
+    return r > 0.5;
+  });
+  return rs.length ? Math.min.apply(null, rs) : 10;
+}
 function currentGrid() {
-  return makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 });
+  return makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: minRes() });
 }
 function cacheKey(i) {
   var d = state.days[i];
@@ -2537,7 +3448,7 @@ function cacheKey(i) {
   var g = currentGrid();
   return [
     d.day,
-    currentKeys().join(","),
+    currentMode() + ":" + currentKeys().join(","),
     g.width,
     g.height,
     g.bbox.join(","),
@@ -2545,18 +3456,20 @@ function cacheKey(i) {
   ].join("|");
 }
 function dayComposite(i, ctl, onProgress) {
-  var key = cacheKey(i), hit = state.cache.get(key);
-  if (hit) {
+  var key = cacheKey(i), hit2 = state.cache.get(key);
+  if (hit2) {
     state.cache.delete(key);
-    state.cache.set(key, hit);
-    return hit.promise;
+    state.cache.set(key, hit2);
+    return hit2.promise;
   }
-  var day = state.days[i], keys = currentKeys();
+  var day = state.days[i], keys = currentKeys(), mode = currentMode();
   var entry = { done: false, bytes: 0 };
   entry.promise = loadComposite({
     scenes: day.scenes,
     keys,
     grid: currentGrid(),
+    mode: mode === "bands" ? null : mode,
+    classes: currentPreset().classes || mode === "classes" && KNOWN_CLASSES[keys[0]] || null,
     maxScenes: +$("maxScenes").value || 6,
     signal: ctl.signal,
     onProgress
@@ -2647,7 +3560,16 @@ $("search").addEventListener("click", function() {
 $("load").addEventListener("click", function() {
   loadImagery().catch(fail);
 });
-$("preset").addEventListener("change", presetChanged);
+$("preset").addEventListener("change", function() {
+  presetChanged(true);
+  writeHash();
+});
+["ramp", "hs"].forEach(function(id) {
+  $(id).addEventListener("change", function() {
+    paint();
+    writeHash();
+  });
+});
 $("gamma").addEventListener("input", function() {
   $("gval").textContent = (this.value / 100).toFixed(1);
   paint();
@@ -2721,7 +3643,9 @@ function writeHash() {
   } else if ($("src").value === "starc") {
     h.set("store", $("starcUrl").value.trim());
     if ($("starcColl").value.trim()) h.set("scoll", $("starcColl").value.trim());
-  } else {
+  } else if ($("src").value === "vrt") h.set("vrt", $("vrtUrl").value.trim());
+  else if ($("src").value === "cog") h.set("cogs", $("cogUrls").value.trim().split(/\s+/).join(" "));
+  else {
     h.set("bucket", $("wtBucket").value.trim());
     h.set("res", $("wtRes").value);
   }
@@ -2734,10 +3658,15 @@ function writeHash() {
   h.set("preset", $("preset").value);
   if ($("preset").value === "custom") h.set("bands", currentKeys().join(","));
   if (state.dayIndex >= 0) h.set("day", state.days[state.dayIndex].day);
-  if ($("preset").value !== "visual") {
+  var pm = currentMode();
+  if (pm === "single") {
+    h.set("ramp", $("ramp").value);
+    if (+$("hs").value) h.set("hs", $("hs").value);
+  }
+  if (pm === "bands" || pm === "single") {
     h.set("lim", $("limits").value);
     if ($("limits").value === "pct") h.set("pct", $("plo").value + "," + $("phi").value);
-    else h.set("mm", CH.map(function(c) {
+    else h.set("mm", CH.slice(0, pm === "single" ? 1 : 3).map(function(c) {
       return $("min" + c).value + ":" + $("max" + c).value;
     }).join(","));
     if ($("joint").checked) h.set("joint", "1");
@@ -2755,16 +3684,20 @@ async function readHash() {
   if (h.get("scoll")) $("starcColl").value = h.get("scoll");
   if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
   if (h.get("res")) $("wtRes").value = h.get("res");
+  if (h.get("vrt")) $("vrtUrl").value = h.get("vrt");
+  if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
   if (!h.has("roi")) {
+    if (h.get("src") === "vrt" && h.get("vrt")) await readVrt(true);
+    if (h.get("src") === "cog" && h.get("cogs")) await readCogs(true);
     if (h.get("src") === "starc" && h.get("store")) await readStore(true);
     if (h.get("src") === "wildtiles") await readCube(false);
     return;
   }
   if (h.get("url")) $("stacUrl").value = h.get("url");
   if (h.get("coll")) $("coll").value = h.get("coll");
-  ["cloud", "preset"].forEach(function(k) {
-    if (h.get(k)) $(k).value = h.get(k);
-  });
+  if (h.get("cloud")) $("cloud").value = h.get("cloud");
+  if (h.get("ramp")) $("ramp").value = h.get("ramp");
+  if (h.get("hs")) $("hs").value = h.get("hs");
   ["from", "to"].forEach(function(k) {
     if (h.has(k)) $(k).value = h.get(k);
   });
@@ -2774,7 +3707,8 @@ async function readHash() {
     $("bG").value = b[1];
     $("bB").value = b[2];
   }
-  presetChanged();
+  var wantPreset = h.get("preset") || "";
+  rebuildPresets(wantPreset || null);
   if (h.get("lim")) $("limits").value = h.get("lim");
   if (h.get("pct")) {
     var pc = h.get("pct").split(",");
@@ -2796,8 +3730,9 @@ async function readHash() {
   var roi = h.get("roi").split(",").map(Number);
   setRoi(roi);
   map.fitBounds(roiLatLngBounds(roi).pad(0.1));
-  await searchScenes();
+  await searchScenes(wantPreset || null);
   if (h.get("src") === "starc") readStore(false, true).catch(fail);
+  if (h.get("src") === "vrt") readVrt(false, true).catch(fail);
   if (h.get("src") === "wildtiles") readCube(true).catch(fail);
   var want = h.get("day");
   var i = state.days.findIndex(function(d) {
@@ -2805,7 +3740,7 @@ async function readHash() {
   });
   if (i >= 0) await selectDay(i, true);
 }
-presetChanged();
+rebuildPresets();
 readHash().catch(fail);
 window.explorer = {
   X: explorer_exports,

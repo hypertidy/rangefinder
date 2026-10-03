@@ -104,6 +104,8 @@
       <option value="stac">STAC API</option>
       <option value="starc">starc store</option>
       <option value="wildtiles">wildtiles cube</option>
+      <option value="vrt">GDAL VRT mosaic</option>
+      <option value="cog">COG files (paste URLs)</option>
     </select>
     <div id="stacbox">
       <label for="stacUrl">STAC API URL</label>
@@ -150,6 +152,31 @@
         registry/BANDS.txt; the bucket itself cannot be listed</div>
     </div>
 
+    <div id="vrtbox" class="hide">
+      <label for="vrtUrl">VRT URL</label>
+      <div class="row">
+        <input id="vrtUrl" list="vrts" spellcheck="false"
+          value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/32m_dem_tiles.vrt">
+        <button id="readVrt" class="minor" style="flex:0 0 auto;width:auto;margin-top:0">read</button>
+      </div>
+      <datalist id="vrts">
+        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/32m_dem_tiles.vrt">REMA v2 32 m (Antarctica)</option>
+        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/rema/mosaics/v2.0/10m_dem_tiles.vrt">REMA v2 10 m</option>
+        <option value="https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/arcticdem/mosaics/v4.1/32m_dem_tiles.vrt">ArcticDEM v4.1 32 m</option>
+      </datalist>
+      <div id="vrtInfo" class="note">a GDAL VRT that mosaics many COGs: it is read once as the
+        index of every file and where it sits</div>
+    </div>
+    <div id="cogbox" class="hide">
+      <label for="cogUrls">COG URLs (one per line)</label>
+      <textarea id="cogUrls" rows="3" spellcheck="false"
+        style="width:100%;box-sizing:border-box;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:6px;font:12px ui-monospace,monospace;padding:6px"
+        placeholder="https://host/path/file.tif"></textarea>
+      <button id="readCogs" class="minor">read headers and zoom to them</button>
+      <div id="cogInfo" class="note">any public, CORS-enabled GeoTIFF; the header gives the
+        footprint, CRS and bands</div>
+    </div>
+
     <h2>region</h2>
     <div class="row">
       <button id="draw" class="minor">draw on map</button>
@@ -163,22 +190,15 @@
       <div><label for="to">to</label><input id="to" type="date"></div>
     </div>
     <div class="row">
-      <div><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
+      <div id="cloudBox"><label for="cloud">max cloud %</label><input id="cloud" type="number" value="40" min="0" max="100"></div>
       <div><label for="maxItems">max items</label><input id="maxItems" type="number" value="300" min="1"></div>
     </div>
-    <div class="note">leave a date blank for an open range</div>
+    <div class="note" id="dateNote">leave a date blank for an open range</div>
     <button id="search">Search scenes</button>
     <div id="days"></div>
 
     <h2>composite</h2>
-    <select id="preset">
-      <option value="visual">TCI (baked true color, fast)</option>
-      <option value="red,green,blue">true color (raw bands)</option>
-      <option value="nir,red,green">false color IR (vegetation)</option>
-      <option value="swir16,nir,red">SWIR (snow/ice vs cloud)</option>
-      <option value="swir22,swir16,nir">geology</option>
-      <option value="custom">custom...</option>
-    </select>
+    <select id="preset"></select>
     <div id="bands" class="hide">
       <div class="row">
         <div><label>R</label><select id="bR"></select></div>
@@ -186,7 +206,21 @@
         <div><label>B</label><select id="bB"></select></div>
       </div>
     </div>
+    <div id="classbox" class="hide">
+      <div id="legend" class="note"></div>
+    </div>
     <div id="stretchbox" class="hide">
+      <div id="rampbox" class="row hide">
+        <div><label for="ramp">colour ramp</label>
+          <select id="ramp"></select></div>
+        <div><label for="hs">hillshade</label>
+          <select id="hs">
+            <option value="0">off</option>
+            <option value="0.4">light</option>
+            <option value="0.6">medium</option>
+            <option value="0.85">strong</option>
+          </select></div>
+      </div>
       <div class="row">
         <div><label for="limits">limits</label>
           <select id="limits">
@@ -204,18 +238,19 @@
         <div><label for="plo">low %</label><input id="plo" type="number" value="2" min="0" max="50" step="0.5"></div>
         <div><label for="phi">high %</label><input id="phi" type="number" value="98" min="50" max="100" step="0.5"></div>
       </div>
-      <label class="row" style="margin-top:8px" title="one pair of limits from all three bands pooled, which keeps the colour balance">
+      <label id="jointBox" class="row" style="margin-top:8px" title="one pair of limits from all three bands pooled, which keeps the colour balance">
         <input type="checkbox" id="joint"> <span>same limits for all bands</span>
       </label>
       <table class="lims">
         <tr><th></th><th>min</th><th>max</th></tr>
         <tr><th class="cR">R</th><td><input id="minR" spellcheck="false"></td><td><input id="maxR" spellcheck="false"></td></tr>
-        <tr><th class="cG">G</th><td><input id="minG" spellcheck="false"></td><td><input id="maxG" spellcheck="false"></td></tr>
-        <tr><th class="cB">B</th><td><input id="minB" spellcheck="false"></td><td><input id="maxB" spellcheck="false"></td></tr>
+        <tr class="rgbOnly"><th class="cG">G</th><td><input id="minG" spellcheck="false"></td><td><input id="maxG" spellcheck="false"></td></tr>
+        <tr class="rgbOnly"><th class="cB">B</th><td><input id="minB" spellcheck="false"></td><td><input id="maxB" spellcheck="false"></td></tr>
       </table>
       <div class="note">limits fill in from the percentiles; typing one switches to manual</div>
       <label for="gamma">gamma <span id="gval">1.0</span></label>
       <input type="range" id="gamma" min="30" max="300" value="100">
+      <div id="offBox">
       <label for="offset">L2A offset</label>
       <select id="offset">
         <option value="auto">auto (from scene metadata)</option>
@@ -223,6 +258,7 @@
         <option value="0">off (stored DN)</option>
       </select>
       <div class="note" id="offNote"></div>
+      </div>
       <button id="resetStretch" class="minor">reset to 2-98% auto</button>
     </div>
     <div class="row">
@@ -363,6 +399,14 @@ $("from").value = isoDay(new Date(today.getTime() - 60 * 864e5));
 // --- source ------------------------------------------------------------------
 
 function makeCatalog() {
+  if ($("src").value === "vrt") {
+    if (!$("vrtUrl").value.trim()) throw new Error("enter the VRT URL");
+    return X.vrtCatalog({ url: $("vrtUrl").value.trim() });
+  }
+  if ($("src").value === "cog") {
+    if (!$("cogUrls").value.trim()) throw new Error("paste at least one COG URL");
+    return X.cogCatalog({ urls: $("cogUrls").value });
+  }
   if ($("src").value === "wildtiles") {
     return X.wildtilesCatalog({ bucket: $("wtBucket").value.trim(), res: +$("wtRes").value });
   }
@@ -377,14 +421,28 @@ function sourceChanged() {
   $("stacbox").classList.toggle("hide", src !== "stac");
   $("starcbox").classList.toggle("hide", src !== "starc");
   $("wtbox").classList.toggle("hide", src !== "wildtiles");
+  $("vrtbox").classList.toggle("hide", src !== "vrt");
+  $("cogbox").classList.toggle("hide", src !== "cog");
   coverLayer.clearLayers();
+  state.catalog = null;
+  capabilitiesChanged(null);
   clearScenes();
+}
+// Controls a source has no use for are hidden: cloud cover for DEMs and
+// plain files, the date range for sources without a time axis.
+function capabilitiesChanged(cat) {
+  var src = $("src").value;
+  var caps = (cat && cat.capabilities) ||
+    { cloud: src === "stac" || src === "starc", time: src !== "vrt" && src !== "cog" };
+  $("cloudBox").classList.toggle("hide", !caps.cloud);
+  $("from").parentNode.parentNode.classList.toggle("hide", !caps.time);
+  $("dateNote").classList.toggle("hide", !caps.time);
 }
 $("src").addEventListener("change", function () {
   sourceChanged();
   if ($("src").value === "wildtiles") readCube(false).catch(fail);   // three small files
 });
-["stacUrl", "coll", "wtBucket", "wtRes", "starcColl"].forEach(function (id) {
+["stacUrl", "coll", "wtBucket", "wtRes", "starcColl", "vrtUrl", "cogUrls"].forEach(function (id) {
   $(id).addEventListener("change", clearScenes);
 });
 $("starcUrl").addEventListener("change", function () { coverLayer.clearLayers(); clearScenes(); });
@@ -471,6 +529,44 @@ $("wtRegion").addEventListener("change", function () {
 $("wtRes").addEventListener("change", function () {
   if (cubeRegions.length) readCube(true).catch(fail);
 });
+
+// A VRT is its own index: read it once, outline every file, report the grid.
+async function readVrt(fit, quiet) {
+  var cat = makeCatalog();
+  if (!quiet) setStatus("reading " + cat.label + " ...");
+  var info = await cat.info();
+  coverLayer.clearLayers();
+  var style = { color: "#b39ddb", weight: 1, fill: false, opacity: 0.6 };
+  L.geoJSON({ type: "GeometryCollection", geometries: info.footprints },
+            { style: style, interactive: false }).addTo(coverLayer);
+  $("vrtInfo").textContent = info.files + " files, " + info.bands + " band(s) of " + info.dataType +
+    " at " + info.res + " (" + info.crs + ")";
+  if (fit && !state.roi) map.fitBounds(roiLatLngBounds(info.bbox));
+  if (!quiet) setStatus("VRT read: " + info.files + " files\ndraw a region over the purple tiles, then search");
+  return info;
+}
+$("readVrt").addEventListener("click", function () { readVrt(true).catch(fail); });
+async function readCogs(fit) {
+  var cat = makeCatalog();
+  setStatus("reading " + cat.label + " headers ...");
+  var info = await cat.info();
+  coverLayer.clearLayers();
+  var lines = info.files.map(function (f) {
+    if (f.error) return f.href.split("/").pop() + ": " + f.error;
+    L.rectangle(roiLatLngBounds(f.bbox), { color: "#b39ddb", weight: 1, fill: false,
+      interactive: false }).addTo(coverLayer);
+    return f.href.split("/").pop() + ": " + f.width + "x" + f.height + ", " + f.bands + " x " +
+      f.dataType + ", " + f.crs + ", " + f.levels + " level(s)" +
+      (f.tileSize ? ", " + f.tileSize.join("x") + " tiles" : "") +
+      (f.nodata !== null ? ", nodata " + f.nodata : "") + (f.date ? ", " + f.date : "");
+  });
+  $("cogInfo").textContent = lines.join("\n");
+  $("cogInfo").style.whiteSpace = "pre-wrap";
+  if (fit && info.bbox) { setRoi(info.bbox); map.fitBounds(roiLatLngBounds(info.bbox).pad(0.1)); }
+  setStatus(info.bbox ? "headers read: search to list the files" : "", info.bbox ? [] : ["no readable file"]);
+  return info;
+}
+$("readCogs").addEventListener("click", function () { readCogs(true).catch(fail); });
 
 $("readStore").addEventListener("click", function () {
   readStore(true).then(function (info) {
@@ -571,9 +667,10 @@ function clearScenes() {
   renderScrub();
 }
 
-async function searchScenes() {
+async function searchScenes(wantPreset) {
   if (!state.roi) throw new Error("draw a region first");
   state.catalog = makeCatalog();
+  capabilitiesChanged(state.catalog);
   clearScenes();
   var btn = $("search");
   btn.disabled = true;
@@ -588,6 +685,11 @@ async function searchScenes() {
     });
     state.scenes = scenes;
     state.days = X.groupByDay(scenes);
+    rebuildPresets(wantPreset);
+    addBands(Object.keys(scenes.reduce(function (a, sc) { return Object.assign(a, sc.assets); }, {})));
+    if (state.catalog.maxScenes && +$("maxScenes").value < state.catalog.maxScenes) {
+      $("maxScenes").value = state.catalog.maxScenes;
+    }
     renderDays();
     var ms = Math.round(performance.now() - t0);
     setStatus(scenes.length + " scenes on " + state.days.length + " days in " + ms + " ms" +
@@ -596,6 +698,11 @@ async function searchScenes() {
   } finally {
     btn.disabled = false;
   }
+  // a source without time has one "day": nothing to choose, so load it
+  if (state.days.length === 1 && !datedDays()) return selectDay(0, true);
+}
+function datedDays() {
+  return state.days.length > 0 && state.days.every(function (d) { return /^\d{4}-\d\d-\d\d$/.test(d.day); });
 }
 
 function renderDays() {
@@ -734,7 +841,7 @@ function drawTimeline() {
 }
 
 function renderScrub() {
-  var has = state.days.length > 0;
+  var has = datedDays();
   $("scrub").classList.toggle("hide", !has);
   if (!has) { map.invalidateSize(); return; }
   var i = state.dayIndex, d = state.days[i];
@@ -840,16 +947,71 @@ $("holdLim").addEventListener("change", function () {
 
 // --- composite ---------------------------------------------------------------
 
-function currentKeys() {
+// The composite picker lists what the source's scenes carry (presetsFor):
+// Sentinel-2 combinations when the bands are there, then every asset on its
+// own (one band through a ramp, or classes through a palette). Option values
+// are preset ids, "mode:key,key", which the permalink stores.
+var presetInfo = {};
+var DEFAULT_PRESETS = X.presetsFor(null, [{ assets: { visual: 1, red: 1, green: 1, blue: 1, nir: 1,
+                                                     swir16: 1, swir22: 1 } }])
+  .filter(function (p) { return p.mode !== "single"; });
+function rebuildPresets(want) {
+  var sel = $("preset"), cur = want || sel.value;
+  var list = state.scenes.length ? X.presetsFor(state.catalog, state.scenes) : DEFAULT_PRESETS;
+  if (!list.length) list = DEFAULT_PRESETS;
+  sel.innerHTML = "";
+  presetInfo = {};
+  list.forEach(function (p) {
+    presetInfo[p.id] = p;
+    var o = document.createElement("option");
+    o.value = p.id; o.textContent = p.label;
+    sel.appendChild(o);
+  });
+  if (cur && cur !== "custom" && !presetInfo[cur]) {   // e.g. from a permalink
+    var q = X.parsePresetId(cur);
+    q.id = X.presetId(q); q.label = q.keys.join(",") + " (" + q.mode + ")";
+    presetInfo[q.id] = q;
+    var o2 = document.createElement("option");
+    o2.value = q.id; o2.textContent = q.label;
+    sel.appendChild(o2);
+    cur = q.id;
+  }
+  var c = document.createElement("option");
+  c.value = "custom"; c.textContent = "custom RGB...";
+  sel.appendChild(c);
+  sel.value = cur && (presetInfo[cur] || cur === "custom") ? cur : list[0].id;
+  presetChanged(!want && sel.value !== cur);
+}
+function currentPreset() {
   var p = $("preset").value;
-  if (p === "visual") return ["visual"];
-  if (p === "custom") return [$("bR").value, $("bG").value, $("bB").value];
-  return p.split(",");
+  if (p === "custom") return { mode: "bands", keys: [$("bR").value, $("bG").value, $("bB").value] };
+  return presetInfo[p] || X.parsePresetId(p);
 }
-function presetChanged() {
+function currentKeys() { return currentPreset().keys; }
+function currentMode() { return currentPreset().mode; }
+function presetChanged(applyDefaults) {
+  var p = currentPreset(), mode = p.mode;
   $("bands").classList.toggle("hide", $("preset").value !== "custom");
-  $("stretchbox").classList.toggle("hide", $("preset").value === "visual");
+  $("stretchbox").classList.toggle("hide", mode === "rgb" || mode === "classes");
+  $("classbox").classList.toggle("hide", mode !== "classes");
+  var single = mode === "single";
+  $("rampbox").classList.toggle("hide", !single);
+  $("jointBox").classList.toggle("hide", single);
+  Array.prototype.forEach.call(document.querySelectorAll(".rgbOnly"), function (r) {
+    r.classList.toggle("hide", single);
+  });
+  document.querySelector("th.cR").textContent = single ? "value" : "R";
+  if (applyDefaults && single) {
+    if (p.ramp) $("ramp").value = p.ramp;
+    $("hs").value = String(p.hillshade || 0);
+  }
+  if (applyDefaults) { $("limits").value = "pct"; $("minR").value = ""; }
 }
+Object.keys(X.RAMPS).forEach(function (k) {
+  var o = document.createElement("option");
+  o.value = k; o.textContent = k;
+  $("ramp").appendChild(o);
+});
 
 // --- stretch controls ----------------------------------------------------------
 //
@@ -873,9 +1035,9 @@ function offsetNote(comp) {
   $("offNote").textContent = t;
 }
 function writeLimits(st) {
-  CH.forEach(function (c, i) {
-    $("min" + c).value = Math.round(st[i][0]);
-    $("max" + c).value = Math.round(st[i][1]);
+  CH.slice(0, st.length).forEach(function (c, i) {
+    $("min" + c).value = +st[i][0].toPrecision(5);
+    $("max" + c).value = +st[i][1].toPrecision(5);
   });
 }
 function readLimits() {
@@ -897,8 +1059,12 @@ function pctStretch(comp, off) {
 
 function renderParams(comp) {
   if (comp.kind === "rgb8") return {};
+  if (comp.kind === "classes") { legend(comp); return {}; }
   var off = offsetFor(comp), stretch;
   offsetNote(comp);
+  // the L2A offset only means something for Sentinel-2 scenes
+  $("offBox").classList.toggle("hide", !(comp.offsetInfo && comp.offsetInfo.known) &&
+                                       $("offset").value === "auto");
   $("holdLim").checked = $("limits").value === "man";
   if ($("limits").value === "pct" || $("minR").value.trim() === "") {
     stretch = pctStretch(comp, off);
@@ -906,8 +1072,32 @@ function renderParams(comp) {
   } else {
     stretch = readLimits();
   }
-  return { stretch: stretch, offset: off, gamma: $("gamma").value / 100,
-           transfer: $("curve").value };
+  var out = { stretch: stretch, offset: off, gamma: $("gamma").value / 100,
+              transfer: $("curve").value };
+  if (comp.kind === "single") {
+    out.ramp = $("ramp").value;
+    out.hillshade = +$("hs").value;
+    if (out.hillshade && !comp.shade) comp.shade = X.hillshade(comp, X.gridGroundRes(comp.grid));
+    out.shade = comp.shade;
+  }
+  return out;
+}
+// Class composites: a legend of the codes present, most common first.
+function legend(comp) {
+  var pal = X.classPalette(comp.classes), names = {};
+  (comp.classes || []).forEach(function (c) { names[c.value] = c.label; });
+  var counts = X.classCounts(comp), tot = counts.reduce(function (a, c) { return a + c[1]; }, 0);
+  var box = $("legend");
+  box.innerHTML = "";
+  counts.forEach(function (c) {
+    var rgb = pal(c[0]), row = document.createElement("div");
+    var sw = document.createElement("span");
+    sw.style.cssText = "display:inline-block;width:10px;height:10px;margin-right:6px;background:rgb(" + rgb.join(",") + ")";
+    row.appendChild(sw);
+    row.appendChild(document.createTextNode((names[c[0]] || "class " + c[0]) + " (" + c[0] + "): " +
+      (100 * c[1] / tot).toFixed(1) + "%"));
+    box.appendChild(row);
+  });
 }
 
 // An image overlay whose element is a canvas we keep, so re-stretching is a
@@ -946,12 +1136,19 @@ function paint() {
 // least recently used first out once they pass CACHE_BYTES.
 var CACHE_BYTES = 400e6;
 
-function currentGrid() { return X.makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: 10 }); }
+// Never finer than the data: the scenes' own resolution when they say
+// (metres), else Sentinel-2's 10 m.
+function minRes() {
+  var rs = state.scenes.map(function (sc) { return sc.meta && sc.meta.res; })
+    .filter(function (r) { return r > 0.5; });
+  return rs.length ? Math.min.apply(null, rs) : 10;
+}
+function currentGrid() { return X.makeGrid(state.roi, { maxDim: +$("maxpx").value, minGroundRes: minRes() }); }
 function cacheKey(i) {
   var d = state.days[i];
   if (!d || !state.roi) return "";
   var g = currentGrid();
-  return [d.day, currentKeys().join(","), g.width, g.height, g.bbox.join(","),
+  return [d.day, currentMode() + ":" + currentKeys().join(","), g.width, g.height, g.bbox.join(","),
           +$("maxScenes").value || 6].join("|");
 }
 
@@ -961,10 +1158,11 @@ function dayComposite(i, ctl, onProgress) {
     state.cache.delete(key); state.cache.set(key, hit);   // most recently used
     return hit.promise;
   }
-  var day = state.days[i], keys = currentKeys();
+  var day = state.days[i], keys = currentKeys(), mode = currentMode();
   var entry = { done: false, bytes: 0 };
   entry.promise = X.loadComposite({
-    scenes: day.scenes, keys: keys, grid: currentGrid(),
+    scenes: day.scenes, keys: keys, grid: currentGrid(), mode: mode === "bands" ? null : mode,
+    classes: currentPreset().classes || (mode === "classes" && X.KNOWN_CLASSES[keys[0]]) || null,
     maxScenes: +$("maxScenes").value || 6, signal: ctl.signal, onProgress: onProgress
   }).then(function (r) {
     if (r.composite) {
@@ -1043,7 +1241,10 @@ async function loadImagery() {
 
 $("search").addEventListener("click", function () { searchScenes().catch(fail); });
 $("load").addEventListener("click", function () { loadImagery().catch(fail); });
-$("preset").addEventListener("change", presetChanged);
+$("preset").addEventListener("change", function () { presetChanged(true); writeHash(); });
+["ramp", "hs"].forEach(function (id) {
+  $(id).addEventListener("change", function () { paint(); writeHash(); });
+});
 $("gamma").addEventListener("input", function () {
   $("gval").textContent = (this.value / 100).toFixed(1);
   paint(); writeHash();
@@ -1101,16 +1302,21 @@ function writeHash() {
     h.set("store", $("starcUrl").value.trim());
     if ($("starcColl").value.trim()) h.set("scoll", $("starcColl").value.trim());
   }
+  else if ($("src").value === "vrt") h.set("vrt", $("vrtUrl").value.trim());
+  else if ($("src").value === "cog") h.set("cogs", $("cogUrls").value.trim().split(/\s+/).join(" "));
   else { h.set("bucket", $("wtBucket").value.trim()); h.set("res", $("wtRes").value); }
   if (state.roi) h.set("roi", state.roi.map(function (v) { return v.toFixed(5); }).join(","));
   h.set("from", $("from").value); h.set("to", $("to").value); h.set("cloud", $("cloud").value);
   h.set("preset", $("preset").value);
   if ($("preset").value === "custom") h.set("bands", currentKeys().join(","));
   if (state.dayIndex >= 0) h.set("day", state.days[state.dayIndex].day);
-  if ($("preset").value !== "visual") {
+  var pm = currentMode();
+  if (pm === "single") { h.set("ramp", $("ramp").value); if (+$("hs").value) h.set("hs", $("hs").value); }
+  if (pm === "bands" || pm === "single") {
     h.set("lim", $("limits").value);
     if ($("limits").value === "pct") h.set("pct", $("plo").value + "," + $("phi").value);
-    else h.set("mm", CH.map(function (c) { return $("min" + c).value + ":" + $("max" + c).value; }).join(","));
+    else h.set("mm", CH.slice(0, pm === "single" ? 1 : 3).map(function (c) {
+      return $("min" + c).value + ":" + $("max" + c).value; }).join(","));
     if ($("joint").checked) h.set("joint", "1");
     h.set("curve", $("curve").value);
     h.set("gamma", ($("gamma").value / 100).toFixed(2));
@@ -1127,20 +1333,27 @@ async function readHash() {
   if (h.get("scoll")) $("starcColl").value = h.get("scoll");
   if (h.get("bucket")) $("wtBucket").value = h.get("bucket");
   if (h.get("res")) $("wtRes").value = h.get("res");
+  if (h.get("vrt")) $("vrtUrl").value = h.get("vrt");
+  if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
   if (!h.has("roi")) {
+    if (h.get("src") === "vrt" && h.get("vrt")) await readVrt(true);
+    if (h.get("src") === "cog" && h.get("cogs")) await readCogs(true);
     if (h.get("src") === "starc" && h.get("store")) await readStore(true);
     if (h.get("src") === "wildtiles") await readCube(false);
     return;
   }
   if (h.get("url")) $("stacUrl").value = h.get("url");
   if (h.get("coll")) $("coll").value = h.get("coll");
-  ["cloud", "preset"].forEach(function (k) { if (h.get(k)) $(k).value = h.get(k); });
+  if (h.get("cloud")) $("cloud").value = h.get("cloud");
+  if (h.get("ramp")) $("ramp").value = h.get("ramp");
+  if (h.get("hs")) $("hs").value = h.get("hs");
   ["from", "to"].forEach(function (k) { if (h.has(k)) $(k).value = h.get(k); });
   if (h.get("bands")) {
     var b = h.get("bands").split(",");
     $("bR").value = b[0]; $("bG").value = b[1]; $("bB").value = b[2];
   }
-  presetChanged();
+  var wantPreset = h.get("preset") || "";
+  rebuildPresets(wantPreset || null);
   if (h.get("lim")) $("limits").value = h.get("lim");
   if (h.get("pct")) { var pc = h.get("pct").split(","); $("plo").value = pc[0]; $("phi").value = pc[1]; }
   if (h.get("mm")) h.get("mm").split(",").forEach(function (pair, i) {
@@ -1154,15 +1367,16 @@ async function readHash() {
   var roi = h.get("roi").split(",").map(Number);
   setRoi(roi);
   map.fitBounds(roiLatLngBounds(roi).pad(0.1));
-  await searchScenes();
+  await searchScenes(wantPreset || null);
   if (h.get("src") === "starc") readStore(false, true).catch(fail);
+  if (h.get("src") === "vrt") readVrt(false, true).catch(fail);
   if (h.get("src") === "wildtiles") readCube(true).catch(fail);
   var want = h.get("day");
   var i = state.days.findIndex(function (d) { return d.day === want; });
   if (i >= 0) await selectDay(i, true);
 }
 
-presetChanged();
+rebuildPresets();
 readHash().catch(fail);
 
 // exposed for debugging and for later UI layers (time scrubber, etc.)

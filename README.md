@@ -1,11 +1,12 @@
 # rangefinder
 
-A static, server-free explorer for online satellite imagery, starting with
-Sentinel-2. Point it at a STAC API (default:
-Earth Search v1, `sentinel-2-l2a`), a published starc store or the wildtiles
-cube, draw a region on the map, search scenes, scrub through the days, and
-the page reads the COGs directly by HTTP range request and composes the
-image in the browser.
+A static, server-free explorer for online imagery and gridded data. Point it
+at a STAC API (default: Earth Search v1, `sentinel-2-l2a`), a published starc
+store, the wildtiles cube, a GDAL VRT mosaic or a list of COG URLs, draw a
+region on the map, search, scrub through the days, and the page reads the
+COGs directly by HTTP range request and composes the image in the browser:
+three bands to RGB, one band through a colour ramp (with hillshade for
+elevation), or class codes through a palette.
 
 Live: https://hypertidy.github.io/rangefinder/ (deployed from `main` by
 `.github/workflows/pages.yml`).
@@ -29,7 +30,11 @@ Two ways to open it locally:
    bucket's three well-known keys (`index/inventory.parquet`,
    `registry/tiles.parquet`, `registry/BANDS.txt`): its regions fill the
    region picker and are outlined on the map, and extra bands such as
-   `cloud` and `snow` join the band pickers.
+   `cloud` and `snow` join the band pickers. A **GDAL VRT mosaic** (default:
+   REMA v2 32 m, Antarctica) is read once as the index of every file it
+   mosaics, and the files are outlined; **COG files** takes pasted URLs and
+   reads only their headers to place them. Neither has a time axis or cloud
+   cover, so those controls hide, and a search loads straight away.
 2. **Region.** `draw on map`, then drag a box; or `use view`.
 3. **Scenes.** Date range (a blank date is an open end), max cloud,
    `Search scenes`. Results are grouped by solar day (local date at the
@@ -40,7 +45,13 @@ Two ways to open it locally:
    to step through the days, reading the next one ahead. Days already read
    come back from a cache without refetching. "hold limits" keeps the
    current min/max for every day so dates compare like for like.
-5. **Composite.** TCI (the baked 3-band Byte product, fastest) or any three
+5. **Composite.** The picker lists what the scenes actually carry: the
+   Sentinel-2 combinations when those bands are there, then every asset on
+   its own. One band goes through a colour ramp (terrain, viridis, ice,
+   bathy, ...) with optional hillshade, which elevation assets get by
+   default; class codes (S2 `scl`, or any asset with STAC
+   `classification:classes`) go through a palette with a legend. For RGB:
+   TCI (the baked 3-band Byte product, fastest) or any three
    raw bands. Limits are percentiles over the whole region (default 2-98%,
    so mosaics stay seamless) or manual per-band min/max; "same limits for
    all bands" keeps true-colour balance. Then a stretch curve (linear, sqrt,
@@ -48,7 +59,7 @@ Two ways to open it locally:
    or off). Everything re-renders the cached pixels without refetching, and
    "show imagery" (key `i`) toggles the overlay.
 6. **Output size** caps the longer side of the output grid; it is also never
-   finer than 10 m. **Max scenes** caps how many scenes one load reads.
+   finer than the data (the scenes' own resolution when they say, else 10 m). **Max scenes** caps how many scenes one load reads.
 
 The URL hash is a permalink (source, region, dates, composite, day).
 
@@ -64,8 +75,11 @@ lib/geo.js               layer 1: CRS helpers, OutputGrid, solar day
 lib/sources/stac.js      layers 1+2: STAC API binding (Catalog interface doc)
 lib/sources/starc.js     layers 1+2: starc store binding (acquisitions/products/assets)
 lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory, tile registry, BANDS.txt)
+lib/sources/vrt.js       layers 1+2: GDAL VRT mosaic (the VRT is the file index)
+lib/sources/cog.js       layers 1+2: pasted COG URLs (headers only)
 lib/cog.js               layer 3: windowed overview reads warped to the grid
-lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma -> RGBA
+lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma, ramps,
+                         hillshade, class palettes -> RGBA
 dev/                     mock STAC server, headless test, fixture and standalone builders
 docs/design.md           the original design notes (four layers, minimal path)
 docs/rgb-compositing.md  compositing controls and the L2A offset findings
@@ -102,19 +116,35 @@ import hyparquet from jsdelivr on demand. No build step.
 catalog.label, catalog.bands
 catalog.search({ bbox, datetime: "YYYY-MM-DD/YYYY-MM-DD", cloudMax, maxItems, signal })
   -> Promise<Scene[]>
-Scene = { id, day, datetime, geometry, bbox, cloud, crs, assets: { key: href }, meta }
+Scene = { id, day, datetime, geometry, bbox, cloud, crs, assets: { key: href },
+          assetMeta: { key: { band, nodata, scale, offset, dataType, classes, rgb } },
+          meta: { res, ... } }
+catalog.capabilities = { cloud, time }   (optional; hides controls a source can't use)
+catalog.presets, catalog.maxScenes       (optional)
 ```
+
+`assetMeta` is optional per key: `band` picks a band (0-based) inside a
+multi-band file, `nodata` applies when the file declares none, `classes`
+(`[{ value, label, color }]`) makes the asset a class map. A source without
+time uses the day `"undated"`. `presetsFor(catalog, scenes)` turns what the
+scenes carry into the composite picker; preset ids (`mode:key,key`, mode one
+of `rgb`, `bands`, `single`, `classes`) are what the permalink stores.
 
 Asset keys are logical band names (`visual`, `red`, `green`, `blue`, `nir`,
 `swir16`, ...). The STAC binding maps them from asset names, the `B04`-style
 names, or `eo:bands` common names, so catalogues other than Earth Search work
-when their assets are public COGs.
+when their assets are public COGs. Assets beyond those names (a DEM's
+`data`, a land cover `map`, ...) are kept under their own names, with nodata,
+scale, offset and classes from the STAC raster and classification
+extensions.
 
 **Composite / RenderParams** (see `lib/render.js`):
 
 ```
-Composite    = { grid, kind: "rgb8" | "bands", channels: [R, G, B], valid, keys }
-RenderParams = { stretch: [[lo, hi] x3], gamma, transfer: "linear" }
+Composite    = { grid, kind: "rgb8" | "bands" | "single" | "classes",
+                 channels: [R, G, B] or [V], valid, keys, classes }
+RenderParams = { stretch: [[lo, hi] x3 or x1], gamma, transfer: "linear",
+                 ramp, hillshade (0..1), shade }
 ```
 
 Extension points left for the next pieces of work:
@@ -142,8 +172,13 @@ Extension points left for the next pieces of work:
 - sentinel-cogs files use 1024 px internal tiles, so a load reads whole
   tiles at the chosen overview: a 4-scene raw RGB region is roughly 25-45 MB.
   TCI is one file per scene instead of three.
-- Catalogues that need signed URLs (Planetary Computer) or credentials (CDSE
-  S3) are not supported yet; the hrefs must be public and CORS-enabled.
+- The hrefs must be public and CORS-enabled. Not every public bucket is:
+  checked 2026-10, the Copernicus DEM (`copernicus-dem-30m`, `-90m`) and ESA
+  WorldCover buckets send no CORS headers, so Earth Search's `cop-dem-glo-30`
+  lists fine but its pixels can't be read from a page; the PGC buckets
+  (REMA, ArcticDEM) and sentinel-cogs can. Planetary Computer hrefs are
+  signed with its anonymous token API (not testable from the dev container,
+  which can't reach it); CDSE S3 needs credentials and is not supported.
 - A starc store without `footprint_wkb` matches scenes by their full MGRS
   tile, so a partial-swath scene can be listed for a region its data does
   not reach (that day then loads as "no pixels in the region").
