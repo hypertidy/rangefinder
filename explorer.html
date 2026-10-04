@@ -280,6 +280,13 @@
     <div id="classbox" class="hide">
       <div id="legend" class="note"></div>
     </div>
+    <div id="diffbox" class="hide">
+      <div class="row" style="margin-top:8px">
+        <button id="setRef" class="minor" title="keep this day's composite to compare other days against">use this day as reference</button>
+      </div>
+      <label class="row" style="margin-top:6px">
+        <input type="checkbox" id="diff"> <span id="diffLabel">show difference from reference</span></label>
+    </div>
     <div id="stretchbox" class="hide">
       <div id="rampbox" class="row hide">
         <div><label for="ramp">colour ramp</label>
@@ -6554,6 +6561,7 @@ async function setMapCrs(code, quiet) {
     state.overlay = null;
   }
   state.comp = null;
+  state.base = null;
   map.options.crs = crs;
   state.mapCrs = code;
   map.setView(c, z, { reset: true });
@@ -6592,6 +6600,7 @@ function showOcrs(code) {
 }
 function clearScenes() {
   stopPlay();
+  state.base = null;
   if (pin.ctl) {
     pin.ctl.abort();
     pin.ctl = null;
@@ -7014,6 +7023,7 @@ function presetChanged(applyDefaults) {
 })();
 var CH = ["R", "G", "B"];
 function offsetFor(comp) {
+  if (comp.isDiff) return 0;
   var m = $("offset").value;
   if (m !== "auto") return +m;
   return comp.offsetInfo ? comp.offsetInfo.offset : 0;
@@ -7046,6 +7056,10 @@ function pctStretch(comp, off) {
   var joint = $("joint").checked;
   var key = [lo, hi, joint, off].join("|");
   comp.stretchCache = comp.stretchCache || {};
+  if (!comp.stretchCache[key] && comp.isDiff) {
+    var a = autoStretch(comp, lo, hi, { offset: 0 })[0], m = Math.max(Math.abs(a[0]), Math.abs(a[1])) || 1;
+    comp.stretchCache[key] = [[-m, m]];
+  }
   return comp.stretchCache[key] || (comp.stretchCache[key] = autoStretch(comp, lo, hi, { joint, offset: off }));
 }
 function renderParams(comp) {
@@ -7140,6 +7154,11 @@ function valueLine(latlng) {
     return s;
   });
   return parts.join("  ") + at;
+}
+function showLoadStatus() {
+  var st = state.loadStatus, comp = state.comp;
+  if (!st || !comp) return;
+  setStatus(st.head + (comp.kind === "classes" ? "" : "\n" + (comp.isDiff ? comp.label + "\n" : "") + statsLines(comp)) + st.tail, st.errs);
 }
 function statsLines(comp) {
   if (comp.kind === "classes") return "";
@@ -7309,10 +7328,12 @@ async function loadImagery() {
         state.overlay = null;
       }
       state.comp = null;
+      state.base = null;
       setStatus(day.day + ": no pixels in the region", errs);
       return;
     }
-    state.comp = r.composite;
+    state.base = r.composite;
+    state.comp = shownComposite();
     state.lastLog = s.log;
     paint();
     var lv = s.levels.length ? Math.max.apply(null, s.levels) : 0;
@@ -7353,7 +7374,12 @@ async function loadImagery() {
       }).length;
       what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " + (tl.length - got) + " missing or failed" + (th ? ", " + th + " from cache" : "") + ")";
     }
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + ", chunk cache " + cacheMB() + (r.composite.kind === "classes" ? "" : "\n" + statsLines(r.composite)) + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") + (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""), errs);
+    state.loadStatus = {
+      head: day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + ", chunk cache " + cacheMB(),
+      tail: (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") + (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""),
+      errs
+    };
+    showLoadStatus();
     writeHash();
     pointAfterLoad();
   } finally {
@@ -7660,6 +7686,90 @@ $("pointCsv").addEventListener("click", function() {
     URL.revokeObjectURL(a.href);
   }, 5e3);
 });
+state.ref = null;
+function refSignature() {
+  var k = cacheKey(Math.max(0, state.dayIndex));
+  return k.split("|").slice(1).join("|");
+}
+function makeDiff(cur, ref) {
+  var n = cur.channels[0].length, a = cur.channels[0], b = ref.channels[0];
+  var oa = offsetFor(cur), ob = offsetFor(ref);
+  var out = new Float32Array(n), valid = new Uint8Array(n);
+  for (var i = 0; i < n; i++) {
+    if (!cur.valid[i] || !ref.valid[i]) {
+      out[i] = NaN;
+      continue;
+    }
+    var d = a[i] + oa - (b[i] + ob);
+    if (d === d) {
+      out[i] = d;
+      valid[i] = 1;
+    } else out[i] = NaN;
+  }
+  var key = (cur.keys || [])[0] || "value";
+  return {
+    grid: cur.grid,
+    kind: "single",
+    channels: [out],
+    valid,
+    keys: [key],
+    scenes: cur.scenes,
+    isDiff: true,
+    offsetInfo: { offset: 0, known: false },
+    label: "difference: " + key + " on this day minus " + state.ref.day
+  };
+}
+function shownComposite() {
+  var base = state.base;
+  var ok = !!(base && state.ref && base.kind === "single" && state.ref.sig === refSignature());
+  $("diffbox").classList.toggle("hide", !base || base.kind !== "single");
+  $("diffLabel").textContent = state.ref ? "show difference from " + state.ref.day + (ok ? "" : " (needs the same band, region and grid)") : "show difference from reference";
+  $("diff").disabled = !ok;
+  if (!ok || !$("diff").checked) return base;
+  return makeDiff(base, state.ref.comp);
+}
+var diffRamp = null;
+function diffChanged() {
+  if ($("diff").checked && !diffRamp) {
+    diffRamp = $("ramp").value;
+    $("ramp").value = "vik";
+    $("limits").value = "pct";
+    $("minR").value = "";
+  } else if (!$("diff").checked && diffRamp) {
+    $("ramp").value = diffRamp;
+    diffRamp = null;
+    $("limits").value = "pct";
+    $("minR").value = "";
+  }
+  state.comp = shownComposite();
+  paint();
+  showLoadStatus();
+  writeHash();
+}
+$("setRef").addEventListener("click", function() {
+  if (!state.base || state.dayIndex < 0) return;
+  state.ref = { comp: state.base, day: state.days[state.dayIndex].day, sig: refSignature() };
+  state.comp = shownComposite();
+  writeHash();
+});
+$("diff").addEventListener("change", diffChanged);
+async function restoreRef(day, on, keepRamp) {
+  var i = state.days.findIndex(function(d) {
+    return d.day === day;
+  });
+  if (i < 0) return;
+  var r = await dayComposite(i, new AbortController());
+  if (!r.composite) return;
+  state.ref = { comp: r.composite, day, sig: refSignature() };
+  $("diff").checked = !!on;
+  if (on && !diffRamp) {
+    diffRamp = $("ramp").value;
+    if (!keepRamp) $("ramp").value = "vik";
+  }
+  state.comp = shownComposite();
+  paint();
+  showLoadStatus();
+}
 function exportBase() {
   var comp = state.comp, d = state.days[state.dayIndex];
   var day = d ? d.day : "undated";
@@ -7681,7 +7791,8 @@ function exportExtra(comp) {
     rangefinder_crs: comp.grid.crs + " (" + crsProvenance(comp.grid.crs) + ")",
     rangefinder_offset: off[0] ? String(off[0]) + " added to stored values (" + $("offset").value + ")" : "none",
     rangefinder_valid_pixels: st.valid + "/" + st.pixels,
-    rangefinder_exported: (/* @__PURE__ */ new Date()).toISOString()
+    rangefinder_exported: (/* @__PURE__ */ new Date()).toISOString(),
+    rangefinder_values: comp.isDiff ? comp.label + " (offset-corrected values)" : "stored values"
   };
 }
 function exportOpts(comp) {
@@ -7720,6 +7831,10 @@ $("expTif").addEventListener("click", function() {
 $("expVrt").addEventListener("click", function() {
   var comp = needComp();
   if (!comp) return;
+  if (comp.isDiff) {
+    $("expNote").textContent = "a difference of two days has no single set of sources; export the GeoTIFF, or each day's VRT";
+    return;
+  }
   try {
     var xml = sourceVrt(comp, exportOpts(comp));
     download(new Blob([xml], { type: "application/xml" }), exportBase() + ".vrt");
@@ -8080,6 +8195,10 @@ function writeHash() {
   h.set("cloud", $("cloud").value);
   h.set("preset", $("preset").value);
   if ($("follow").checked) h.set("follow", "1");
+  if (state.ref) {
+    h.set("ref", state.ref.day);
+    if ($("diff").checked) h.set("diff", "1");
+  }
   if ($("preset").value === "custom") h.set("bands", currentKeys().join(","));
   if (state.dayIndex >= 0) h.set("day", state.days[state.dayIndex].day);
   var pm = currentMode();
@@ -8192,6 +8311,7 @@ async function readHash() {
     return d.day === want;
   });
   if (i >= 0) await selectDay(i, true);
+  if (h.get("ref")) await restoreRef(h.get("ref"), h.get("diff") === "1", h.has("ramp"));
 }
 rebuildPresets();
 readHash().catch(fail);

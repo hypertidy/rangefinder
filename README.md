@@ -100,6 +100,11 @@ Two ways to open it locally:
    for data such as chlorophyll), gamma, and the L2A -1000 offset (auto from scene metadata, always,
    or off). Everything re-renders the cached pixels without refetching, and
    "show imagery" (key `i`) toggles the overlay.
+   For one band, `use this day as reference` keeps the current day's
+   composite, and `show difference` then shows each day minus the
+   reference (offset-corrected values, a diverging ramp, limits symmetric
+   about zero). The readout, statistics and GeoTIFF export follow the
+   difference; the permalink keeps it (`ref`, `diff`).
 6. **Inspect tiles.** For a tile server: `grid` draws the tile grid of the
    chosen level over the map view in the server's own CRS (a polar
    pyramid shows as the curved lattice it is), with no requests; `probe`
