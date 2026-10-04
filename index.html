@@ -765,6 +765,7 @@ $("readCogs").addEventListener("click", function () { readCogs(true).catch(fail)
 var GIBS = "https://gibs.earthdata.nasa.gov/wmts/";
 var SCOGS = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/55/G/EN/2025/1/";
 var PGC = "https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/";
+var VIRT = "https://raw.githubusercontent.com/mdsumner/virtualized/refs/heads/main/";
 var EXAMPLES = {
   tiles: [
     ["AWS terrain tiles (terrarium elevation, XYZ)", "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
@@ -782,7 +783,10 @@ var EXAMPLES = {
       SCOGS + "S2A_55GEN_20250109_0_L2A/TCI.tif"],
     ["DEA water observations frequency 1986-2023, Tasmania (Australian Albers)",
      "https://dea-public-data.s3.ap-southeast-2.amazonaws.com/derivative/ga_ls_wo_fq_myear_3/1-6-0/x41/y08/1986--P37Y/ga_ls_wo_fq_myear_3_x41y08_1986--P37Y_final_frequency.tif"],
-    ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"]
+    ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"],
+    ["GEBCO 2026 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif"],
+    ["GEBCO 2025 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2025.tif"],
+    ["GEBCO 2024 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2024.tif"]
   ],
   vrt: [
     ["REMA 2 m with overviews to 1 km (Antarctica; the level follows the region size)",
@@ -794,7 +798,16 @@ var EXAMPLES = {
   zarr: [
     ["MUR SST, daily, 0.01 degree, 2002-2020 (AWS)", "https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1"],
     ["ITS_LIVE ice velocity cube, West Antarctica (EPSG:3031; chunked for time series, so draw a small region)",
-     "https://its-live-data.s3.amazonaws.com/datacubes/v2-updated-october2024/S70W060/ITS_LIVE_vel_EPSG3031_G0120_X-1050000_Y450000.zarr"]
+     "https://its-live-data.s3.amazonaws.com/datacubes/v2-updated-october2024/S70W060/ITS_LIVE_vel_EPSG3031_G0120_X-1050000_Y450000.zarr"],
+    // BRAN2023 (CSIRO Bluelink reanalysis) as Kerchunk Parquet references
+    // to the NetCDF files on NCI's THREDDS server (mdsumner/virtualized)
+    ["BRAN2023 ocean temperature, daily 2010-2024, 51 depths (Kerchunk Parquet; NetCDF on NCI THREDDS)", VIRT + "remote/ocean_temp_2023.parq"],
+    ["BRAN2023 salinity, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_salt_2023.parq"],
+    ["BRAN2023 sea surface height eta_t, daily (Kerchunk Parquet)", VIRT + "remote/ocean_eta_t_2023.parq"],
+    ["BRAN2023 mixed layer depth, daily (Kerchunk Parquet)", VIRT + "remote/ocean_mld_2023.parq"],
+    ["BRAN2023 eastward velocity u, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_u_2023.parq"],
+    ["BRAN2023 northward velocity v, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_v_2023.parq"],
+    ["BRAN2023 ocean temperature, built with R/rhdf5 (Kerchunk Parquet)", VIRT + "zarr/ocean_temp.zarr"]
   ]
 };
 // The picker shows the entry whose URL is in the source's URL field (and

@@ -39,7 +39,8 @@ Two ways to open it locally:
    no coarser than the output pixel, so a whole-continent region reads a
    coarse mosaic and a small one reads the full-resolution tiles (files in
    Git LFS are skipped, since GitHub does not serve them to web pages);
-   **COG files** takes pasted URLs and
+   **COG files** takes pasted URLs (common files include GEBCO 2024-2026
+   on source.coop) and
    reads only their headers to place them. Neither has a time axis or cloud
    cover, so those controls hide, and a search loads straight away. A **tile
    server** is an XYZ template (`{z}/{x}/{y}`, `{-y}`, `{q}`, `{s}`) or a
@@ -280,6 +281,16 @@ design:
   https endpoints. Without a `.zmetadata` of its own, one is built from
   the inline metadata so the variables list. HDF5 shuffle + zlib come
   through zarrita's codecs.
+- A URL ending in `.parq` or `.parquet` (or a directory whose
+  `.zmetadata` has `record_size`) is a Kerchunk Parquet reference store:
+  `<var>/refs.<n>.parq` files with `path`, `offset`, `size`, `raw`
+  columns, one row per chunk in C order. Only the file holding a chunk is
+  read (hyparquet, with hyparquet-compressors for ZSTD), and the last 12
+  are kept. One-element attribute arrays (as R writers make them) are
+  unwrapped and bare `NaN` in the JSON is tolerated.
+- The "common stores" picker has BRAN2023 (temp, salt, eta, mld, u, v as
+  Kerchunk Parquet from mdsumner/virtualized, plus one Zarr build). Their
+  chunks are on NCI THREDDS, which must allow cross-origin reads.
 - Dimensions come from `_ARRAY_DIMENSIONS` (v2) or `dimension_names` (v3).
   x, y and time are recognised by name or CF attributes (units
   `degrees_east` / `... since ...`, `axis`, `standard_name`). Every other

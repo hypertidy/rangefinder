@@ -7,3 +7,4 @@ dev/fixtures/wt/
 dev/zarrita.esm.js
 dev/fixtures/zarr4d/
 dev/fixtures/refs/
+dev/hyparquet-compressors.esm.js

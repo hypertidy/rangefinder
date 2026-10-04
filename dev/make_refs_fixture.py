@@ -1,7 +1,8 @@
 """Write a small NetCDF-4 style HDF5 file and its Kerchunk references.
 
-python3 make_refs_fixture.py   -> fixtures/refs/sst.h5, sst.refs.json
-Needs h5py and kerchunk (pip install h5py kerchunk); dev only.
+python3 make_refs_fixture.py   -> fixtures/refs/sst.h5, sst.refs.json, sst.parq/
+Needs h5py, kerchunk, pandas and pyarrow (pip install h5py kerchunk pandas
+pyarrow fastparquet); dev only.
 
 sst[time=4, lat=30, lon=40] int16, chunked 1x15x20, shuffle + gzip,
 scale_factor 0.01, add_offset 273.15, _FillValue -32768 over a "land"
@@ -43,4 +44,11 @@ with open(path, "rb") as fh:
     refs = SingleHdf5ToZarr(fh, "http://localhost:8765/refs/sst.h5", inline_threshold=20).translate()
 with open(os.path.join(OUT, "sst.refs.json"), "w") as fh:
     json.dump(refs, fh)
-print("wrote", path, "and sst.refs.json:", len(refs["refs"]), "refs")
+# the same references as Kerchunk Parquet: a directory with .zmetadata and
+# <var>/refs.<n>.parq, 5 records per file so a variable spans several files
+from kerchunk.df import refs_to_dataframe
+import shutil
+pq_dir = os.path.join(OUT, "sst.parq")
+shutil.rmtree(pq_dir, ignore_errors=True)
+refs_to_dataframe(refs, pq_dir, record_size=5)
+print("wrote", path, "sst.refs.json (", len(refs["refs"]), "refs ) and sst.parq/")

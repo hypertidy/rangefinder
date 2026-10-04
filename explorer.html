@@ -3266,7 +3266,7 @@ function sourceVrt(comp, opts) {
     var feats = scenes.map(function(s, p) {
       var a = s.assets[key], href;
       var m = s.assetMeta && s.assetMeta[key] || {};
-      if (a && a.kind === "zarr" && /\.json(\?|#|$)/i.test(a.url)) {
+      if (a && a.kind === "zarr" && !m.gdal) {
         throw new Error("Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)");
       }
       if (a && a.kind === "zarr" && m.gdal) {
@@ -3844,7 +3844,10 @@ function countingStore(z, url) {
   return s;
 }
 function isReferenceUrl(url) {
-  return /\.json(\?|#|$)/i.test(String(url || ""));
+  return /\.json(\?|#|$)/i.test(String(url || "")) || isParquetRefs(url);
+}
+function isParquetRefs(url) {
+  return /\.parq(uet)?\/?(\?|#|$)/i.test(String(url || ""));
 }
 function httpsOf(u, base) {
   var m = /^s3a?:\/\/([^/]+)\/(.*)$/.exec(u);
@@ -3852,6 +3855,19 @@ function httpsOf(u, base) {
   m = /^(gs|gcs):\/\/([^/]+)\/(.*)$/.exec(u);
   if (m) return "https://storage.googleapis.com/" + m[2] + "/" + m[3];
   return secureUrl(new URL(u, base).href);
+}
+async function fetchRef(target, init) {
+  try {
+    return await fetch(target, init);
+  } catch (e) {
+    if (e && e.name === "AbortError") throw e;
+    var host = target;
+    try {
+      host = new URL(target).host;
+    } catch (e2) {
+    }
+    throw new Error("could not fetch from " + host + " (offline, or the server does not allow cross-origin reads)");
+  }
 }
 function b64bytes(s) {
   var bin = atob(s), out = new Uint8Array(bin.length);
@@ -3861,7 +3877,7 @@ function b64bytes(s) {
 async function referenceStore(url) {
   var r = await fetch(url);
   if (!r.ok) throw new Error("reference JSON: HTTP " + r.status + " for " + url);
-  var spec = await r.json();
+  var spec = laxJson(await r.text());
   var refs = spec.refs || spec, templates = spec.templates || {};
   if (spec.gen && spec.gen.length) throw new Error('reference JSON uses "gen" ranges, which are not supported');
   delete refs.version;
@@ -3896,7 +3912,7 @@ async function referenceStore(url) {
     }
     var target = httpsOf(fill(v[0]), url), headers = {};
     if (v.length >= 3) headers.Range = "bytes=" + v[1] + "-" + (v[1] + v[2] - 1);
-    var res = await fetch(target, { headers, signal: opts && opts.signal });
+    var res = await fetchRef(target, { headers, signal: opts && opts.signal });
     if (res.status === 404) return void 0;
     if (!res.ok) throw new Error("HTTP " + res.status + " for " + target);
     var buf = new Uint8Array(await res.arrayBuffer());
@@ -3904,7 +3920,119 @@ async function referenceStore(url) {
     bytes2.set(key0, buf.byteLength);
     return buf;
   }
-  return { get, bytes: bytes2, keys: Object.keys(refs) };
+  return { get, bytes: bytes2, keys: Object.keys(refs), refs: "kerchunk-json" };
+}
+var HYPARQUET = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
+var COMPRESSORS = "https://cdn.jsdelivr.net/npm/hyparquet-compressors@1/+esm";
+var hpPromise = null;
+function hyparquet() {
+  if (!hpPromise) {
+    hpPromise = Promise.all([import(HYPARQUET), import(COMPRESSORS).catch(function() {
+      return null;
+    })]).then(function(m) {
+      return { hp: m[0], compressors: m[1] && m[1].compressors };
+    });
+    hpPromise.catch(function() {
+      hpPromise = null;
+    });
+  }
+  return hpPromise;
+}
+function laxJson(t) {
+  try {
+    return JSON.parse(t);
+  } catch (e) {
+    return JSON.parse(t.replace(/([:\[,]\s*)(-?Infinity|NaN)(?=\s*[,}\]])/g, '$1"$2"'));
+  }
+}
+async function parquetRefStore(url, zm) {
+  var base = url.replace(/\/+$/, "");
+  if (!zm) {
+    var r = await fetch(base + "/.zmetadata");
+    if (!r.ok) throw new Error("Kerchunk Parquet: HTTP " + r.status + " for " + base + "/.zmetadata");
+    zm = laxJson(await r.text());
+  }
+  var meta = zm.metadata || {}, rs = +zm.record_size || 1e5;
+  Object.keys(meta).forEach(function(k) {
+    if (typeof meta[k] === "string") {
+      try {
+        meta[k] = JSON.parse(meta[k]);
+      } catch (e) {
+      }
+    }
+    if (/\.zattrs$/.test(k) && meta[k] && typeof meta[k] === "object") {
+      Object.keys(meta[k]).forEach(function(a) {
+        var v = meta[k][a];
+        if (a !== "_ARRAY_DIMENSIONS" && Array.isArray(v) && v.length === 1 && typeof v[0] !== "object") meta[k][a] = v[0];
+      });
+    }
+  });
+  var enc = new TextEncoder(), dec = new TextDecoder(), bytes2 = /* @__PURE__ */ new Map();
+  var consolidated = enc.encode(JSON.stringify({ zarr_consolidated_format: 1, metadata: meta }));
+  var files = /* @__PURE__ */ new Map(), FILES_KEPT = 12;
+  function rowsOf(file) {
+    if (files.has(file)) {
+      var hit2 = files.get(file);
+      files.delete(file);
+      files.set(file, hit2);
+      return hit2;
+    }
+    var p = (async function() {
+      var h = await hyparquet();
+      var buf = await h.hp.asyncBufferFromUrl({ url: file });
+      return h.hp.parquetReadObjects({
+        file: buf,
+        columns: ["path", "offset", "size", "raw"],
+        utf8: false,
+        compressors: h.compressors || void 0
+      });
+    })();
+    p.catch(function() {
+      files.delete(file);
+    });
+    files.set(file, p);
+    while (files.size > FILES_KEPT) files.delete(files.keys().next().value);
+    return p;
+  }
+  function text2(v) {
+    return v === null || v === void 0 ? null : typeof v === "string" ? v : dec.decode(v);
+  }
+  async function get(key0, opts) {
+    var key = String(key0).replace(/^\/+/, "");
+    if (key === ".zmetadata") return consolidated;
+    if (/(^|\/)\.z(array|attrs|group)$/.test(key)) {
+      return meta[key] !== void 0 ? enc.encode(JSON.stringify(meta[key])) : void 0;
+    }
+    var slash = key.lastIndexOf("/"), name = key.slice(0, slash), ck = key.slice(slash + 1);
+    var za = meta[name + "/.zarray"];
+    if (!za) return void 0;
+    var sep = za.dimension_separator || ".";
+    var idx = ck === "0" && !za.shape.length ? [] : ck.split(sep).map(Number);
+    var flat = 0;
+    for (var d = 0; d < za.shape.length; d++) {
+      flat = flat * Math.ceil(za.shape[d] / za.chunks[d]) + (idx[d] || 0);
+    }
+    var rows = await rowsOf(base + "/" + name + "/refs." + Math.floor(flat / rs) + ".parq");
+    var row = rows[flat % rs];
+    if (!row) return void 0;
+    if (row.raw !== null && row.raw !== void 0) {
+      var rb = typeof row.raw === "string" ? enc.encode(row.raw) : new Uint8Array(row.raw);
+      bytes2.set(key0, rb.byteLength);
+      return rb;
+    }
+    var path = text2(row.path);
+    if (!path) return void 0;
+    var target = httpsOf(path, base + "/"), headers = {}, size = Number(row.size), off = Number(row.offset);
+    if (size > 0) headers.Range = "bytes=" + off + "-" + (off + size - 1);
+    var res = await fetchRef(target, { headers, signal: opts && opts.signal });
+    if (res.status === 404) return void 0;
+    if (!res.ok) throw new Error("HTTP " + res.status + " for " + target);
+    var b = new Uint8Array(await res.arrayBuffer());
+    if (size > 0 && res.status === 200 && b.byteLength > size) b = b.subarray(off, off + size);
+    bytes2.set(key0, b.byteLength);
+    return b;
+  }
+  return { get, bytes: bytes2, refs: "kerchunk-parquet" };
 }
 var datasets = /* @__PURE__ */ new Map();
 function openDataset(url) {
@@ -3912,7 +4040,16 @@ function openDataset(url) {
   if (!datasets.has(url)) {
     var p = (async function() {
       var z = await zarrita();
-      var counting = isReferenceUrl(url) ? await referenceStore(url) : countingStore(z, url);
+      var counting = isParquetRefs(url) ? await parquetRefStore(url) : isReferenceUrl(url) ? await referenceStore(url) : null;
+      if (!counting) {
+        var zm = null;
+        try {
+          var zr = await fetch(url + "/.zmetadata");
+          if (zr.ok) zm = laxJson(await zr.text());
+        } catch (e) {
+        }
+        counting = zm && zm.record_size ? await parquetRefStore(url, zm) : countingStore(z, url);
+      }
       var store = await z.withMaybeConsolidatedMetadata(counting);
       var paths = store.contents ? store.contents().filter(function(c) {
         return c.kind === "array";
@@ -3931,6 +4068,7 @@ function openDataset(url) {
         counting,
         paths,
         rootAttrs,
+        refs: counting.refs || false,
         arrays: /* @__PURE__ */ new Map(),
         vars: /* @__PURE__ */ new Map()
       };
@@ -4184,10 +4322,10 @@ function describe(ds, name, opts) {
         wrap,
         extent: ext,
         bbox,
-        scale: a.scale_factor !== void 0 ? +a.scale_factor : 1,
-        offset: a.add_offset !== void 0 ? +a.add_offset : 0,
+        scale: a.scale_factor !== void 0 && a.scale_factor !== null ? +a.scale_factor : 1,
+        offset: a.add_offset !== void 0 && a.add_offset !== null ? +a.add_offset : 0,
         fill: fill === null || fill === void 0 || fill === "NaN" ? null : Number(fill),
-        missing: a.missing_value !== void 0 ? Number(a.missing_value) : null,
+        missing: a.missing_value !== void 0 && a.missing_value !== null ? Number(a.missing_value) : null,
         times,
         units: a.units || "",
         longName: a.long_name || a.standard_name || "",
@@ -4520,7 +4658,7 @@ function zarrCatalog(opts) {
           href: url + "#" + key + "@" + i + (selTag ? "[" + selTag + "]" : "")
         };
         meta[key] = v.units ? { unit: v.units } : {};
-        meta[key].gdal = {
+        if (!c.ds.refs) meta[key].gdal = {
           slice: v.dims.map(function(d, j) {
             return j === v.xi || j === v.yi ? null : j === v.ti ? Math.max(0, i) : at[j];
           }).filter(function(x) {
@@ -4786,7 +4924,7 @@ async function listCollections(url, signal) {
 }
 
 // lib/sources/starc.js
-var HYPARQUET = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
+var HYPARQUET2 = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
 var TABLES = ["acquisitions", "products", "assets", "queries"];
 var COLUMNS = {
   acquisitions: [
@@ -4811,15 +4949,15 @@ var COLUMNS = {
   ],
   assets: ["product_id", "asset_key", "href", "media_type"]
 };
-var hpPromise = null;
-function hyparquet() {
-  if (!hpPromise) {
-    hpPromise = import(HYPARQUET);
-    hpPromise.catch(function() {
-      hpPromise = null;
+var hpPromise2 = null;
+function hyparquet2() {
+  if (!hpPromise2) {
+    hpPromise2 = import(HYPARQUET2);
+    hpPromise2.catch(function() {
+      hpPromise2 = null;
     });
   }
-  return hpPromise;
+  return hpPromise2;
 }
 function trimSlash2(u) {
   return String(u).trim().replace(/\/+$/, "");
@@ -4949,7 +5087,7 @@ function num2(v) {
 }
 function readFile(f, want) {
   return cached2(fileCache, f.url + "|" + want.join(","), async function() {
-    var hp = await hyparquet();
+    var hp = await hyparquet2();
     var file = await hp.asyncBufferFromUrl({ url: f.url });
     var md = await hp.parquetMetadataAsync(file);
     var have = md.schema.slice(1).map(function(s) {
@@ -5299,7 +5437,7 @@ var BANDS = [
   "aot",
   "wvp"
 ];
-var HYPARQUET2 = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
+var HYPARQUET3 = "https://cdn.jsdelivr.net/npm/hyparquet@1/+esm";
 function parseTileId(id) {
   var m = /^(\d{2})S_R(\d{4})_(\d{4})_(\d{4})$/.exec(String(id).trim());
   if (!m) throw new Error("bad tile id: " + id);
@@ -5359,7 +5497,7 @@ function wildtilesCatalog(opts) {
     };
   }
   var loadInventory = once(async function() {
-    var hp = await import(HYPARQUET2);
+    var hp = await import(HYPARQUET3);
     var file = await hp.asyncBufferFromUrl({ url: bucket + "/index/inventory.parquet" });
     var rows = await hp.parquetReadObjects({ file, columns: ["tile_id", "band", "solarday"] });
     var idx = /* @__PURE__ */ new Map();
@@ -5380,7 +5518,7 @@ function wildtilesCatalog(opts) {
     return idx;
   });
   var loadRegistry = once(async function() {
-    var hp = await import(HYPARQUET2);
+    var hp = await import(HYPARQUET3);
     var file;
     try {
       file = await hp.asyncBufferFromUrl({ url: bucket + "/registry/tiles.parquet" });
@@ -6155,6 +6293,7 @@ $("readCogs").addEventListener("click", function() {
 var GIBS = "https://gibs.earthdata.nasa.gov/wmts/";
 var SCOGS = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/55/G/EN/2025/1/";
 var PGC = "https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/";
+var VIRT = "https://raw.githubusercontent.com/mdsumner/virtualized/refs/heads/main/";
 var EXAMPLES = {
   tiles: [
     ["AWS terrain tiles (terrarium elevation, XYZ)", "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
@@ -6173,7 +6312,10 @@ var EXAMPLES = {
       "DEA water observations frequency 1986-2023, Tasmania (Australian Albers)",
       "https://dea-public-data.s3.ap-southeast-2.amazonaws.com/derivative/ga_ls_wo_fq_myear_3/1-6-0/x41/y08/1986--P37Y/ga_ls_wo_fq_myear_3_x41y08_1986--P37Y_final_frequency.tif"
     ],
-    ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"]
+    ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"],
+    ["GEBCO 2026 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif"],
+    ["GEBCO 2025 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2025.tif"],
+    ["GEBCO 2024 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2024.tif"]
   ],
   vrt: [
     [
@@ -6189,7 +6331,16 @@ var EXAMPLES = {
     [
       "ITS_LIVE ice velocity cube, West Antarctica (EPSG:3031; chunked for time series, so draw a small region)",
       "https://its-live-data.s3.amazonaws.com/datacubes/v2-updated-october2024/S70W060/ITS_LIVE_vel_EPSG3031_G0120_X-1050000_Y450000.zarr"
-    ]
+    ],
+    // BRAN2023 (CSIRO Bluelink reanalysis) as Kerchunk Parquet references
+    // to the NetCDF files on NCI's THREDDS server (mdsumner/virtualized)
+    ["BRAN2023 ocean temperature, daily 2010-2024, 51 depths (Kerchunk Parquet; NetCDF on NCI THREDDS)", VIRT + "remote/ocean_temp_2023.parq"],
+    ["BRAN2023 salinity, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_salt_2023.parq"],
+    ["BRAN2023 sea surface height eta_t, daily (Kerchunk Parquet)", VIRT + "remote/ocean_eta_t_2023.parq"],
+    ["BRAN2023 mixed layer depth, daily (Kerchunk Parquet)", VIRT + "remote/ocean_mld_2023.parq"],
+    ["BRAN2023 eastward velocity u, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_u_2023.parq"],
+    ["BRAN2023 northward velocity v, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_v_2023.parq"],
+    ["BRAN2023 ocean temperature, built with R/rhdf5 (Kerchunk Parquet)", VIRT + "zarr/ocean_temp.zarr"]
   ]
 };
 function setupPick(id, list, apply, field) {

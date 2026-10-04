@@ -11,6 +11,7 @@ const map = {
   "proj4.min.js": NM + "proj4/dist/proj4.js",
   "geotiff.min.js": NM + "geotiff/dist-browser/geotiff.js",
   "hyparquet@1/+esm": process.cwd() + "/hyparquet.esm.js",
+  "hyparquet-compressors@1/+esm": process.cwd() + "/hyparquet-compressors.esm.js",
   "zarrita@0.7/+esm": process.cwd() + "/zarrita.esm.js",
 };
 const hash = process.argv[2] || "";
