@@ -350,6 +350,18 @@
 
     <div id="status">ready</div>
 
+    <h2>point</h2>
+    <div class="note" id="pointNote">click the image to pin a point and plot its values through the days</div>
+    <div id="pointBox" class="hide">
+      <svg id="pointChart" width="100%" height="150" style="display:block;margin-top:6px"></svg>
+      <div class="row" style="margin-top:6px">
+        <button id="pointMore" class="minor">read all days</button>
+        <button id="pointStop" class="minor">stop</button>
+        <button id="pointCsv" class="minor">csv</button>
+        <button id="pointClear" class="minor">clear</button>
+      </div>
+    </div>
+
     <h2>inspect tiles</h2>
     <div id="inspTiles" class="hide">
       <div class="row">
@@ -988,8 +1000,10 @@ function boxOf(a, b) {
 }
 
 var drawing = null;
+var drawEndedAt = 0;
 function endDraw() {
   drawing = null;
+  drawEndedAt = Date.now();
   map.dragging.enable(); map.boxZoom.enable();
   $("map").classList.remove("drawing");
   $("draw").classList.remove("on");
@@ -1131,6 +1145,7 @@ function showOcrs(code) {
 
 function clearScenes() {
   stopPlay();
+  if (pin.ctl) { pin.ctl.abort(); pin.ctl = null; }
   if (state.prefetch) { state.prefetch.abort(); state.prefetch = null; }
   state.scenes = []; state.days = []; state.dayIndex = -1;
   state.cache.clear(); state.cacheBytes = 0;
@@ -1706,6 +1721,13 @@ function cacheKey(i) {
           +$("maxScenes").value || 6].join("|");
 }
 
+// What loadComposite needs for one day on a grid, from the current preset.
+function compositeArgs(day, grid, signal, onProgress) {
+  var keys = currentKeys(), mode = currentMode();
+  return { scenes: day.scenes, keys: keys, grid: grid, mode: mode === "bands" ? null : mode,
+           classes: currentPreset().classes || (mode === "classes" && X.KNOWN_CLASSES[keys[0]]) || null,
+           maxScenes: +$("maxScenes").value || 6, signal: signal, onProgress: onProgress };
+}
 function dayComposite(i, ctl, onProgress) {
   var key = cacheKey(i), hit = state.cache.get(key);
   // a read still in flight for an aborted load would only hand back "Aborted"
@@ -1716,11 +1738,7 @@ function dayComposite(i, ctl, onProgress) {
   }
   var day = state.days[i], keys = currentKeys(), mode = currentMode();
   var entry = { done: false, bytes: 0, signal: ctl.signal };
-  entry.promise = X.loadComposite({
-    scenes: day.scenes, keys: keys, grid: currentGrid(), mode: mode === "bands" ? null : mode,
-    classes: currentPreset().classes || (mode === "classes" && X.KNOWN_CLASSES[keys[0]]) || null,
-    maxScenes: +$("maxScenes").value || 6, signal: ctl.signal, onProgress: onProgress
-  }).then(function (r) {
+  entry.promise = X.loadComposite(compositeArgs(day, currentGrid(), ctl.signal, onProgress)).then(function (r) {
     if (r.composite) {
       r.composite.offsetInfo = X.scenesOffset(day.scenes.filter(function (sc) {
         return keys.every(function (k) { return sc.assets[k]; });
@@ -1823,10 +1841,223 @@ async function loadImagery() {
       (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") +
       (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""), errs);
     writeHash();
+    pointAfterLoad();
   } finally {
     if (state.loading === ctl) { state.loading = null; $("load").disabled = false; }
   }
 }
+
+// --- point series ------------------------------------------------------------------
+//
+// Click the image to pin a point; its value is read for every searched day
+// and plotted on the days' time axis. A day already composed is read from
+// its cached composite; any other day reads just that one output pixel
+// (cellGrid: same CRS and pixel size, so the same overview, tile level and
+// first-valid-scene rule as a full read). The L2A offset is worked out per
+// day, so a series across the 2022 baseline change stays comparable.
+// Without "read all days", only the POINT_DAYS days nearest the current
+// one are read.
+
+var POINT_DAYS = 40, POINT_PAR = 3;
+var POINT_COLORS = ["#ef5350", "#66bb6a", "#42a5f5"];
+var pin = { ll: null, col: -1, row: -1, grid: null, marker: null, ctl: null,
+            rows: [], key: "", all: false, keys: [], kind: "" };
+
+function pinSignature(comp) {
+  var g = comp.grid;
+  return [currentMode() + ":" + currentKeys().join(","), g.crs, g.width, g.height, g.bbox.join(","),
+          state.days.length, state.days.length ? state.days[0].day + "/" + state.days[state.days.length - 1].day : "",
+          +$("maxScenes").value || 6].join("|");
+}
+function dayOffset(day) {
+  if (pin.kind !== "bands" && pin.kind !== "single") return 0;
+  var m = $("offset").value;
+  if (m !== "auto") return +m;
+  var keys = pin.keys;
+  return X.scenesOffset(day.scenes.filter(function (sc) {
+    return keys.every(function (k) { return sc.assets[k]; });
+  })).offset;
+}
+// One pixel of one day: from the cached composite when there is one.
+async function pointValue(row, signal) {
+  var day = state.days[row.i], e = state.cache.get(cacheKey(row.i)), r;
+  if (e && e.done) r = await e.promise;
+  else {
+    r = await X.loadComposite(compositeArgs(day, X.cellGrid(pin.grid, pin.col, pin.row), signal));
+    if (signal.aborted) return;
+    if (r.stats.errors.length) { row.state = "error"; row.error = r.stats.errors[0].message; return; }
+  }
+  var c = r.composite;
+  if (!c) { row.state = "empty"; return; }
+  var k = c.grid.width === 1 && c.grid.height === 1 ? 0 : pin.row * c.grid.width + pin.col;
+  if (!c.valid[k]) { row.state = "empty"; return; }
+  var off = dayOffset(day);
+  row.values = c.channels.map(function (ch) { return ch[k] + off; });
+  row.offset = off;
+  row.state = "ok";
+}
+async function runPoint() {
+  if (pin.ctl) pin.ctl.abort();
+  if (!pin.grid) return;
+  var ctl = pin.ctl = new AbortController();
+  var cur = Math.max(0, state.dayIndex);
+  var todo = pin.rows.filter(function (r) { return r.state === "pending"; });
+  todo.sort(function (a, b) { return Math.abs(a.i - cur) - Math.abs(b.i - cur); });
+  if (!pin.all) todo = todo.slice(0, POINT_DAYS);
+  var next = 0, drawn = 0;
+  async function worker() {
+    while (next < todo.length && !ctl.signal.aborted) {
+      var row = todo[next++];
+      row.state = "reading";
+      try { await pointValue(row, ctl.signal); }
+      catch (e) {
+        if (ctl.signal.aborted) { row.state = "pending"; return; }
+        row.state = "error"; row.error = String(e && e.message || e);
+      }
+      if (row.state === "reading") row.state = "pending";
+      if (Date.now() - drawn > 150) { drawn = Date.now(); drawPoint(); }
+    }
+  }
+  drawPoint();
+  var ws = [];
+  for (var w = 0; w < POINT_PAR; w++) ws.push(worker());
+  await Promise.all(ws);
+  if (pin.ctl === ctl) pin.ctl = null;
+  drawPoint();
+}
+function setPin(latlng, comp, r) {
+  if (pin.marker) map.removeLayer(pin.marker);
+  pin.ll = latlng; pin.col = r.col; pin.row = r.row; pin.grid = comp.grid;
+  pin.keys = currentKeys(); pin.kind = comp.kind; pin.all = false;
+  pin.key = pinSignature(comp);
+  pin.rows = state.days.map(function (d, i) { return { i: i, day: d.day, state: "pending", values: null }; });
+  pin.marker = L.circleMarker(latlng, { radius: 5, color: "#fff", weight: 2, fillColor: "#ff4081",
+                                         fillOpacity: 1, interactive: false }).addTo(map);
+  $("pointBox").classList.remove("hide");
+  runPoint();
+}
+function clearPin() {
+  if (pin.ctl) pin.ctl.abort();
+  if (pin.marker) map.removeLayer(pin.marker);
+  pin.ll = null; pin.grid = null; pin.marker = null; pin.rows = []; pin.key = "";
+  $("pointBox").classList.add("hide");
+  $("pointNote").textContent = "click the image to pin a point and plot its values through the days";
+}
+// After a load: the same point again when the band, grid or days changed.
+function pointAfterLoad() {
+  if (!pin.ll || !state.comp) return;
+  if (pinSignature(state.comp) === pin.key) { drawPoint(); return; }
+  var p = projected(pin.ll), r = state.comp.grid.crs === state.mapCrs && X.valueAt(state.comp, p[0], p[1]);
+  if (r) setPin(pin.ll, state.comp, r);
+  else clearPin();
+}
+map.on("click", function (e) {
+  if (drawing || Date.now() - drawEndedAt < 400) return;
+  var comp = state.comp;
+  if (!comp || !$("showImg").checked || comp.grid.crs !== state.mapCrs) return;
+  var p = projected(e.latlng), r = X.valueAt(comp, p[0], p[1]);
+  if (r) setPin(e.latlng, comp, r);
+});
+
+function pointLabels() {
+  return pin.kind === "rgb8" ? ["R", "G", "B"] : pin.keys.length > 1 ? pin.keys : [pin.keys[0] || "value"];
+}
+function drawPoint() {
+  var svg = $("pointChart");
+  if (!pin.grid) { svg.innerHTML = ""; return; }
+  var rows = pin.rows, ok = rows.filter(function (r) { return r.state === "ok"; });
+  var n = { ok: ok.length, empty: 0, error: 0, pending: 0, reading: 0 };
+  rows.forEach(function (r) { if (r.state !== "ok") n[r.state]++; });
+  var ll = pin.ll, labels = pointLabels(), unit = pin.kind === "rgb8" ? "" : unitOf(pin.keys[0]);
+  $("pointNote").textContent = ll.lng.toFixed(4) + ", " + ll.lat.toFixed(4) + " (px " + pin.col + "," + pin.row + "): " +
+    ok.length + " of " + rows.length + " days with data" +
+    (n.empty ? ", " + n.empty + " empty" : "") + (n.error ? ", " + n.error + " failed" : "") +
+    (n.reading + n.pending && pin.ctl ? ", reading ..." : n.pending ? ", " + n.pending + " not read" : "") +
+    (unit ? "; " + unit : "");
+  $("pointMore").classList.toggle("hide", !n.pending || pin.all);
+  $("pointStop").classList.toggle("hide", !pin.ctl);
+  var W = svg.clientWidth || 280, H = 150, L0 = 46, R0 = 8, T0 = 8, B0 = 18;
+  var t0 = Infinity, t1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  rows.forEach(function (r) {
+    var t = dayTime(r.day);
+    if (isFinite(t)) { t0 = Math.min(t0, t); t1 = Math.max(t1, t); }
+  });
+  ok.forEach(function (r) {
+    r.values.forEach(function (v) { if (isFinite(v)) { v0 = Math.min(v0, v); v1 = Math.max(v1, v); } });
+  });
+  if (!isFinite(t0)) { t0 = 0; t1 = 1; }
+  if (t1 === t0) { t0 -= 864e5; t1 += 864e5; }
+  if (!isFinite(v0)) { v0 = 0; v1 = 1; }
+  if (v1 === v0) { v0 -= 1; v1 += 1; }
+  var pad = (v1 - v0) * 0.06; v0 -= pad; v1 += pad;
+  function X_(t) { return L0 + (t - t0) / (t1 - t0) * (W - L0 - R0); }
+  function Y_(v) { return T0 + (v1 - v) / (v1 - v0) * (H - T0 - B0); }
+  var o = [];
+  o.push('<rect x="' + L0 + '" y="' + T0 + '" width="' + (W - L0 - R0) + '" height="' + (H - T0 - B0) +
+         '" fill="none" stroke="#2a3542"/>');
+  [v0 + pad, (v0 + v1) / 2, v1 - pad].forEach(function (v) {
+    o.push('<text x="' + (L0 - 4) + '" y="' + (Y_(v) + 4) + '" text-anchor="end" font-size="10" fill="#8696a8">' +
+           fmtNum(+v.toPrecision(4)) + '</text>');
+  });
+  [t0, t1].forEach(function (t, j) {
+    o.push('<text x="' + X_(t) + '" y="' + (H - 4) + '" text-anchor="' + (j ? "end" : "start") +
+           '" font-size="10" fill="#8696a8">' + new Date(t).toISOString().slice(0, 10) + '</text>');
+  });
+  var cd = state.days[state.dayIndex];
+  if (cd && isFinite(dayTime(cd.day))) {
+    var xc = X_(dayTime(cd.day));
+    o.push('<line x1="' + xc + '" x2="' + xc + '" y1="' + T0 + '" y2="' + (H - B0) + '" stroke="#4fc3f7" stroke-opacity="0.5"/>');
+  }
+  rows.forEach(function (r) {   // days with no value: a tick on the axis
+    if (r.state === "ok" || !isFinite(dayTime(r.day))) return;
+    var x = X_(dayTime(r.day)), col = r.state === "error" ? "#ff8a80" : r.state === "empty" ? "#8696a8" : "#2a3542";
+    o.push('<line x1="' + x + '" x2="' + x + '" y1="' + (H - B0) + '" y2="' + (H - B0 - 4) + '" stroke="' + col + '"/>');
+  });
+  var pal = pin.kind === "classes" ? X.classPalette(state.comp && state.comp.classes) : null;
+  var nch = ok.length ? ok[0].values.length : 0;
+  for (var c = 0; c < nch; c++) {
+    var colr = nch === 1 ? "#4fc3f7" : POINT_COLORS[c % 3];
+    if (pin.kind !== "classes") {
+      var d = ok.filter(function (r) { return isFinite(r.values[c]); }).map(function (r, j) {
+        return (j ? "L" : "M") + X_(dayTime(r.day)).toFixed(1) + "," + Y_(r.values[c]).toFixed(1);
+      }).join("");
+      if (d) o.push('<path d="' + d + '" fill="none" stroke="' + colr + '" stroke-width="1.2" stroke-opacity="0.8"/>');
+    }
+    ok.forEach(function (r) {
+      var v = r.values[c];
+      if (!isFinite(v)) return;
+      var fill = pal ? "rgb(" + pal(v).join(",") + ")" : colr;
+      o.push('<circle data-i="' + r.i + '" cx="' + X_(dayTime(r.day)).toFixed(1) + '" cy="' + Y_(v).toFixed(1) +
+             '" r="2.6" fill="' + fill + '" style="cursor:pointer"><title>' + r.day + "  " + labels[c] + " " +
+             fmtNum(v) + (r.offset ? " (offset " + r.offset + ")" : "") + '</title></circle>');
+    });
+  }
+  svg.innerHTML = o.join("");
+}
+$("pointChart").addEventListener("click", function (e) {
+  var i = e.target && e.target.getAttribute && e.target.getAttribute("data-i");
+  if (i !== null && i !== undefined && i !== "") selectDay(+i, true);
+});
+$("pointMore").addEventListener("click", function () { pin.all = true; runPoint(); });
+$("pointStop").addEventListener("click", function () { if (pin.ctl) pin.ctl.abort(); pin.ctl = null; drawPoint(); });
+$("pointClear").addEventListener("click", clearPin);
+$("pointCsv").addEventListener("click", function () {
+  var labels = pointLabels();
+  var lines = ["day," + labels.join(",") + ",offset,state"];
+  pin.rows.forEach(function (r) {
+    lines.push(r.day + "," + labels.map(function (_, c) {
+      return r.state === "ok" ? String(r.values[c]) : "";
+    }).join(",") + "," + (r.state === "ok" ? r.offset || 0 : "") + "," + r.state);
+  });
+  var meta = "# rangefinder point series: lon " + pin.ll.lng.toFixed(6) + ", lat " + pin.ll.lat.toFixed(6) +
+    ", output pixel " + pin.col + "," + pin.row + " of a " + pin.grid.width + "x" + pin.grid.height +
+    " grid in " + pin.grid.crs + ", preset " + $("preset").value + "\n";
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([meta + lines.join("\n") + "\n"], { type: "text/csv" }));
+  a.download = "rangefinder-point-" + pin.ll.lng.toFixed(4) + "_" + pin.ll.lat.toFixed(4) + ".csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+});
 
 // --- tile inspector --------------------------------------------------------------
 //
@@ -1890,7 +2121,7 @@ function inspDraw(tiles, colorBy) {
       L.marker(lay.getBounds().getCenter(), { interactive: false, icon: L.divIcon({ className: "tlabel",
         html: t.z + "/" + t.col + "/" + t.row, iconSize: null }) }).addTo(inspLayer);
     }
-    lay.on("click", function () { peek(t); });
+    lay.on("click", function (ev) { L.DomEvent.stopPropagation(ev); peek(t); });
     lay.addTo(inspLayer);
   });
 }

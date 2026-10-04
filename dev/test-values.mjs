@@ -1,7 +1,8 @@
 // Headless check of the hover value readout and the status statistics.
 // node test-values.mjs "<permalink hash>" [out.png]   (with node server.mjs running)
 // Loads the hash, waits for the composite, then hovers the map centre and an
-// off-image corner and prints the readout box each time.
+// off-image corner and prints the readout box each time, then pins a
+// point and prints the point series.
 import { chromium } from "playwright";
 const NM = process.cwd() + "/node_modules/";
 const map = {
@@ -36,6 +37,16 @@ for (const [fx, fy] of [[0.5, 0.5], [0.45, 0.55], [0.02, 0.02]]) {
   await page.waitForTimeout(100);
   console.log("HOVER " + fx + "," + fy + ":", JSON.stringify(await page.textContent(".coords")));
 }
+// pin a point (PIN="fx,fy" of the map, default the centre) and wait for its series
+const [px, py] = (process.env.PIN || "0.5,0.5").split(",").map(Number);
+await page.mouse.click(box.x + box.width * px, box.y + box.height * py);
+await page.waitForFunction(() => !/reading/.test(document.getElementById("pointNote").textContent), null,
+  { timeout: 180000 }).catch(() => console.log("point timeout"));
+console.log("POINT:", await page.textContent("#pointNote"));
+console.log("POINT dots:", await page.locator("#pointChart circle").count(),
+  JSON.stringify(await page.evaluate(() => [...document.querySelectorAll("#pointChart circle title")].slice(0, 4).map(t => t.textContent))));
 await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
 await page.screenshot({ path: shot });
+await page.locator("#pointBox").scrollIntoViewIfNeeded();
+await page.locator("#pointBox").screenshot({ path: shot.replace(/\.png$/, "-point.png") });
 await browser.close();

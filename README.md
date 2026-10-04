@@ -121,6 +121,14 @@ Two ways to open it locally:
    them; they are counted apart. These are the composite's values, so they
    are on the output grid: nearest-neighbour samples of the source, from
    the overview that was read.
+   **Click** the image to pin a point: its value on every searched day is
+   plotted on the days' time axis under "point" (click a dot to go to that
+   day; `csv` saves the series). A day already composed is read from its
+   cached composite; any other day reads just that one output pixel at the
+   same pixel size, so it matches a full read of that day. The 40 days
+   nearest the current one are read first; `read all days` reads the rest.
+   The L2A offset is worked out per day, so a series across the 2022
+   baseline change stays comparable.
 8. **Output size** caps the longer side of the output grid; it is also never
    finer than the data (the scenes' own resolution when they say, else 10 m). **Max scenes** caps how many scenes one load reads.
 
