@@ -359,8 +359,13 @@
     </div>
     <button id="load">Load imagery</button>
 
-    <label for="opacity">overlay opacity</label>
+    <label for="opacity">overlay opacity (lets the basemap through)</label>
     <input type="range" id="opacity" min="0" max="100" value="100">
+    <label for="sat">colour saturation <span id="satVal">100%</span> (toward grey)</label>
+    <input type="range" id="sat" min="0" max="100" value="100">
+    <label class="row" style="margin-top:8px">
+      <input type="checkbox" id="showBase" checked> <span>show basemap</span>
+    </label>
     <label class="row" style="margin-top:8px">
       <input type="checkbox" id="showImg" checked> <span>show imagery (key: i)</span>
     </label>
@@ -7635,6 +7640,15 @@ function paint() {
     if ($("showImg").checked) state.overlay.addTo(map);
   }
   state.overlay.setExtent(g.bbox);
+  applySaturation();
+}
+function applySaturation() {
+  var v = +$("sat").value;
+  $("satVal").textContent = v + "%";
+  if (state.overlay && state.overlay._url) state.overlay._url.style.filter = v === 100 ? "" : "saturate(" + v / 100 + ")";
+}
+function applyBasemap() {
+  map.getPane("tilePane").style.visibility = $("showBase").checked ? "" : "hidden";
 }
 var CACHE_BYTES = 4e8;
 function minRes() {
@@ -8571,6 +8585,16 @@ $("resetStretch").addEventListener("click", function() {
   paint();
   writeHash();
 });
+$("sat").addEventListener("input", function() {
+  applySaturation();
+});
+$("sat").addEventListener("change", function() {
+  writeHash();
+});
+$("showBase").addEventListener("change", function() {
+  applyBasemap();
+  writeHash();
+});
 $("opacity").addEventListener("input", function() {
   if (state.overlay) state.overlay.setOpacity(this.value / 100);
 });
@@ -8640,6 +8664,8 @@ function writeHash() {
   h.set("cloud", $("cloud").value);
   h.set("preset", $("preset").value);
   if ($("follow").checked) h.set("follow", "1");
+  if (+$("sat").value !== 100) h.set("sat", $("sat").value);
+  if (!$("showBase").checked) h.set("nobase", "1");
   if (state.ref) {
     h.set("ref", state.ref.day);
     if ($("diff").checked) h.set("diff", "1");
@@ -8705,6 +8731,10 @@ async function readHash() {
   }
   if (h.get("url")) $("stacUrl").value = h.get("url");
   $("follow").checked = h.get("follow") === "1";
+  if (h.get("sat")) $("sat").value = h.get("sat");
+  $("showBase").checked = h.get("nobase") !== "1";
+  applyBasemap();
+  applySaturation();
   syncPicks();
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("cloud")) $("cloud").value = h.get("cloud");
