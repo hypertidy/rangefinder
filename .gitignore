@@ -6,3 +6,4 @@ dev/fixtures/wt/
 *.png.tmp
 dev/zarrita.esm.js
 dev/fixtures/zarr4d/
+dev/fixtures/refs/

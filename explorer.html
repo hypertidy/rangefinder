@@ -185,7 +185,7 @@
 
     <div id="zarrbox" class="hide">
       <select id="zarrPick" class="pick"></select>
-      <label for="zarrUrl">or paste a Zarr store URL</label>
+      <label for="zarrUrl">or paste a Zarr store or Kerchunk JSON URL</label>
       <div class="row">
         <input id="zarrUrl" spellcheck="false"
           value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">
@@ -196,7 +196,8 @@
         <div><label for="zarrCrs">CRS, if the store has none</label>
           <input id="zarrCrs" placeholder="EPSG:3031" spellcheck="false"></div>
       </div>
-      <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata and regular
+      <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata, or a
+        Kerchunk / VirtualiZarr reference JSON (NetCDF-4, HDF5, GRIB2 read in place), with regular
         1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
       <div id="zarrDims"></div>
     </div>
@@ -3265,6 +3266,9 @@ function sourceVrt(comp, opts) {
     var feats = scenes.map(function(s, p) {
       var a = s.assets[key], href;
       var m = s.assetMeta && s.assetMeta[key] || {};
+      if (a && a.kind === "zarr" && /\.json(\?|#|$)/i.test(a.url)) {
+        throw new Error("Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)");
+      }
       if (a && a.kind === "zarr" && m.gdal) {
         href = 'vrt://ZARR:"' + gdalHref(a.url) + '":/' + a.variable + m.gdal.slice.map(function(x) {
           return ":" + x;
@@ -3839,13 +3843,76 @@ function countingStore(z, url) {
   }
   return s;
 }
+function isReferenceUrl(url) {
+  return /\.json(\?|#|$)/i.test(String(url || ""));
+}
+function httpsOf(u, base) {
+  var m = /^s3a?:\/\/([^/]+)\/(.*)$/.exec(u);
+  if (m) return "https://" + m[1] + ".s3.amazonaws.com/" + m[2];
+  m = /^(gs|gcs):\/\/([^/]+)\/(.*)$/.exec(u);
+  if (m) return "https://storage.googleapis.com/" + m[2] + "/" + m[3];
+  return secureUrl(new URL(u, base).href);
+}
+function b64bytes(s) {
+  var bin = atob(s), out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function referenceStore(url) {
+  var r = await fetch(url);
+  if (!r.ok) throw new Error("reference JSON: HTTP " + r.status + " for " + url);
+  var spec = await r.json();
+  var refs = spec.refs || spec, templates = spec.templates || {};
+  if (spec.gen && spec.gen.length) throw new Error('reference JSON uses "gen" ranges, which are not supported');
+  delete refs.version;
+  var enc = new TextEncoder(), bytes2 = /* @__PURE__ */ new Map();
+  function fill(u) {
+    return String(u).replace(/\{\{\s*(\w+)\s*\}\}/g, function(_, k) {
+      return templates[k] !== void 0 ? templates[k] : _;
+    });
+  }
+  if (!refs[".zmetadata"]) {
+    var meta = {};
+    Object.keys(refs).forEach(function(k) {
+      if (!/(^|\/)\.z(array|attrs|group)$/.test(k) || typeof refs[k] !== "string") return;
+      try {
+        meta[k] = JSON.parse(refs[k].indexOf("base64:") === 0 ? new TextDecoder().decode(b64bytes(refs[k].slice(7))) : refs[k]);
+      } catch (e) {
+      }
+    });
+    refs[".zmetadata"] = JSON.stringify({ zarr_consolidated_format: 1, metadata: meta });
+  }
+  async function get(key0, opts) {
+    var key = String(key0).replace(/^\/+/, "");
+    var v = refs[key];
+    if (v === void 0) return void 0;
+    if (typeof v === "string") {
+      var b = v.indexOf("base64:") === 0 ? b64bytes(v.slice(7)) : enc.encode(v);
+      bytes2.set(key0, b.byteLength);
+      return b;
+    }
+    if (typeof v === "object" && !Array.isArray(v)) {
+      return enc.encode(JSON.stringify(v));
+    }
+    var target = httpsOf(fill(v[0]), url), headers = {};
+    if (v.length >= 3) headers.Range = "bytes=" + v[1] + "-" + (v[1] + v[2] - 1);
+    var res = await fetch(target, { headers, signal: opts && opts.signal });
+    if (res.status === 404) return void 0;
+    if (!res.ok) throw new Error("HTTP " + res.status + " for " + target);
+    var buf = new Uint8Array(await res.arrayBuffer());
+    if (v.length >= 3 && res.status === 200 && buf.byteLength > v[2]) buf = buf.subarray(v[1], v[1] + v[2]);
+    bytes2.set(key0, buf.byteLength);
+    return buf;
+  }
+  return { get, bytes: bytes2, keys: Object.keys(refs) };
+}
 var datasets = /* @__PURE__ */ new Map();
 function openDataset(url) {
   url = String(url || "").trim().replace(/\/+$/, "");
   if (!datasets.has(url)) {
     var p = (async function() {
       var z = await zarrita();
-      var counting = countingStore(z, url);
+      var counting = isReferenceUrl(url) ? await referenceStore(url) : countingStore(z, url);
       var store = await z.withMaybeConsolidatedMetadata(counting);
       var paths = store.contents ? store.contents().filter(function(c) {
         return c.kind === "array";

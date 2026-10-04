@@ -272,6 +272,14 @@ tile (url, status, bytes, ms, hash), which the status line summarises.
 `index` is the position on the time axis (-1 without one). Minimal by
 design:
 
+- A URL ending in `.json` is a Kerchunk / VirtualiZarr reference file
+  (versions 0 and 1, with templates; not `gen`). Its keys are inline
+  metadata or byte ranges of other files, so a NetCDF-4/HDF5 or GRIB2
+  archive with references reads like a Zarr store. The referenced files
+  need CORS with ranges. `s3://` and `gs://` URLs become their public
+  https endpoints. Without a `.zmetadata` of its own, one is built from
+  the inline metadata so the variables list. HDF5 shuffle + zlib come
+  through zarrita's codecs.
 - Dimensions come from `_ARRAY_DIMENSIONS` (v2) or `dimension_names` (v3).
   x, y and time are recognised by name or CF attributes (units
   `degrees_east` / `... since ...`, `axis`, `standard_name`). Every other

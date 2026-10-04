@@ -184,7 +184,7 @@
 
     <div id="zarrbox" class="hide">
       <select id="zarrPick" class="pick"></select>
-      <label for="zarrUrl">or paste a Zarr store URL</label>
+      <label for="zarrUrl">or paste a Zarr store or Kerchunk JSON URL</label>
       <div class="row">
         <input id="zarrUrl" spellcheck="false"
           value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">
@@ -195,7 +195,8 @@
         <div><label for="zarrCrs">CRS, if the store has none</label>
           <input id="zarrCrs" placeholder="EPSG:3031" spellcheck="false"></div>
       </div>
-      <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata and regular
+      <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata, or a
+        Kerchunk / VirtualiZarr reference JSON (NetCDF-4, HDF5, GRIB2 read in place), with regular
         1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
       <div id="zarrDims"></div>
     </div>

@@ -119,7 +119,8 @@ http.createServer((req, res) => {
     return;
   }
   const bucket = [["/wt/", "fixtures/wt/"], ["/starc/", "fixtures/starc/"],
-                  ["/starc-flat/", "fixtures/starc-flat/"], ["/s3/store/", "fixtures/starc/"]]
+                  ["/starc-flat/", "fixtures/starc-flat/"], ["/s3/store/", "fixtures/starc/"],
+                  ["/refs/", "fixtures/refs/"]]
     .find(([pre]) => u.pathname.startsWith(pre));
   if (bucket) {
     const f = path.join(HERE, bucket[1], decodeURIComponent(u.pathname.slice(bucket[0].length)));
