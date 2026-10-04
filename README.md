@@ -129,7 +129,23 @@ Two ways to open it locally:
    nearest the current one are read first; `read all days` reads the rest.
    The L2A offset is worked out per day, so a series across the 2022
    baseline change stays comparable.
-8. **Output size** caps the longer side of the output grid; it is also never
+8. **Export.** `GeoTIFF` saves the composite's values (not its colours)
+   on the output grid, in their own data type. The CRS, extent and nodata
+   are in the file, and so are each band's name, offset and unit (GDAL
+   metadata), plus the provenance: permalink, day, scenes in priority order,
+   and where the CRS definition came from. `source VRT` saves a GDAL VRT
+   that rebuilds the composite from its source files rather than holding
+   pixels. For each band it has an inline GDAL tile index (GTI, so GDAL 3.9
+   or later) of the scenes' files over `/vsicurl/`, the first-ranked scene
+   on top, warped to the same grid. A Zarr slice goes through GDAL's Zarr
+   driver with its packing kept. GDAL can read it as is, or `gdalwarp` /
+   `gdal_translate` it to another grid. Its values match the GeoTIFF up to
+   nearest-neighbour choices (93-97% of pixels identical in tests; the rest
+   take a neighbouring source pixel, since GDAL's warper and rangefinder's
+   lattice place sample points slightly differently). Tile servers have no source VRT. `PNG`
+   saves the picture as shown, with a `.png.aux.xml` (GDAL PAM) beside it
+   carrying the CRS and extent.
+9. **Output size** caps the longer side of the output grid; it is also never
    finer than the data (the scenes' own resolution when they say, else 10 m). **Max scenes** caps how many scenes one load reads.
 
 The URL hash is a permalink (source, map CRS, region, dates, composite, day).
@@ -156,6 +172,7 @@ lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/de
                          the same warp for tile pyramids, WMTS capabilities parsing
 lib/mapcrs.js            Leaflet in any CRS: a CRS from proj4, overlays placed by extent,
                          a basemap warped into the view
+lib/export.js            GeoTIFF writer, source VRT (inline GTI per band), PAM sidecar
 lib/inspect.js           the tile inspector: tile grids, probes, coverage walk,
                          overzoom check, COG read tiles
 lib/render.js            layer 4: mosaic, stretch curves, L2A offset, gamma, ramps,

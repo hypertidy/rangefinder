@@ -362,6 +362,14 @@
       </div>
     </div>
 
+    <h2>export</h2>
+    <div class="row">
+      <button id="expTif" class="minor" title="the composite's values (not the colours) as a GeoTIFF on the output grid">GeoTIFF</button>
+      <button id="expVrt" class="minor" title="a GDAL VRT that rebuilds the composite from its source files (GDAL 3.9 or later)">source VRT</button>
+      <button id="expPng" class="minor" title="the image as shown, plus a GDAL .aux.xml sidecar with its CRS and extent">PNG</button>
+    </div>
+    <div class="note" id="expNote">the GeoTIFF holds the values; the VRT points GDAL at the source files</div>
+
     <h2>inspect tiles</h2>
     <div id="inspTiles" class="hide">
       <div class="row">
@@ -2057,6 +2065,89 @@ $("pointCsv").addEventListener("click", function () {
   a.download = "rangefinder-point-" + pin.ll.lng.toFixed(4) + "_" + pin.ll.lat.toFixed(4) + ".csv";
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+});
+
+// --- export ---------------------------------------------------------------------
+//
+// GeoTIFF: the composite's stored values on the output grid, band names,
+// offset and units in GDAL's metadata. Source VRT: per band an inline GDAL
+// tile index of the source files, so GDAL rebuilds (or re-grids) the same
+// composite itself. PNG: the picture as shown. The GeoTIFF and the VRT carry
+// the provenance (permalink, day, scenes, CRS source) as metadata items.
+
+function exportBase() {
+  var comp = state.comp, d = state.days[state.dayIndex];
+  var day = d ? d.day : "undated";
+  return "rangefinder-" + day + "-" + (comp.keys || []).join("-").replace(/[^A-Za-z0-9_-]+/g, "_");
+}
+function exportExtra(comp) {
+  writeHash();
+  var d = state.days[state.dayIndex], st = X.compStats(comp);
+  var off = compOffsets(comp);
+  return {
+    rangefinder_permalink: location.href,
+    rangefinder_source: (state.catalog && state.catalog.label) || $("src").value,
+    rangefinder_day: d ? d.day : "",
+    rangefinder_preset: $("preset").value,
+    rangefinder_scenes: (comp.scenes || []).map(function (s) { return s.id; }).join(" "),
+    rangefinder_scene_rule: "first valid scene wins, in this order (least cloudy first)",
+    rangefinder_crs: comp.grid.crs + " (" + X.crsProvenance(comp.grid.crs) + ")",
+    rangefinder_offset: off[0] ? String(off[0]) + " added to stored values (" + $("offset").value + ")" : "none",
+    rangefinder_valid_pixels: st.valid + "/" + st.pixels,
+    rangefinder_exported: new Date().toISOString()
+  };
+}
+function exportOpts(comp) {
+  var keys = comp.keys || [], n = comp.channels.length;
+  var names = comp.kind === "rgb8" ? ["red", "green", "blue"] : keys.slice(0, n);
+  var units = comp.kind === "rgb8" ? [] : keys.map(unitOf);
+  var nodata = keys.map(function (k) {
+    for (var i = 0; i < (comp.scenes || []).length; i++) {
+      var m = comp.scenes[i].assetMeta && comp.scenes[i].assetMeta[k];
+      if (m && m.nodata !== undefined && m.nodata === m.nodata) return m.nodata;
+    }
+    return 0;
+  });
+  return { names: names, units: units, offset: compOffsets(comp).slice(0, n), nodata: nodata,
+           extra: exportExtra(comp) };
+}
+function needComp() {
+  if (!state.comp) { $("expNote").textContent = "load a composite first"; return null; }
+  return state.comp;
+}
+$("expTif").addEventListener("click", function () {
+  var comp = needComp();
+  if (!comp) return;
+  var buf = X.geotiffBytes(comp, exportOpts(comp));
+  X.download(buf, exportBase() + ".tif", "image/tiff");
+  $("expNote").textContent = "GeoTIFF: " + comp.grid.width + "x" + comp.grid.height + " px, " +
+    comp.channels.length + " band(s) of stored values, " + (buf.byteLength / 1048576).toFixed(1) + " MB";
+});
+$("expVrt").addEventListener("click", function () {
+  var comp = needComp();
+  if (!comp) return;
+  try {
+    var xml = X.sourceVrt(comp, exportOpts(comp));
+    X.download(new Blob([xml], { type: "application/xml" }), exportBase() + ".vrt");
+    $("expNote").textContent = "VRT: " + (comp.scenes || []).length + " scene(s) per band over /vsicurl/; " +
+      "open it with GDAL 3.9 or later (it uses the GTI driver)";
+  } catch (e) {
+    $("expNote").textContent = "no source VRT: " + e.message;
+  }
+});
+$("expPng").addEventListener("click", function () {
+  var cv = state.overlay && state.overlay._url;
+  if (!needComp() || !cv) return;
+  var comp = state.comp, base = exportBase(), extra = exportExtra(comp);
+  cv.toBlob(function (b) {
+    X.download(b, base + ".png");
+    // GDAL reads base.png.aux.xml beside it: CRS, extent and provenance
+    setTimeout(function () {
+      X.download(new Blob([X.pamXml(comp.grid, extra)], { type: "application/xml" }), base + ".png.aux.xml");
+    }, 300);
+  }, "image/png");
+  $("expNote").textContent = "PNG: the image as shown, " + cv.width + "x" + cv.height +
+    " px, with a .png.aux.xml beside it so GDAL places it (keep the two together)";
 });
 
 // --- tile inspector --------------------------------------------------------------
