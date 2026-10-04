@@ -183,6 +183,7 @@ dev/                     mock STAC server, headless test, fixture and standalone
 docs/design.md           the original design notes (four layers, minimal path)
 docs/rgb-compositing.md  compositing controls and the L2A offset findings
 docs/starc.md            publishing and reading a starc store
+docs/fidelity.md         what the numbers are: exact, approximated, display only
 docs/sources-brainstorm.md  beyond Sentinel-2: other sources, tile servers
 ```
 
