@@ -197,6 +197,7 @@
       </div>
       <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata and regular
         1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
+      <div id="zarrDims"></div>
     </div>
 
     <div id="tilebox" class="hide">
@@ -828,9 +829,14 @@ $("zarrUrl").addEventListener("change", function () { readZarr(true).catch(fail)
 // variable's coordinates give its grid, CRS and times. One catalogue per
 // URL / variable / CRS, so the opened store and the chunk cache carry over.
 var zarrCat = null, zarrNoTime = false;
+// Index chosen along each Zarr dimension other than x, y and time.
+var zarrSel = {};
+function zarrSelTag() {
+  return Object.keys(zarrSel).sort().map(function (k) { return k + ":" + zarrSel[k]; }).join(",");
+}
 function zarrCatalog() {
   var o = { url: $("zarrUrl").value.trim(), variable: $("zarrVar").value || null,
-            crs: $("zarrCrs").value.trim() || null };
+            crs: $("zarrCrs").value.trim() || null, sel: Object.assign({}, zarrSel) };
   var k = JSON.stringify(o);
   if (!zarrCat || zarrCat.key !== k) { zarrCat = X.zarrCatalog(o); zarrCat.key = k; }
   return zarrCat;
@@ -863,6 +869,7 @@ async function describeZarr(fit, keepDates) {
     crsLine(d.crs, d.crsFrom, d.crsAssumed) + ", cell " +
     d.res.map(function (r) { return +Math.abs(r).toPrecision(4); }).join(" x ") +
     (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
+  zarrDimPickers(d.extra || []);
   coverLayer.clearLayers();
   L.rectangle(roiLatLngBounds(d.bbox), { color: "#b39ddb", weight: 1, fill: false, opacity: 0.7,
     interactive: false }).addTo(coverLayer);
@@ -873,6 +880,44 @@ async function describeZarr(fit, keepDates) {
   if (fit && !state.roi) fitLonLat(d.bbox);
   setStatus(d.name + " read\ndraw a region (a chunk or two of it), then search");
   return d;
+}
+// One picker per extra dimension (depth, level, ...), labelled with its
+// coordinate values when it has them. A change re-reads the same day.
+function zarrDimPickers(extra) {
+  var box = $("zarrDims");
+  box.innerHTML = "";
+  var keep = {};
+  extra.forEach(function (e) {
+    var k = Math.max(0, Math.min(e.n - 1, +zarrSel[e.name] || 0));
+    keep[e.name] = k;
+    var wrap = document.createElement("div"), lab = document.createElement("label"), sel = document.createElement("select");
+    lab.textContent = e.name + (e.longName && e.longName !== e.name ? " (" + e.longName + ")" : "") +
+      (e.positive ? ", positive " + e.positive : "");
+    sel.id = "zdim-" + e.name;
+    lab.htmlFor = sel.id;
+    for (var i = 0; i < e.n; i++) {
+      var o = document.createElement("option");
+      o.value = String(i);
+      o.textContent = i + (e.values ? ": " + fmtNum(e.values[i]) + (e.units ? " " + e.units : "") : "");
+      sel.appendChild(o);
+    }
+    sel.value = String(k);
+    sel.addEventListener("change", function () {
+      zarrSel[e.name] = +sel.value;
+      writeHash();
+      zarrDimChanged().catch(fail);
+    });
+    wrap.appendChild(lab); wrap.appendChild(sel);
+    box.appendChild(wrap);
+  });
+  zarrSel = keep;
+}
+async function zarrDimChanged() {
+  if (!state.roi || !state.days.length) return;
+  var day = state.days[state.dayIndex] ? state.days[state.dayIndex].day : null;
+  await searchScenes($("preset").value);
+  var i = state.days.findIndex(function (d) { return d.day === day; });
+  if (i >= 0) await selectDay(i, true);
 }
 $("readZarr").addEventListener("click", function () { readZarr(true, $("zarrVar").value).catch(fail); });
 $("zarrVar").addEventListener("change", function () { describeZarr(false).catch(fail); });
@@ -1726,7 +1771,7 @@ function cacheKey(i) {
   if (!d || !state.roi) return "";
   var g = currentGrid();
   return [d.day, currentMode() + ":" + currentKeys().join(","), g.crs, g.width, g.height, g.bbox.join(","),
-          +$("maxScenes").value || 6].join("|");
+          +$("maxScenes").value || 6, $("src").value === "zarr" ? zarrSelTag() : ""].join("|");
 }
 
 // What loadComposite needs for one day on a grid, from the current preset.
@@ -1875,7 +1920,7 @@ function pinSignature(comp) {
   var g = comp.grid;
   return [currentMode() + ":" + currentKeys().join(","), g.crs, g.width, g.height, g.bbox.join(","),
           state.days.length, state.days.length ? state.days[0].day + "/" + state.days[state.days.length - 1].day : "",
-          +$("maxScenes").value || 6].join("|");
+          +$("maxScenes").value || 6, $("src").value === "zarr" ? zarrSelTag() : ""].join("|");
 }
 function dayOffset(day) {
   if (pin.kind !== "bands" && pin.kind !== "single") return 0;
@@ -2402,6 +2447,7 @@ function writeHash() {
     h.set("zarr", $("zarrUrl").value.trim());
     if ($("zarrVar").value) h.set("zvar", $("zarrVar").value);
     if ($("zarrCrs").value.trim()) h.set("zcrs", $("zarrCrs").value.trim());
+    if (zarrSelTag()) h.set("zsel", zarrSelTag());
   }
   else if ($("src").value === "tiles") {
     h.set("tiles", $("tileUrl").value.trim());
@@ -2451,6 +2497,11 @@ async function readHash() {
   if (h.get("src") === "zarr") {
     if (h.get("zarr")) $("zarrUrl").value = h.get("zarr");
     if (h.get("zcrs")) $("zarrCrs").value = h.get("zcrs");
+    zarrSel = {};
+    (h.get("zsel") || "").split(",").forEach(function (p) {
+      var m = /^(.+):(\d+)$/.exec(p);
+      if (m) zarrSel[m[1]] = +m[2];
+    });
     await readZarr(!h.has("roi"), h.get("zvar"), h.has("from"));
   }
   if (h.get("tiles")) {

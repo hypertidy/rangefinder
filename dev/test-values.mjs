@@ -30,6 +30,15 @@ await page.waitForFunction(() => {
   const s = document.getElementById("status").textContent;
   return / ms/.test(s) && !/reading|searching|scenes read/.test(s) || document.querySelector("#status .err");
 }, null, { timeout: 120000 }).catch(() => console.log("timeout"));
+// Optional STEPS env var: playwright code run after the first load, then wait again.
+if (process.env.STEPS) {
+  await eval("(async () => {" + process.env.STEPS + "})()");
+  await page.waitForTimeout(300);
+  await page.waitForFunction(() => {
+    const s = document.getElementById("status").textContent;
+    return / ms/.test(s) && !/reading|searching|scenes read/.test(s) || document.querySelector("#status .err");
+  }, null, { timeout: 120000 }).catch(() => console.log("timeout"));
+}
 console.log("STATUS:", await page.textContent("#status"));
 const box = await page.locator("#map").boundingBox();
 for (const [fx, fy] of [[0.5, 0.5], [0.45, 0.55], [0.02, 0.02]]) {

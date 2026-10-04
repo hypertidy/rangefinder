@@ -260,14 +260,17 @@ A read returns the usual `{ bands, valid, level }` plus `log`: one entry per
 tile (url, status, bytes, ms, hash), which the status line summarises.
 
 **Zarr** (see `lib/sources/zarr.js`): the asset is
-`{ kind: "zarr", url, variable, index, crs }`, read by `readZarrWarped`.
+`{ kind: "zarr", url, variable, index, crs, sel }`, read by `readZarrWarped`.
 `index` is the position on the time axis (-1 without one). Minimal by
 design:
 
 - Dimensions come from `_ARRAY_DIMENSIONS` (v2) or `dimension_names` (v3).
   x, y and time are recognised by name or CF attributes (units
-  `degrees_east` / `... since ...`, `axis`, `standard_name`); any other
-  dimension is read at index 0.
+  `degrees_east` / `... since ...`, `axis`, `standard_name`). Every other
+  dimension (depth, level, ...) gets a picker under the variable, labelled
+  with its coordinate values and units when it has a 1D coordinate; `sel`
+  (`{ name: index }`, hash key `zsel`) holds the choices, and changing one
+  re-reads the same day (and the pinned point's series) at that slice.
 - x and y must have regular 1D coordinate arrays (no curvilinear grids
   yet). Longitudes 0..360 are wrapped.
 - The CRS is EPSG:4326 for lon/lat axes, else the variable's

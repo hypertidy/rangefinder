@@ -198,6 +198,7 @@
       </div>
       <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata and regular
         1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
+      <div id="zarrDims"></div>
     </div>
 
     <div id="tilebox" class="hide">
@@ -3522,15 +3523,15 @@ function describe(ds, name, opts) {
         throw new Error(name + " has no dimension names (_ARRAY_DIMENSIONS or dimension_names)");
       }
       var parent = path.replace(/\/[^/]*$/, "");
-      var coords = await Promise.all(dims.map(function(d) {
-        return arrayAt(ds, parent + "/" + d).then(function(c) {
+      var coords = await Promise.all(dims.map(function(d2) {
+        return arrayAt(ds, parent + "/" + d2).then(function(c) {
           return c.shape.length === 1 ? c : null;
         }, function() {
           return null;
         });
       }));
-      var roles = dims.map(function(d, i) {
-        return role(d, coords[i] && coords[i].attrs);
+      var roles = dims.map(function(d2, i) {
+        return role(d2, coords[i] && coords[i].attrs);
       });
       var xi = roles.lastIndexOf("x"), yi = roles.lastIndexOf("y"), ti = roles.indexOf("t");
       if (xi < 0 || yi < 0) {
@@ -3567,6 +3568,27 @@ function describe(ds, name, opts) {
         }
       }
       if (ti >= 0 && !times) ti = -1;
+      var extra = [];
+      for (var d = 0; d < dims.length; d++) {
+        if (d === xi || d === yi || d === ti) continue;
+        var vals = null, ca = coords[d] && coords[d].attrs || {};
+        if (coords[d] && arr.shape[d] <= 5e3) {
+          try {
+            vals = Array.prototype.map.call((await ds.z.get(coords[d])).data, Number);
+          } catch (e) {
+            vals = null;
+          }
+        }
+        extra.push({
+          d,
+          name: dims[d],
+          n: arr.shape[d],
+          values: vals,
+          units: ca.units || "",
+          longName: ca.long_name || ca.standard_name || "",
+          positive: ca.positive || ""
+        });
+      }
       var a = arr.attrs || {};
       var fill = a._FillValue !== void 0 ? a._FillValue : arr.fillValue;
       return {
@@ -3578,6 +3600,7 @@ function describe(ds, name, opts) {
         ti,
         W,
         H,
+        extra,
         origin,
         res,
         crs,
@@ -3627,6 +3650,16 @@ async function pool3(items, n, fn) {
   for (var k = 0; k < Math.min(n, items.length); k++) ws.push(worker());
   await Promise.all(ws);
 }
+function selection(v, sel) {
+  var at = v.dims.map(function() {
+    return 0;
+  });
+  (v.extra || []).forEach(function(e) {
+    var k = sel && sel[e.name];
+    if (k !== void 0 && k !== null) at[e.d] = Math.max(0, Math.min(e.n - 1, Math.floor(+k) || 0));
+  });
+  return at;
+}
 async function readZarrWarped(a, grid, opts) {
   opts = opts || {};
   var maxChunks = opts.maxChunks || a.maxChunks || 64, maxMB = opts.maxMB || 400;
@@ -3661,6 +3694,8 @@ async function readZarrWarped(a, grid, opts) {
   var ww = wx1 - wx0, wh = wy1 - wy0;
   var out = new Float32Array(ww * wh).fill(NaN);
   var ti = v.ti >= 0 ? Math.max(0, a.index || 0) : -1;
+  var at = selection(v, a.sel);
+  if (ti >= 0) at[v.ti] = ti;
   var jobs = [];
   for (var r = cr0; r <= cr1; r++) for (var c = ch0; c <= ch1; c++) jobs.push([c, r]);
   var log = [];
@@ -3669,8 +3704,7 @@ async function readZarrWarped(a, grid, opts) {
     var coords = v.dims.map(function(d2, i) {
       if (i === v.xi) return j[0];
       if (i === v.yi) return j[1];
-      if (i === v.ti) return Math.floor(ti / v.arr.chunks[i]);
-      return 0;
+      return Math.floor((at[i] || 0) / v.arr.chunks[i]);
     });
     var key = a.url + "|" + v.path + "|" + coords.join(".");
     var t0 = performance.now();
@@ -3728,7 +3762,7 @@ async function readZarrWarped(a, grid, opts) {
     var base = 0;
     for (var d = 0; d < coords.length; d++) {
       if (d === v.xi || d === v.yi) continue;
-      var within = d === v.ti ? ti - coords[d] * v.arr.chunks[d] : 0;
+      var within = (at[d] || 0) - coords[d] * v.arr.chunks[d];
       base += within * st[d];
     }
     var sx = st[v.xi], sy = st[v.yi];
@@ -3850,6 +3884,16 @@ function zarrCatalog(opts) {
         res: v.res,
         units: v.units,
         longName: v.longName,
+        extra: v.extra.map(function(e) {
+          return {
+            name: e.name,
+            n: e.n,
+            values: e.values,
+            units: e.units,
+            longName: e.longName,
+            positive: e.positive
+          };
+        }),
         times: v.times ? [
           isoDay(Math.min.apply(null, v.times)),
           isoDay(Math.max.apply(null, v.times)),
@@ -3886,19 +3930,24 @@ function zarrCatalog(opts) {
       var groundRes = Math.abs(v.res[0]) * (v.crs === "EPSG:4326" ? 111320 : 1);
       return idx.map(function(i) {
         var assets = {}, meta = {};
+        var at = selection(v, opts.sel);
+        var selTag = v.extra.map(function(e) {
+          return e.name + "=" + at[e.d];
+        }).join(",");
         assets[key] = {
           kind: "zarr",
           url,
           variable: key,
           index: i,
           crs: opts.crs || null,
+          sel: opts.sel || null,
           maxChunks: opts.maxChunks || null,
-          href: url + "#" + key + "@" + i
+          href: url + "#" + key + "@" + i + (selTag ? "[" + selTag + "]" : "")
         };
         meta[key] = v.units ? { unit: v.units } : {};
         meta[key].gdal = {
           slice: v.dims.map(function(d, j) {
-            return j === v.xi || j === v.yi ? null : j === v.ti ? Math.max(0, i) : 0;
+            return j === v.xi || j === v.yi ? null : j === v.ti ? Math.max(0, i) : at[j];
           }).filter(function(x) {
             return x !== null;
           }),
@@ -5626,11 +5675,18 @@ $("zarrUrl").addEventListener("change", function() {
 });
 var zarrCat = null;
 var zarrNoTime = false;
+var zarrSel = {};
+function zarrSelTag() {
+  return Object.keys(zarrSel).sort().map(function(k) {
+    return k + ":" + zarrSel[k];
+  }).join(",");
+}
 function zarrCatalog2() {
   var o = {
     url: $("zarrUrl").value.trim(),
     variable: $("zarrVar").value || null,
-    crs: $("zarrCrs").value.trim() || null
+    crs: $("zarrCrs").value.trim() || null,
+    sel: Object.assign({}, zarrSel)
   };
   var k = JSON.stringify(o);
   if (!zarrCat || zarrCat.key !== k) {
@@ -5663,6 +5719,7 @@ async function describeZarr(fit, keepDates) {
   $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + ", cell " + d.res.map(function(r) {
     return +Math.abs(r).toPrecision(4);
   }).join(" x ") + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
+  zarrDimPickers(d.extra || []);
   coverLayer.clearLayers();
   L.rectangle(roiLatLngBounds(d.bbox), {
     color: "#b39ddb",
@@ -5678,6 +5735,44 @@ async function describeZarr(fit, keepDates) {
   if (fit && !state.roi) fitLonLat(d.bbox);
   setStatus(d.name + " read\ndraw a region (a chunk or two of it), then search");
   return d;
+}
+function zarrDimPickers(extra) {
+  var box = $("zarrDims");
+  box.innerHTML = "";
+  var keep = {};
+  extra.forEach(function(e) {
+    var k = Math.max(0, Math.min(e.n - 1, +zarrSel[e.name] || 0));
+    keep[e.name] = k;
+    var wrap = document.createElement("div"), lab = document.createElement("label"), sel = document.createElement("select");
+    lab.textContent = e.name + (e.longName && e.longName !== e.name ? " (" + e.longName + ")" : "") + (e.positive ? ", positive " + e.positive : "");
+    sel.id = "zdim-" + e.name;
+    lab.htmlFor = sel.id;
+    for (var i = 0; i < e.n; i++) {
+      var o = document.createElement("option");
+      o.value = String(i);
+      o.textContent = i + (e.values ? ": " + fmtNum(e.values[i]) + (e.units ? " " + e.units : "") : "");
+      sel.appendChild(o);
+    }
+    sel.value = String(k);
+    sel.addEventListener("change", function() {
+      zarrSel[e.name] = +sel.value;
+      writeHash();
+      zarrDimChanged().catch(fail);
+    });
+    wrap.appendChild(lab);
+    wrap.appendChild(sel);
+    box.appendChild(wrap);
+  });
+  zarrSel = keep;
+}
+async function zarrDimChanged() {
+  if (!state.roi || !state.days.length) return;
+  var day = state.days[state.dayIndex] ? state.days[state.dayIndex].day : null;
+  await searchScenes($("preset").value);
+  var i = state.days.findIndex(function(d) {
+    return d.day === day;
+  });
+  if (i >= 0) await selectDay(i, true);
 }
 $("readZarr").addEventListener("click", function() {
   readZarr(true, $("zarrVar").value).catch(fail);
@@ -6595,7 +6690,8 @@ function cacheKey(i) {
     g.width,
     g.height,
     g.bbox.join(","),
-    +$("maxScenes").value || 6
+    +$("maxScenes").value || 6,
+    $("src").value === "zarr" ? zarrSelTag() : ""
   ].join("|");
 }
 function compositeArgs(day, grid, signal, onProgress) {
@@ -6778,7 +6874,8 @@ function pinSignature(comp) {
     g.bbox.join(","),
     state.days.length,
     state.days.length ? state.days[0].day + "/" + state.days[state.days.length - 1].day : "",
-    +$("maxScenes").value || 6
+    +$("maxScenes").value || 6,
+    $("src").value === "zarr" ? zarrSelTag() : ""
   ].join("|");
 }
 function dayOffset(day) {
@@ -7442,6 +7539,7 @@ function writeHash() {
     h.set("zarr", $("zarrUrl").value.trim());
     if ($("zarrVar").value) h.set("zvar", $("zarrVar").value);
     if ($("zarrCrs").value.trim()) h.set("zcrs", $("zarrCrs").value.trim());
+    if (zarrSelTag()) h.set("zsel", zarrSelTag());
   } else if ($("src").value === "tiles") {
     h.set("tiles", $("tileUrl").value.trim());
     if ($("tileLayer").value) h.set("tlayer", $("tileLayer").value);
@@ -7504,6 +7602,11 @@ async function readHash() {
   if (h.get("src") === "zarr") {
     if (h.get("zarr")) $("zarrUrl").value = h.get("zarr");
     if (h.get("zcrs")) $("zarrCrs").value = h.get("zcrs");
+    zarrSel = {};
+    (h.get("zsel") || "").split(",").forEach(function(p) {
+      var m = /^(.+):(\d+)$/.exec(p);
+      if (m) zarrSel[m[1]] = +m[2];
+    });
     await readZarr(!h.has("roi"), h.get("zvar"), h.has("from"));
   }
   if (h.get("tiles")) {
