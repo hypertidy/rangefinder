@@ -791,6 +791,8 @@ var EXAMPLES = {
     ["DEA water observations frequency 1986-2023, Tasmania (Australian Albers)",
      "https://dea-public-data.s3.ap-southeast-2.amazonaws.com/derivative/ga_ls_wo_fq_myear_3/1-6-0/x41/y08/1986--P37Y/ga_ls_wo_fq_myear_3_x41y08_1986--P37Y_final_frequency.tif"],
     ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"],
+    ["Tasmania statewide DEM, 2 m (source.coop, Alex Leith)",
+     "https://data.source.coop/alexgleith/tasmania-dem-2m/Tasmania_Statewide_2m_DEM_14-08-2021.tif"],
     ["GEBCO 2026 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif"],
     ["GEBCO 2025 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2025.tif"],
     ["GEBCO 2024 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2024.tif"]
@@ -1589,35 +1591,58 @@ function presetChanged(applyDefaults) {
   });
   document.querySelector("th.cR").textContent = single ? "value" : "R";
   if (applyDefaults && single) {
-    if (p.ramp) $("ramp").value = p.ramp;
+    if (p.ramp) { $("ramp").value = p.ramp; if (X.CRAMERI[p.ramp]) unfoldCrameri(); }
     $("hs").value = String(p.hillshade || 0);
   }
   if (applyDefaults) { $("limits").value = "pct"; $("minR").value = ""; }
 }
-(function () {   // rangefinder's ramps, then Crameri's scientific maps
-  var groups = [["ramps", Object.keys(X.RAMPS).filter(function (k) { return !X.CRAMERI[k]; })],
-                ["scientific (Crameri)", Object.keys(X.CRAMERI)]];
-  groups.forEach(function (g) {
+(function () {   // rangefinder's ramps, the absolute palettes, then Crameri's
+  // scientific maps, which stay folded away behind "more ..." until asked for
+  // (or until one of them is in use)
+  function group(label, keys, value, text) {
     var og = document.createElement("optgroup");
-    og.label = g[0];
-    g[1].forEach(function (k) {
+    og.label = label;
+    keys.forEach(function (k) {
       var o = document.createElement("option");
-      o.value = k; o.textContent = k;
+      o.value = value ? value(k) : k; o.textContent = text ? text(k) : k;
       og.appendChild(o);
     });
     $("ramp").appendChild(og);
-  });
-  var og = document.createElement("optgroup");
-  og.label = "absolute (colours fixed to values)";
-  Object.keys(X.ABSOLUTE).forEach(function (k) {
-    var o = document.createElement("option");
-    o.value = "abs:" + k; o.textContent = X.ABSOLUTE[k].label;
-    og.appendChild(o);
-  });
+    return og;
+  }
+  group("ramps", Object.keys(X.RAMPS).filter(function (k) { return !X.CRAMERI[k]; }));
+  var abs = group("absolute (colours fixed to values)", Object.keys(X.ABSOLUTE),
+                  function (k) { return "abs:" + k; }, function (k) { return X.ABSOLUTE[k].label; });
   var o = document.createElement("option");
   o.value = "abs:custom"; o.textContent = "custom: values and colours ...";
-  og.appendChild(o);
-  $("ramp").appendChild(og);
+  abs.appendChild(o);
+  var more = document.createElement("option");
+  more.value = "more:crameri"; more.textContent = "more: Crameri's scientific maps ...";
+  $("ramp").appendChild(more);
+  var cram = group("scientific (Crameri)", Object.keys(X.CRAMERI));
+  cram.hidden = true;
+  Array.prototype.forEach.call(cram.children, function (c) { c.hidden = true; });
+  var last = $("ramp").value;
+  window.unfoldCrameri = function () {
+    cram.hidden = false;
+    Array.prototype.forEach.call(cram.children, function (c) { c.hidden = false; });
+    more.hidden = true;
+  };
+  $("ramp").addEventListener("change", function (e) {
+    if (this.value === "more:crameri") {
+      e.stopImmediatePropagation();
+      unfoldCrameri();
+      this.value = last;
+      // reopen the list on the unfolded maps where the browser allows it
+      var sel = this;
+      if (sel.showPicker && navigator.userActivation && navigator.userActivation.isActive) {
+        setTimeout(function () { try { sel.showPicker(); } catch (err) { /* the list is unfolded anyway */ } }, 0);
+      }
+      return;
+    }
+    if (X.CRAMERI[this.value]) unfoldCrameri();
+    last = this.value;
+  });
 })();
 
 // An absolute palette: the chosen one's anchors fill the text box, and
@@ -1630,6 +1655,7 @@ function absoluteAnchors() {
   return X.parseAbsolute($("absText").value);
 }
 function absoluteUi() {
+  if (X.CRAMERI[$("ramp").value]) unfoldCrameri();
   var on = /^abs:/.test($("ramp").value);
   $("absBox").classList.toggle("hide", !on);
   $("stretchbox").classList.toggle("abs", on);
@@ -2286,7 +2312,7 @@ var diffRamp = null;   // the ramp in use before difference mode, put back after
 function diffChanged() {
   if ($("diff").checked && !diffRamp) {
     diffRamp = $("ramp").value;
-    $("ramp").value = "vik";
+    $("ramp").value = "vik"; unfoldCrameri();
     $("limits").value = "pct"; $("minR").value = "";
   } else if (!$("diff").checked && diffRamp) {
     $("ramp").value = diffRamp; diffRamp = null;
@@ -2314,7 +2340,7 @@ async function restoreRef(day, on, keepRamp) {
   $("diff").checked = !!on;
   if (on && !diffRamp) {
     diffRamp = $("ramp").value;
-    if (!keepRamp) $("ramp").value = "vik";
+    if (!keepRamp) { $("ramp").value = "vik"; unfoldCrameri(); }
   }
   state.comp = shownComposite();
   paint();

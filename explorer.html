@@ -6407,6 +6407,10 @@ var EXAMPLES = {
       "https://dea-public-data.s3.ap-southeast-2.amazonaws.com/derivative/ga_ls_wo_fq_myear_3/1-6-0/x41/y08/1986--P37Y/ga_ls_wo_fq_myear_3_x41y08_1986--P37Y_final_frequency.tif"
     ],
     ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"],
+    [
+      "Tasmania statewide DEM, 2 m (source.coop, Alex Leith)",
+      "https://data.source.coop/alexgleith/tasmania-dem-2m/Tasmania_Statewide_2m_DEM_14-08-2021.tif"
+    ],
     ["GEBCO 2026 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif"],
     ["GEBCO 2025 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2025.tif"],
     ["GEBCO 2024 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2024.tif"]
@@ -7306,7 +7310,10 @@ function presetChanged(applyDefaults) {
   });
   document.querySelector("th.cR").textContent = single ? "value" : "R";
   if (applyDefaults && single) {
-    if (p.ramp) $("ramp").value = p.ramp;
+    if (p.ramp) {
+      $("ramp").value = p.ramp;
+      if (CRAMERI[p.ramp]) unfoldCrameri();
+    }
     $("hs").value = String(p.hillshade || 0);
   }
   if (applyDefaults) {
@@ -7315,36 +7322,71 @@ function presetChanged(applyDefaults) {
   }
 }
 (function() {
-  var groups = [
-    ["ramps", Object.keys(RAMPS).filter(function(k) {
-      return !CRAMERI[k];
-    })],
-    ["scientific (Crameri)", Object.keys(CRAMERI)]
-  ];
-  groups.forEach(function(g) {
-    var og2 = document.createElement("optgroup");
-    og2.label = g[0];
-    g[1].forEach(function(k) {
+  function group(label, keys, value, text2) {
+    var og = document.createElement("optgroup");
+    og.label = label;
+    keys.forEach(function(k) {
       var o2 = document.createElement("option");
-      o2.value = k;
-      o2.textContent = k;
-      og2.appendChild(o2);
+      o2.value = value ? value(k) : k;
+      o2.textContent = text2 ? text2(k) : k;
+      og.appendChild(o2);
     });
-    $("ramp").appendChild(og2);
-  });
-  var og = document.createElement("optgroup");
-  og.label = "absolute (colours fixed to values)";
-  Object.keys(ABSOLUTE).forEach(function(k) {
-    var o2 = document.createElement("option");
-    o2.value = "abs:" + k;
-    o2.textContent = ABSOLUTE[k].label;
-    og.appendChild(o2);
-  });
+    $("ramp").appendChild(og);
+    return og;
+  }
+  group("ramps", Object.keys(RAMPS).filter(function(k) {
+    return !CRAMERI[k];
+  }));
+  var abs = group(
+    "absolute (colours fixed to values)",
+    Object.keys(ABSOLUTE),
+    function(k) {
+      return "abs:" + k;
+    },
+    function(k) {
+      return ABSOLUTE[k].label;
+    }
+  );
   var o = document.createElement("option");
   o.value = "abs:custom";
   o.textContent = "custom: values and colours ...";
-  og.appendChild(o);
-  $("ramp").appendChild(og);
+  abs.appendChild(o);
+  var more = document.createElement("option");
+  more.value = "more:crameri";
+  more.textContent = "more: Crameri's scientific maps ...";
+  $("ramp").appendChild(more);
+  var cram = group("scientific (Crameri)", Object.keys(CRAMERI));
+  cram.hidden = true;
+  Array.prototype.forEach.call(cram.children, function(c) {
+    c.hidden = true;
+  });
+  var last = $("ramp").value;
+  window.unfoldCrameri = function() {
+    cram.hidden = false;
+    Array.prototype.forEach.call(cram.children, function(c) {
+      c.hidden = false;
+    });
+    more.hidden = true;
+  };
+  $("ramp").addEventListener("change", function(e) {
+    if (this.value === "more:crameri") {
+      e.stopImmediatePropagation();
+      unfoldCrameri();
+      this.value = last;
+      var sel = this;
+      if (sel.showPicker && navigator.userActivation && navigator.userActivation.isActive) {
+        setTimeout(function() {
+          try {
+            sel.showPicker();
+          } catch (err) {
+          }
+        }, 0);
+      }
+      return;
+    }
+    if (CRAMERI[this.value]) unfoldCrameri();
+    last = this.value;
+  });
 })();
 function absoluteAnchors() {
   var v = $("ramp").value;
@@ -7354,6 +7396,7 @@ function absoluteAnchors() {
   return parseAbsolute($("absText").value);
 }
 function absoluteUi() {
+  if (CRAMERI[$("ramp").value]) unfoldCrameri();
   var on = /^abs:/.test($("ramp").value);
   $("absBox").classList.toggle("hide", !on);
   $("stretchbox").classList.toggle("abs", on);
@@ -8130,6 +8173,7 @@ function diffChanged() {
   if ($("diff").checked && !diffRamp) {
     diffRamp = $("ramp").value;
     $("ramp").value = "vik";
+    unfoldCrameri();
     $("limits").value = "pct";
     $("minR").value = "";
   } else if (!$("diff").checked && diffRamp) {
@@ -8161,7 +8205,10 @@ async function restoreRef(day, on, keepRamp) {
   $("diff").checked = !!on;
   if (on && !diffRamp) {
     diffRamp = $("ramp").value;
-    if (!keepRamp) $("ramp").value = "vik";
+    if (!keepRamp) {
+      $("ramp").value = "vik";
+      unfoldCrameri();
+    }
   }
   state.comp = shownComposite();
   paint();
