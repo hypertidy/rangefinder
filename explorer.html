@@ -40,7 +40,7 @@
   #timeline:focus-visible { box-shadow: 0 0 0 1px var(--accent); }
   #map.drawing, #map.drawing .leaflet-interactive { cursor: crosshair; }
   .coords { background: rgba(16,20,26,0.8); color: var(--text); padding: 2px 6px;
-            border-radius: 4px; font: 12px ui-monospace, monospace; }
+            border-radius: 4px; font: 12px ui-monospace, monospace; white-space: pre; }
   h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: 0.4px; }
   h2 { font-size: 11px; margin: 16px 0 2px; color: var(--accent); text-transform: uppercase;
        letter-spacing: 0.8px; border-top: 1px solid var(--edge); padding-top: 10px; }
@@ -439,6 +439,7 @@ __export(explorer_exports, {
   cogCatalog: () => cogCatalog,
   cogInfo: () => cogInfo,
   cogReadTiles: () => cogReadTiles,
+  compStats: () => compStats,
   coverageWalk: () => coverageWalk,
   crsCode: () => crsCode,
   crsFromWkt: () => crsFromWkt,
@@ -505,6 +506,7 @@ __export(explorer_exports, {
   transformBbox: () => transformBbox,
   utmCode: () => utmCode,
   utmZoneOf: () => utmZoneOf,
+  valueAt: () => valueAt,
   viewExtent: () => viewExtent,
   vrtCatalog: () => vrtCatalog,
   warpedBasemap: () => warpedBasemap,
@@ -936,6 +938,43 @@ function autoStretch(comp, lo, hi, opts) {
   return st.map(function(s, c) {
     return [s[0] + off[c], s[1] + off[c]];
   });
+}
+function valueAt(comp, x, y) {
+  var g = comp.grid, b = g.bbox;
+  var col = Math.floor((x - b[0]) / (b[2] - b[0]) * g.width);
+  var row = Math.floor((b[3] - y) / (b[3] - b[1]) * g.height);
+  if (!(col >= 0 && col < g.width && row >= 0 && row < g.height)) return null;
+  var i = row * g.width + col;
+  return {
+    col,
+    row,
+    valid: !!comp.valid[i],
+    values: comp.channels.map(function(c) {
+      return c[i];
+    })
+  };
+}
+function compStats(comp) {
+  if (comp.statsCache) return comp.statsCache;
+  var valid = comp.valid, n = valid.length, nv = 0;
+  for (var i = 0; i < n; i++) nv += valid[i];
+  var chans = comp.channels.map(function(c) {
+    var lo = Infinity, hi = -Infinity, sum = 0, fin = 0, bad = 0;
+    for (var i2 = 0; i2 < n; i2++) {
+      if (!valid[i2]) continue;
+      var v = c[i2];
+      if (v - v !== 0) {
+        bad++;
+        continue;
+      }
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+      sum += v;
+      fin++;
+    }
+    return fin ? { min: lo, max: hi, mean: sum / fin, finite: fin, nonFinite: bad } : { min: null, max: null, mean: null, finite: 0, nonFinite: bad };
+  });
+  return comp.statsCache = { pixels: n, valid: nv, channels: chans };
 }
 var RAMPS = {
   greys: ["#000000", "#ffffff"],
@@ -3501,7 +3540,7 @@ function zarrCatalog(opts) {
           maxChunks: opts.maxChunks || null,
           href: url + "#" + key + "@" + i
         };
-        meta[key] = {};
+        meta[key] = v.units ? { unit: v.units } : {};
         var t = i >= 0 ? new Date(v.times[i]).toISOString() : null;
         return {
           id: key + (t ? " " + t.slice(0, 16).replace("T", " ") : ""),
@@ -4786,7 +4825,11 @@ coordBox.onAdd = function() {
 };
 coordBox.addTo(map);
 map.on("mousemove", function(e) {
-  document.querySelector(".coords").textContent = e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom();
+  var t = e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom(), v = valueLine(e.latlng);
+  document.querySelector(".coords").textContent = v ? t + "\n" + v : t;
+});
+map.on("mouseout", function() {
+  document.querySelector(".coords").textContent = "lon/lat";
 });
 var footLayer = L.layerGroup().addTo(map);
 var coverLayer = L.layerGroup().addTo(map);
@@ -6071,6 +6114,60 @@ function legend(comp) {
     box.appendChild(row);
   });
 }
+function fmtNum(v) {
+  if (v === null || v === void 0) return "-";
+  if (v !== v) return "NaN";
+  if (!isFinite(v)) return v > 0 ? "+Inf" : "-Inf";
+  if (Number.isInteger(v)) return String(v);
+  var a = Math.abs(v);
+  return a !== 0 && (a < 1e-3 || a >= 1e7) ? v.toExponential(4) : String(+v.toPrecision(6));
+}
+function unitOf(key) {
+  for (var i = 0; i < state.scenes.length; i++) {
+    var m = state.scenes[i].assetMeta && state.scenes[i].assetMeta[key];
+    if (m && m.unit) return m.unit;
+  }
+  return "";
+}
+function compOffsets(comp) {
+  if (comp.kind !== "bands" && comp.kind !== "single") return [0, 0, 0];
+  var o = offsetFor(comp);
+  return typeof o === "number" ? [o, o, o] : o;
+}
+function valueLine(latlng) {
+  var comp = state.comp;
+  if (!comp || !$("showImg").checked || comp.grid.crs !== state.mapCrs) return "";
+  var p = projected(latlng), r = valueAt(comp, p[0], p[1]);
+  if (!r) return "";
+  var at = "  @ px " + r.col + "," + r.row;
+  if (!r.valid) return "no data" + at;
+  var keys = comp.keys || [], off = compOffsets(comp);
+  if (comp.kind === "classes") {
+    var cls = (comp.classes || []).filter(function(c) {
+      return c.value === r.values[0];
+    })[0];
+    return "class " + fmtNum(r.values[0]) + (cls ? " " + cls.label : "") + at;
+  }
+  var parts = r.values.map(function(v, c) {
+    var k = comp.kind === "rgb8" ? ["R", "G", "B"][c] : keys[c] || "band " + (c + 1);
+    var u = comp.kind === "rgb8" ? "" : unitOf(keys[c]);
+    var s = k + " " + fmtNum(v + off[c]) + (u ? " " + u : "");
+    if (off[c]) s += " (stored " + fmtNum(v) + ")";
+    return s;
+  });
+  return parts.join("  ") + at;
+}
+function statsLines(comp) {
+  if (comp.kind === "classes") return "";
+  var st = compStats(comp), off = compOffsets(comp), keys = comp.keys || [];
+  var head = "values over " + st.valid + "/" + st.pixels + " valid px" + (off[0] ? " (offset " + off[0] + " applied)" : "") + ":";
+  return head + st.channels.map(function(c, i) {
+    var k = comp.kind === "rgb8" ? ["R", "G", "B"][i] : keys[i] || "band " + (i + 1);
+    var u = comp.kind === "rgb8" ? "" : unitOf(keys[i]);
+    if (!c.finite) return "\n  " + k + ": no finite values" + (c.nonFinite ? " (" + c.nonFinite + " NaN/Inf)" : "");
+    return "\n  " + k + ": min " + fmtNum(c.min + off[i]) + ", max " + fmtNum(c.max + off[i]) + ", mean " + fmtNum(c.mean + off[i]) + (u ? " " + u : "") + (c.finite < st.valid ? " (" + c.finite + " finite" + (c.nonFinite ? ", " + c.nonFinite + " NaN/Inf" : "") + ")" : "");
+  }).join("");
+}
 var CanvasOverlay = extentOverlayClass().extend({
   _initImage: function() {
     var el = this._image = this._url;
@@ -6267,7 +6364,7 @@ async function loadImagery() {
       }).length;
       what = tl.length + " tiles at level " + tl[0].z + " (" + got + " with data, " + (tl.length - got) + " missing or failed" + (th ? ", " + th + " from cache" : "") + ")";
     }
-    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + ", chunk cache " + cacheMB() + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") + (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""), errs);
+    setStatus(day.day + ": " + s.used + "/" + s.candidates + " scenes, " + what + ", " + grid.width + "x" + grid.height + " px at " + gridGroundRes(grid).toFixed(0) + " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached3 ? " (cached)" : "") + ", chunk cache " + cacheMB() + (r.composite.kind === "classes" ? "" : "\n" + statsLines(r.composite)) + (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") + (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""), errs);
     writeHash();
   } finally {
     if (state.loading === ctl) {

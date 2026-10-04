@@ -39,7 +39,7 @@
   #timeline:focus-visible { box-shadow: 0 0 0 1px var(--accent); }
   #map.drawing, #map.drawing .leaflet-interactive { cursor: crosshair; }
   .coords { background: rgba(16,20,26,0.8); color: var(--text); padding: 2px 6px;
-            border-radius: 4px; font: 12px ui-monospace, monospace; }
+            border-radius: 4px; font: 12px ui-monospace, monospace; white-space: pre; }
   h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: 0.4px; }
   h2 { font-size: 11px; margin: 16px 0 2px; color: var(--accent); text-transform: uppercase;
        letter-spacing: 0.8px; border-top: 1px solid var(--edge); padding-top: 10px; }
@@ -435,9 +435,11 @@ coordBox.onAdd = function () {
 };
 coordBox.addTo(map);
 map.on("mousemove", function (e) {
-  document.querySelector(".coords").textContent =
-    e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom();
+  var t = e.latlng.lng.toFixed(4) + ", " + e.latlng.lat.toFixed(4) + "  z" + map.getZoom(),
+      v = valueLine(e.latlng);
+  document.querySelector(".coords").textContent = v ? t + "\n" + v : t;
 });
+map.on("mouseout", function () { document.querySelector(".coords").textContent = "lon/lat"; });
 var footLayer = L.layerGroup().addTo(map);
 var coverLayer = L.layerGroup().addTo(map);   // a starc store's tiles
 
@@ -1585,6 +1587,71 @@ function legend(comp) {
   });
 }
 
+// --- values and statistics ----------------------------------------------------
+//
+// The hover readout and the status line's statistics read the composite's
+// own numbers: the stored values, plus the offset when one applies (the same
+// corrected units the limits are in). Nothing here refetches.
+
+function fmtNum(v) {
+  if (v === null || v === undefined) return "-";
+  if (v !== v) return "NaN";
+  if (!isFinite(v)) return v > 0 ? "+Inf" : "-Inf";
+  if (Number.isInteger(v)) return String(v);
+  var a = Math.abs(v);
+  return a !== 0 && (a < 1e-3 || a >= 1e7) ? v.toExponential(4) : String(+v.toPrecision(6));
+}
+// Units of an asset key, when a source says (STAC raster:bands unit, Zarr units).
+function unitOf(key) {
+  for (var i = 0; i < state.scenes.length; i++) {
+    var m = state.scenes[i].assetMeta && state.scenes[i].assetMeta[key];
+    if (m && m.unit) return m.unit;
+  }
+  return "";
+}
+function compOffsets(comp) {
+  if (comp.kind !== "bands" && comp.kind !== "single") return [0, 0, 0];
+  var o = offsetFor(comp);
+  return typeof o === "number" ? [o, o, o] : o;
+}
+// "value ..." for the composite pixel under a map point, or "" off the image.
+function valueLine(latlng) {
+  var comp = state.comp;
+  if (!comp || !$("showImg").checked || comp.grid.crs !== state.mapCrs) return "";
+  var p = projected(latlng), r = X.valueAt(comp, p[0], p[1]);
+  if (!r) return "";
+  var at = "  @ px " + r.col + "," + r.row;
+  if (!r.valid) return "no data" + at;
+  var keys = comp.keys || [], off = compOffsets(comp);
+  if (comp.kind === "classes") {
+    var cls = (comp.classes || []).filter(function (c) { return c.value === r.values[0]; })[0];
+    return "class " + fmtNum(r.values[0]) + (cls ? " " + cls.label : "") + at;
+  }
+  var parts = r.values.map(function (v, c) {
+    var k = comp.kind === "rgb8" ? ["R", "G", "B"][c] : (keys[c] || "band " + (c + 1));
+    var u = comp.kind === "rgb8" ? "" : unitOf(keys[c]);
+    var s = k + " " + fmtNum(v + off[c]) + (u ? " " + u : "");
+    if (off[c]) s += " (stored " + fmtNum(v) + ")";
+    return s;
+  });
+  return parts.join("  ") + at;
+}
+// One line per channel: min / max / mean over the valid, finite pixels.
+function statsLines(comp) {
+  if (comp.kind === "classes") return "";
+  var st = X.compStats(comp), off = compOffsets(comp), keys = comp.keys || [];
+  var head = "values over " + st.valid + "/" + st.pixels + " valid px" +
+    (off[0] ? " (offset " + off[0] + " applied)" : "") + ":";
+  return head + st.channels.map(function (c, i) {
+    var k = comp.kind === "rgb8" ? ["R", "G", "B"][i] : (keys[i] || "band " + (i + 1));
+    var u = comp.kind === "rgb8" ? "" : unitOf(keys[i]);
+    if (!c.finite) return "\n  " + k + ": no finite values" + (c.nonFinite ? " (" + c.nonFinite + " NaN/Inf)" : "");
+    return "\n  " + k + ": min " + fmtNum(c.min + off[i]) + ", max " + fmtNum(c.max + off[i]) +
+      ", mean " + fmtNum(c.mean + off[i]) + (u ? " " + u : "") +
+      (c.finite < st.valid ? " (" + c.finite + " finite" + (c.nonFinite ? ", " + c.nonFinite + " NaN/Inf" : "") + ")" : "");
+  }).join("");
+}
+
 // An image overlay whose element is a canvas we keep, so re-stretching is a
 // putImageData, not a PNG encode.
 var CanvasOverlay = X.extentOverlayClass().extend({
@@ -1752,6 +1819,7 @@ async function loadImagery() {
       grid.width + "x" + grid.height + " px at " + X.gridGroundRes(grid).toFixed(0) +
       " m" + (tl.length ? "" : ", overview " + lv) + ", " + s.ms + " ms" + (cached ? " (cached)" : "") +
       ", chunk cache " + cacheMB() +
+      (r.composite.kind === "classes" ? "" : "\n" + statsLines(r.composite)) +
       (s.capped ? "\n" + s.capped + " more scene(s) skipped by the max scenes cap" : "") +
       (state.catalog && state.catalog.note ? "\n" + state.catalog.note : ""), errs);
     writeHash();

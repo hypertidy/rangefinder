@@ -112,7 +112,16 @@ Two ways to open it locally:
    overview it was read at (whole tiles are fetched, so this is the read
    amplification), or the Zarr chunks. Click a cell to see the tile as served, with its HTTP
    status, size, type and hash.
-7. **Output size** caps the longer side of the output grid; it is also never
+7. **Values.** Hovering the image shows the composite's numbers under
+   the cursor next to lon/lat: each band's value (with the L2A offset
+   applied when it is, and the stored number beside it), its unit when the
+   source gives one, the class name for a class map, or "no data", plus
+   the output pixel. After each load the status line gives min, max and
+   mean per band over the valid pixels. NaN and infinities never enter
+   them; they are counted apart. These are the composite's values, so they
+   are on the output grid: nearest-neighbour samples of the source, from
+   the overview that was read.
+8. **Output size** caps the longer side of the output grid; it is also never
    finer than the data (the scenes' own resolution when they say, else 10 m). **Max scenes** caps how many scenes one load reads.
 
 The URL hash is a permalink (source, map CRS, region, dates, composite, day).
