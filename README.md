@@ -88,14 +88,16 @@ Two ways to open it locally:
 5. **Composite.** The picker lists what the scenes actually carry: the
    Sentinel-2 combinations when those bands are there, then every asset on
    its own. One band goes through a colour ramp (terrain, viridis, ice,
-   bathy, ...) with optional hillshade, which elevation assets get by
+   bathy, ..., and Fabio Crameri's perceptually uniform scientific maps:
+   batlow, roma, vik, oslo, ...), optionally reversed, with optional hillshade, which elevation assets get by
    default; class codes (S2 `scl`, or any asset with STAC
    `classification:classes`) go through a palette with a legend. For RGB:
    TCI (the baked 3-band Byte product, fastest) or any three
    raw bands. Limits are percentiles over the whole region (default 2-98%,
    so mosaics stay seamless) or manual per-band min/max; "same limits for
    all bands" keeps true-colour balance. Then a stretch curve (linear, sqrt,
-   log), gamma, and the L2A -1000 offset (auto from scene metadata, always,
+   log, or "log10 of values", a true log colour scale between the limits
+   for data such as chlorophyll), gamma, and the L2A -1000 offset (auto from scene metadata, always,
    or off). Everything re-renders the cached pixels without refetching, and
    "show imagery" (key `i`) toggles the overlay.
 6. **Inspect tiles.** For a tile server: `grid` draws the tile grid of the

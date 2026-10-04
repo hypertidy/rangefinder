@@ -282,7 +282,9 @@
     <div id="stretchbox" class="hide">
       <div id="rampbox" class="row hide">
         <div><label for="ramp">colour ramp</label>
-          <select id="ramp"></select></div>
+          <select id="ramp"></select>
+          <label class="row" style="margin-top:4px">
+            <input type="checkbox" id="rev"> <span>reverse</span></label></div>
         <div><label for="hs">hillshade</label>
           <select id="hs">
             <option value="0">off</option>
@@ -302,6 +304,7 @@
             <option value="linear">linear</option>
             <option value="sqrt">sqrt</option>
             <option value="log">log</option>
+            <option value="log10">log10 of values</option>
           </select></div>
       </div>
       <div class="row">
@@ -1562,11 +1565,20 @@ function presetChanged(applyDefaults) {
   }
   if (applyDefaults) { $("limits").value = "pct"; $("minR").value = ""; }
 }
-Object.keys(X.RAMPS).forEach(function (k) {
-  var o = document.createElement("option");
-  o.value = k; o.textContent = k;
-  $("ramp").appendChild(o);
-});
+(function () {   // rangefinder's ramps, then Crameri's scientific maps
+  var groups = [["ramps", Object.keys(X.RAMPS).filter(function (k) { return !X.CRAMERI[k]; })],
+                ["scientific (Crameri)", Object.keys(X.CRAMERI)]];
+  groups.forEach(function (g) {
+    var og = document.createElement("optgroup");
+    og.label = g[0];
+    g[1].forEach(function (k) {
+      var o = document.createElement("option");
+      o.value = k; o.textContent = k;
+      og.appendChild(o);
+    });
+    $("ramp").appendChild(og);
+  });
+})();
 
 // --- stretch controls ----------------------------------------------------------
 //
@@ -1631,6 +1643,7 @@ function renderParams(comp) {
               transfer: $("curve").value };
   if (comp.kind === "single") {
     out.ramp = $("ramp").value;
+    out.reverse = $("rev").checked;
     out.hillshade = +$("hs").value;
     if (out.hillshade && !comp.shade) comp.shade = X.hillshade(comp, X.gridGroundRes(comp.grid));
     out.shade = comp.shade;
@@ -2381,7 +2394,7 @@ $("inspLabels").addEventListener("change", function () { if (insp.tiles.length) 
 $("search").addEventListener("click", function () { searchScenes().catch(fail); });
 $("load").addEventListener("click", function () { loadImagery().catch(fail); });
 $("preset").addEventListener("change", function () { presetChanged(true); writeHash(); });
-["ramp", "hs"].forEach(function (id) {
+["ramp", "hs", "rev"].forEach(function (id) {
   $(id).addEventListener("change", function () { paint(); writeHash(); });
 });
 $("gamma").addEventListener("input", function () {
@@ -2469,7 +2482,11 @@ function writeHash() {
   if ($("preset").value === "custom") h.set("bands", currentKeys().join(","));
   if (state.dayIndex >= 0) h.set("day", state.days[state.dayIndex].day);
   var pm = currentMode();
-  if (pm === "single") { h.set("ramp", $("ramp").value); if (+$("hs").value) h.set("hs", $("hs").value); }
+  if (pm === "single") {
+    h.set("ramp", $("ramp").value);
+    if (+$("hs").value) h.set("hs", $("hs").value);
+    if ($("rev").checked) h.set("rev", "1");
+  }
   if (pm === "bands" || pm === "single") {
     h.set("lim", $("limits").value);
     if ($("limits").value === "pct") h.set("pct", $("plo").value + "," + $("phi").value);
@@ -2523,6 +2540,7 @@ async function readHash() {
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("cloud")) $("cloud").value = h.get("cloud");
   if (h.get("ramp")) $("ramp").value = h.get("ramp");
+  $("rev").checked = h.get("rev") === "1";
   if (h.get("hs")) $("hs").value = h.get("hs");
   ["from", "to"].forEach(function (k) { if (h.has(k)) $(k).value = h.get(k); });
   if (h.get("bands")) {
