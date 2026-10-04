@@ -91,7 +91,12 @@ Two ways to open it locally:
    its own. One band goes through a colour ramp (terrain, viridis, ice,
    bathy, ..., and Fabio Crameri's perceptually uniform scientific maps:
    batlow, roma, vik, oslo, ...), optionally reversed, with optional hillshade, which elevation assets get by
-   default; class codes (S2 `scl`, or any asset with STAC
+   default. An **absolute** palette pins colours to data values instead of
+   the stretch limits, so a value has the same colour in every view: the
+   AAD DiRT bathymetry palette (-8000 to 1000 m, from
+   [palr](https://github.com/AustralianAntarcticDivision/palr)) is built in,
+   and "custom" takes one `value colour` per line (`#rrggbb` or `r g b`, as
+   for `gdaldem color-relief`), kept in the permalink; class codes (S2 `scl`, or any asset with STAC
    `classification:classes`) go through a palette with a legend. For RGB:
    TCI (the baked 3-band Byte product, fastest) or any three
    raw bands. Limits are percentiles over the whole region (default 2-98%,

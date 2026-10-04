@@ -61,6 +61,8 @@
   button:hover { filter: brightness(1.1); }
   button:disabled { opacity: 0.5; cursor: wait; }
   .row { display: flex; gap: 8px; align-items: center; }
+  /* an absolute palette pins colours to values: no limits or stretch */
+  #stretchbox.abs > :not(#rampbox):not(#offBox) { display: none; }
   .row > * { flex: 1; min-width: 0; }
   .row input[type=checkbox] { flex: 0 0 auto; width: auto; }
   .row span { font-size: 13px; }
@@ -288,7 +290,7 @@
         <input type="checkbox" id="diff"> <span id="diffLabel">show difference from reference</span></label>
     </div>
     <div id="stretchbox" class="hide">
-      <div id="rampbox" class="row hide">
+      <div id="rampbox" class="row hide" style="flex-wrap:wrap">
         <div><label for="ramp">colour ramp</label>
           <select id="ramp"></select>
           <label class="row" style="margin-top:4px">
@@ -300,6 +302,11 @@
             <option value="0.6">medium</option>
             <option value="0.85">strong</option>
           </select></div>
+        <div id="absBox" class="hide" style="flex-basis:100%">
+          <div id="absLegend"></div>
+          <div class="note">colours fixed to values (the stretch limits are set aside): one "value colour" per line, colour as #rrggbb or r g b, as for gdaldem color-relief</div>
+          <textarea id="absText" rows="5" spellcheck="false" style="width:100%;font-family:monospace;font-size:11px"></textarea>
+        </div>
       </div>
       <div class="row">
         <div><label for="limits">limits</label>
@@ -1600,7 +1607,80 @@ function presetChanged(applyDefaults) {
     });
     $("ramp").appendChild(og);
   });
+  var og = document.createElement("optgroup");
+  og.label = "absolute (colours fixed to values)";
+  Object.keys(X.ABSOLUTE).forEach(function (k) {
+    var o = document.createElement("option");
+    o.value = "abs:" + k; o.textContent = X.ABSOLUTE[k].label;
+    og.appendChild(o);
+  });
+  var o = document.createElement("option");
+  o.value = "abs:custom"; o.textContent = "custom: values and colours ...";
+  og.appendChild(o);
+  $("ramp").appendChild(og);
 })();
+
+// An absolute palette: the chosen one's anchors fill the text box, and
+// editing the box makes it "custom". The legend is drawn to scale in value.
+function absoluteAnchors() {
+  var v = $("ramp").value;
+  if (!/^abs:/.test(v)) return null;
+  var k = v.slice(4);
+  if (X.ABSOLUTE[k]) return X.ABSOLUTE[k].anchors;
+  return X.parseAbsolute($("absText").value);
+}
+function absoluteUi() {
+  var on = /^abs:/.test($("ramp").value);
+  $("absBox").classList.toggle("hide", !on);
+  $("stretchbox").classList.toggle("abs", on);
+  if (!on) return;
+  var k = $("ramp").value.slice(4);
+  if (X.ABSOLUTE[k]) $("absText").value = X.absoluteText(X.ABSOLUTE[k].anchors);
+  else if (!$("absText").value.trim()) $("absText").value = X.absoluteText(X.ABSOLUTE.dirty.anchors);
+  drawAbsLegend();
+}
+// The bar gives each anchor-to-anchor step the same width (as palr draws
+// it), so a palette with fine steps near zero stays readable; ticks name
+// the anchors, as many as fit.
+function drawAbsLegend() {
+  var box = $("absLegend"), a;
+  box.innerHTML = "";
+  try { a = absoluteAnchors(); } catch (e) { box.textContent = e.message; return; }
+  if (!a) return;
+  var n = a.length - 1;
+  var bar = document.createElement("div");
+  bar.style.cssText = "height:12px;border-radius:2px;margin:4px 0 2px;background:linear-gradient(to right," +
+    a.map(function (p, i) { return p[1] + " " + (100 * i / n).toFixed(2) + "%"; }).join(",") + ")";
+  var ticks = document.createElement("div");
+  ticks.style.cssText = "position:relative;height:14px;font-size:10px;color:var(--muted)";
+  // ends and zero first, then about three more where there is room
+  var want = [0, n], z = a.findIndex(function (p) { return p[0] === 0; });
+  if (z > 0 && z < n) want.push(z);
+  var step = Math.max(1, Math.ceil(n / 4));
+  for (var i = step; i < n; i += step) want.push(i);
+  // place labels by their pixel extent (about 6.5 px a character) so none overlap
+  var W = box.clientWidth || 280, placed = [];
+  want.forEach(function (i) {
+    var x = 100 * i / n, txt = String(+a[i][0].toPrecision(6)), w = txt.length * 6.5 + 4;
+    var px = W * x / 100;
+    // centred on its anchor, else ending or starting there
+    var left = (i === 0 ? [0] : i === n ? [W - w] : [px - w / 2, px - w + 2, px - 2]).find(function (l) {
+      return l >= 0 && l + w <= W && !placed.some(function (q) { return l < q[1] + 2 && l + w > q[0] - 2; });
+    });
+    if (left === undefined) return;
+    placed.push([left, left + w]);
+    var t = document.createElement("span");
+    t.textContent = txt;
+    t.style.cssText = "position:absolute;left:" + left.toFixed(1) + "px";
+    ticks.appendChild(t);
+  });
+  box.appendChild(bar); box.appendChild(ticks);
+}
+$("absText").addEventListener("input", function () {
+  if ($("ramp").value !== "abs:custom") $("ramp").value = "abs:custom";
+  drawAbsLegend();
+});
+$("absText").addEventListener("change", function () { paint(); writeHash(); });
 
 // --- stretch controls ----------------------------------------------------------
 //
@@ -1670,6 +1750,7 @@ function renderParams(comp) {
               transfer: $("curve").value };
   if (comp.kind === "single") {
     out.ramp = $("ramp").value;
+    try { out.absolute = absoluteAnchors(); } catch (e) { out.absolute = null; }   // the legend says why
     out.reverse = $("rev").checked;
     out.hillshade = +$("hs").value;
     if (out.hillshade && !comp.shade) comp.shade = X.hillshade(comp, X.gridGroundRes(comp.grid));
@@ -2515,7 +2596,7 @@ $("search").addEventListener("click", function () { searchScenes().catch(fail); 
 $("load").addEventListener("click", function () { loadImagery().catch(fail); });
 $("preset").addEventListener("change", function () { presetChanged(true); writeHash(); });
 ["ramp", "hs", "rev"].forEach(function (id) {
-  $(id).addEventListener("change", function () { paint(); writeHash(); });
+  $(id).addEventListener("change", function () { if (id === "ramp") absoluteUi(); paint(); writeHash(); });
 });
 $("gamma").addEventListener("input", function () {
   $("gval").textContent = (this.value / 100).toFixed(1);
@@ -2605,6 +2686,7 @@ function writeHash() {
   var pm = currentMode();
   if (pm === "single") {
     h.set("ramp", $("ramp").value);
+    if ($("ramp").value === "abs:custom") h.set("abs", $("absText").value.trim().split(/\s*\n\s*/).join(";"));
     if (+$("hs").value) h.set("hs", $("hs").value);
     if ($("rev").checked) h.set("rev", "1");
   }
@@ -2660,7 +2742,9 @@ async function readHash() {
   syncPicks();
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("cloud")) $("cloud").value = h.get("cloud");
+  if (h.get("abs")) $("absText").value = h.get("abs").split(";").join("\n");
   if (h.get("ramp")) $("ramp").value = h.get("ramp");
+  absoluteUi();
   $("rev").checked = h.get("rev") === "1";
   if (h.get("hs")) $("hs").value = h.get("hs");
   ["from", "to"].forEach(function (k) { if (h.has(k)) $(k).value = h.get(k); });

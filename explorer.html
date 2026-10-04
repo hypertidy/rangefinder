@@ -62,6 +62,8 @@
   button:hover { filter: brightness(1.1); }
   button:disabled { opacity: 0.5; cursor: wait; }
   .row { display: flex; gap: 8px; align-items: center; }
+  /* an absolute palette pins colours to values: no limits or stretch */
+  #stretchbox.abs > :not(#rampbox):not(#offBox) { display: none; }
   .row > * { flex: 1; min-width: 0; }
   .row input[type=checkbox] { flex: 0 0 auto; width: auto; }
   .row span { font-size: 13px; }
@@ -289,7 +291,7 @@
         <input type="checkbox" id="diff"> <span id="diffLabel">show difference from reference</span></label>
     </div>
     <div id="stretchbox" class="hide">
-      <div id="rampbox" class="row hide">
+      <div id="rampbox" class="row hide" style="flex-wrap:wrap">
         <div><label for="ramp">colour ramp</label>
           <select id="ramp"></select>
           <label class="row" style="margin-top:4px">
@@ -301,6 +303,11 @@
             <option value="0.6">medium</option>
             <option value="0.85">strong</option>
           </select></div>
+        <div id="absBox" class="hide" style="flex-basis:100%">
+          <div id="absLegend"></div>
+          <div class="note">colours fixed to values (the stretch limits are set aside): one "value colour" per line, colour as #rrggbb or r g b, as for gdaldem color-relief</div>
+          <textarea id="absText" rows="5" spellcheck="false" style="width:100%;font-family:monospace;font-size:11px"></textarea>
+        </div>
       </div>
       <div class="row">
         <div><label for="limits">limits</label>
@@ -449,6 +456,7 @@ var __export = (target, all) => {
 // lib/explorer.js
 var explorer_exports = {};
 __export(explorer_exports, {
+  ABSOLUTE: () => ABSOLUTE,
   BAND_ALIASES: () => BAND_ALIASES,
   CRAMERI: () => CRAMERI,
   DECODERS: () => DECODERS,
@@ -460,6 +468,7 @@ __export(explorer_exports, {
   RAMPS: () => RAMPS,
   TRANSFERS: () => TRANSFERS,
   WILDTILES_BUCKET: () => WILDTILES_BUCKET,
+  absoluteText: () => absoluteText,
   assetHref: () => assetHref,
   autoStretch: () => autoStretch,
   bboxIntersects: () => bboxIntersects,
@@ -509,6 +518,7 @@ __export(explorer_exports, {
   openCog: () => openCog,
   pamXml: () => pamXml,
   parentDiff: () => parentDiff,
+  parseAbsolute: () => parseAbsolute,
   parsePresetId: () => parsePresetId,
   parseTileId: () => parseTileId,
   parseVrt: () => parseVrt,
@@ -1499,6 +1509,70 @@ var CRAMERI = {
 Object.keys(CRAMERI).forEach(function(k) {
   RAMPS[k] = CRAMERI[k];
 });
+var ABSOLUTE = {
+  dirty: { label: "DiRT bathymetry and topography (AAD)", units: "m", anchors: [
+    [-8e3, "#7e0202"],
+    [-7e3, "#7e023e"],
+    [-6e3, "#7e0276"],
+    [-5e3, "#4b027e"],
+    [-4e3, "#1e0188"],
+    [-3500, "#011992"],
+    [-3e3, "#01549c"],
+    [-2500, "#0198a7"],
+    [-2e3, "#01b17f"],
+    [-1500, "#01bb40"],
+    [-1e3, "#08c600"],
+    [-750, "#56d000"],
+    [-500, "#acda00"],
+    [-250, "#e5c000"],
+    [0, "#ffffff"],
+    [500, "#ecfefb"],
+    [1e3, "#cff6ef"]
+  ] }
+};
+function parseAbsolute(text2) {
+  var out = [];
+  String(text2 || "").split(/\r?\n/).forEach(function(line, i) {
+    line = line.trim();
+    if (!line || /^(#\s|#$|nv\b)/i.test(line)) return;
+    var f = line.split(/[\s,;]+/);
+    var v = +f[0], c;
+    if (/^#?[0-9a-f]{6}$/i.test(f[1] || "") && f.length === 2) c = "#" + f[1].replace("#", "");
+    else if (f.length >= 4 && f.slice(1, 4).every(function(x) {
+      return x !== "" && +x >= 0 && +x <= 255;
+    })) {
+      c = "#" + f.slice(1, 4).map(function(x) {
+        return ("0" + Math.round(+x).toString(16)).slice(-2);
+      }).join("");
+    }
+    if (!isFinite(v) || !c) throw new Error("palette line " + (i + 1) + " is not 'value #rrggbb' or 'value r g b': " + line);
+    out.push([v, c]);
+  });
+  if (out.length < 2) throw new Error("an absolute palette needs at least two lines of 'value colour'");
+  return out.sort(function(a, b) {
+    return a[0] - b[0];
+  });
+}
+function absoluteText(anchors) {
+  return anchors.map(function(a) {
+    return a[0] + " " + a[1];
+  }).join("\n");
+}
+function absoluteTable(anchors, N) {
+  var lo = anchors[0][0], hi = anchors[anchors.length - 1][0];
+  var rgb = anchors.map(function(a2) {
+    return hexRgb(a2[1]);
+  });
+  var t = new Uint8ClampedArray((N + 1) * 3), k = 0;
+  for (var i = 0; i <= N; i++) {
+    var v = lo + (hi - lo) * i / N;
+    while (k < anchors.length - 2 && v > anchors[k + 1][0]) k++;
+    var a = anchors[k][0], b = anchors[k + 1][0], f = b > a ? (v - a) / (b - a) : 0;
+    f = f < 0 ? 0 : f > 1 ? 1 : f;
+    for (var c = 0; c < 3; c++) t[i * 3 + c] = Math.round(rgb[k][c] + (rgb[k + 1][c] - rgb[k][c]) * f);
+  }
+  return { table: t, lo, hi };
+}
 function hexRgb(h) {
   var n = parseInt(String(h).replace("#", ""), 16);
   return [n >> 16 & 255, n >> 8 & 255, n & 255];
@@ -1660,6 +1734,7 @@ function scaler(lo, hi, off, N, transfer) {
 }
 function renderSingle(comp, params, out) {
   var ch = comp.channels[0], valid = comp.valid, npx = ch.length;
+  if (params.absolute) return renderAbsolute(comp, params, out);
   var st = params.stretch && params.stretch[0] || [0, 1];
   var off = offsets3(params.offset)[0];
   var inv = 1 / (params.gamma || 1);
@@ -1678,6 +1753,25 @@ function renderSingle(comp, params, out) {
     out[p] = ramp[r] * m;
     out[p + 1] = ramp[r + 1] * m;
     out[p + 2] = ramp[r + 2] * m;
+    out[p + 3] = 255;
+  }
+  return out;
+}
+function renderAbsolute(comp, params, out) {
+  var ch = comp.channels[0], valid = comp.valid, npx = ch.length;
+  var off = offsets3(params.offset)[0], N = 4096;
+  var at = absoluteTable(params.absolute, N), t = at.table;
+  var k = N / (at.hi - at.lo || 1), base = off - at.lo;
+  var hs = params.hillshade ? params.shade : null, hw = params.hillshade || 0;
+  for (var j = 0; j < npx; j++) {
+    var p = j * 4;
+    if (!valid[j]) continue;
+    var x = Math.round((ch[j] + base) * k);
+    var r = (x < 0 ? 0 : x > N ? N : x) * 3;
+    var m = hs ? 1 - hw + hw * hs[j] * 1.25 : 1;
+    out[p] = t[r] * m;
+    out[p + 1] = t[r + 1] * m;
+    out[p + 2] = t[r + 2] * m;
     out[p + 3] = 255;
   }
   return out;
@@ -7228,17 +7322,97 @@ function presetChanged(applyDefaults) {
     ["scientific (Crameri)", Object.keys(CRAMERI)]
   ];
   groups.forEach(function(g) {
-    var og = document.createElement("optgroup");
-    og.label = g[0];
+    var og2 = document.createElement("optgroup");
+    og2.label = g[0];
     g[1].forEach(function(k) {
-      var o = document.createElement("option");
-      o.value = k;
-      o.textContent = k;
-      og.appendChild(o);
+      var o2 = document.createElement("option");
+      o2.value = k;
+      o2.textContent = k;
+      og2.appendChild(o2);
     });
-    $("ramp").appendChild(og);
+    $("ramp").appendChild(og2);
   });
+  var og = document.createElement("optgroup");
+  og.label = "absolute (colours fixed to values)";
+  Object.keys(ABSOLUTE).forEach(function(k) {
+    var o2 = document.createElement("option");
+    o2.value = "abs:" + k;
+    o2.textContent = ABSOLUTE[k].label;
+    og.appendChild(o2);
+  });
+  var o = document.createElement("option");
+  o.value = "abs:custom";
+  o.textContent = "custom: values and colours ...";
+  og.appendChild(o);
+  $("ramp").appendChild(og);
 })();
+function absoluteAnchors() {
+  var v = $("ramp").value;
+  if (!/^abs:/.test(v)) return null;
+  var k = v.slice(4);
+  if (ABSOLUTE[k]) return ABSOLUTE[k].anchors;
+  return parseAbsolute($("absText").value);
+}
+function absoluteUi() {
+  var on = /^abs:/.test($("ramp").value);
+  $("absBox").classList.toggle("hide", !on);
+  $("stretchbox").classList.toggle("abs", on);
+  if (!on) return;
+  var k = $("ramp").value.slice(4);
+  if (ABSOLUTE[k]) $("absText").value = absoluteText(ABSOLUTE[k].anchors);
+  else if (!$("absText").value.trim()) $("absText").value = absoluteText(ABSOLUTE.dirty.anchors);
+  drawAbsLegend();
+}
+function drawAbsLegend() {
+  var box = $("absLegend"), a;
+  box.innerHTML = "";
+  try {
+    a = absoluteAnchors();
+  } catch (e) {
+    box.textContent = e.message;
+    return;
+  }
+  if (!a) return;
+  var n = a.length - 1;
+  var bar = document.createElement("div");
+  bar.style.cssText = "height:12px;border-radius:2px;margin:4px 0 2px;background:linear-gradient(to right," + a.map(function(p, i2) {
+    return p[1] + " " + (100 * i2 / n).toFixed(2) + "%";
+  }).join(",") + ")";
+  var ticks = document.createElement("div");
+  ticks.style.cssText = "position:relative;height:14px;font-size:10px;color:var(--muted)";
+  var want = [0, n], z = a.findIndex(function(p) {
+    return p[0] === 0;
+  });
+  if (z > 0 && z < n) want.push(z);
+  var step = Math.max(1, Math.ceil(n / 4));
+  for (var i = step; i < n; i += step) want.push(i);
+  var W = box.clientWidth || 280, placed = [];
+  want.forEach(function(i2) {
+    var x = 100 * i2 / n, txt = String(+a[i2][0].toPrecision(6)), w = txt.length * 6.5 + 4;
+    var px = W * x / 100;
+    var left = (i2 === 0 ? [0] : i2 === n ? [W - w] : [px - w / 2, px - w + 2, px - 2]).find(function(l) {
+      return l >= 0 && l + w <= W && !placed.some(function(q) {
+        return l < q[1] + 2 && l + w > q[0] - 2;
+      });
+    });
+    if (left === void 0) return;
+    placed.push([left, left + w]);
+    var t = document.createElement("span");
+    t.textContent = txt;
+    t.style.cssText = "position:absolute;left:" + left.toFixed(1) + "px";
+    ticks.appendChild(t);
+  });
+  box.appendChild(bar);
+  box.appendChild(ticks);
+}
+$("absText").addEventListener("input", function() {
+  if ($("ramp").value !== "abs:custom") $("ramp").value = "abs:custom";
+  drawAbsLegend();
+});
+$("absText").addEventListener("change", function() {
+  paint();
+  writeHash();
+});
 var CH = ["R", "G", "B"];
 function offsetFor(comp) {
   if (comp.isDiff) return 0;
@@ -7304,6 +7478,11 @@ function renderParams(comp) {
   };
   if (comp.kind === "single") {
     out.ramp = $("ramp").value;
+    try {
+      out.absolute = absoluteAnchors();
+    } catch (e) {
+      out.absolute = null;
+    }
     out.reverse = $("rev").checked;
     out.hillshade = +$("hs").value;
     if (out.hillshade && !comp.shade) comp.shade = hillshade(comp, gridGroundRes(comp.grid));
@@ -8304,6 +8483,7 @@ $("preset").addEventListener("change", function() {
 });
 ["ramp", "hs", "rev"].forEach(function(id) {
   $(id).addEventListener("change", function() {
+    if (id === "ramp") absoluteUi();
     paint();
     writeHash();
   });
@@ -8422,6 +8602,7 @@ function writeHash() {
   var pm = currentMode();
   if (pm === "single") {
     h.set("ramp", $("ramp").value);
+    if ($("ramp").value === "abs:custom") h.set("abs", $("absText").value.trim().split(/\s*\n\s*/).join(";"));
     if (+$("hs").value) h.set("hs", $("hs").value);
     if ($("rev").checked) h.set("rev", "1");
   }
@@ -8480,7 +8661,9 @@ async function readHash() {
   syncPicks();
   if (h.get("coll")) $("coll").value = h.get("coll");
   if (h.get("cloud")) $("cloud").value = h.get("cloud");
+  if (h.get("abs")) $("absText").value = h.get("abs").split(";").join("\n");
   if (h.get("ramp")) $("ramp").value = h.get("ramp");
+  absoluteUi();
   $("rev").checked = h.get("rev") === "1";
   if (h.get("hs")) $("hs").value = h.get("hs");
   ["from", "to"].forEach(function(k) {
