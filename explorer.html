@@ -5441,6 +5441,32 @@ function regularAxis(v, name) {
   }
   return { first: v[0], step, n };
 }
+function axisOf(v, name) {
+  try {
+    return regularAxis(v, name);
+  } catch (err) {
+    var n = v.length, up = v[n - 1] > v[0];
+    for (var i = 1; i < n; i++) if (v[i] > v[i - 1] !== up || v[i] === v[i - 1]) throw err;
+    var s = up ? 1 : -1;
+    var map2 = function(c) {
+      var x = s * c, lo = 0, hi = n - 1;
+      if (x <= s * v[0]) return (x - s * v[0]) / (s * (v[1] - v[0]));
+      if (x >= s * v[n - 1]) return n - 1 + (x - s * v[n - 1]) / (s * (v[n - 1] - v[n - 2]));
+      while (hi - lo > 1) {
+        var m = lo + hi >> 1;
+        if (s * v[m] <= x) lo = m;
+        else hi = m;
+      }
+      return lo + (c - v[lo]) / (v[hi] - v[lo]);
+    };
+    var edge = function(k) {
+      if (k <= 0) return v[0] - (v[1] - v[0]) / 2;
+      if (k >= n) return v[n - 1] + (v[n - 1] - v[n - 2]) / 2;
+      return (v[k - 1] + v[k]) / 2;
+    };
+    return { first: 0, step: 1, n, map: map2, edge, nominal: (v[n - 1] - v[0]) / (n - 1) };
+  }
+}
 var UNIT_MS = {
   second: 1e3,
   sec: 1e3,
@@ -5731,12 +5757,13 @@ function describe(ds, name, opts) {
         }
         var xv = toNumbers((await ds.z.get(coords[xi])).data);
         var yv = toNumbers((await ds.z.get(coords[yi])).data);
-        var xa = regularAxis(xv, dims[xi]), ya = regularAxis(yv, dims[yi]);
+        var xa = axisOf(xv, dims[xi]), ya = axisOf(yv, dims[yi]);
         var cs = await variableCrs(ds, arr, dims[xi], coords[xi].attrs, opts), crs = cs.crs;
         var W2 = arr.shape[xi], H2 = arr.shape[yi];
         var origin = [xa.first - xa.step / 2, ya.first - ya.step / 2];
         var res = [xa.step, ya.step];
-        var x0 = origin[0], x1 = origin[0] + W2 * res[0], y0 = origin[1], y1 = origin[1] + H2 * res[1];
+        var x0 = xa.edge ? xa.edge(0) : origin[0], x1 = xa.edge ? xa.edge(W2) : origin[0] + W2 * res[0];
+        var y0 = ya.edge ? ya.edge(0) : origin[1], y1 = ya.edge ? ya.edge(H2) : origin[1] + H2 * res[1];
         var ext = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
         var geo = crs === "EPSG:4326";
         var wrap = geo && ext[2] > 180.5;
@@ -5746,6 +5773,7 @@ function describe(ds, name, opts) {
           wrap ? 180 : Math.min(180, ext[2]),
           Math.min(90, ext[3])
         ] : transformBbox(ext, crs, "EPSG:4326");
+        var irr = [xa.edge ? dims[xi] : null, ya.edge ? dims[yi] : null].filter(Boolean);
         return {
           origin,
           res,
@@ -5753,7 +5781,9 @@ function describe(ds, name, opts) {
           wrap,
           ext,
           bbox,
-          crsFrom: cs.from,
+          axes: irr.length ? [xa, ya] : null,
+          nominal: irr.length ? [xa.nominal || xa.step, ya.nominal || ya.step] : null,
+          crsFrom: cs.from + (irr.length ? "; " + irr.join(" and ") + " unevenly spaced (rectilinear), read by interpolating the coordinate values" : ""),
           assumed: cs.assumed
         };
       }
@@ -5825,6 +5855,8 @@ function describe(ds, name, opts) {
         dggs,
         origin: geom.origin,
         res: geom.res,
+        axes: geom.axes || null,
+        nominal: geom.nominal || null,
         crs: geom.crs,
         crsFrom: geom.crsFrom + "; definition: " + crsProvenance(geom.crs),
         crsAssumed: !!geom.assumed,
@@ -5900,6 +5932,9 @@ function selection(v, sel) {
   });
   return at;
 }
+function edgeAt(v, d, k) {
+  return v.axes && v.axes[d].edge ? v.axes[d].edge(k) : v.origin[d] + k * v.res[d];
+}
 async function readZarrWarped(a, grid, opts) {
   opts = opts || {};
   var maxChunks = opts.maxChunks || a.maxChunks || 64, maxMB = opts.maxMB || 400;
@@ -5924,6 +5959,13 @@ async function readZarrWarped(a, grid, opts) {
       var s = proj2.forward(p);
       if (s[0] < xmin) s[0] += 360;
       return s;
+    } };
+  }
+  if (v.axes) {
+    var toCoord = toSrc, ax = v.axes;
+    toSrc = { forward: function(p) {
+      var s = toCoord.forward(p);
+      return [ax[0].map ? ax[0].map(s[0]) : s[0], ax[1].map ? ax[1].map(s[1]) : s[1]];
     } };
   }
   var lat = gridLattice(grid, toSrc, v.origin, v.res);
@@ -5976,10 +6018,10 @@ async function readZarrWarped(a, grid, opts) {
       ms: 0,
       cached: got.hit,
       extent: [
-        v.origin[0] + j[0] * cx * v.res[0],
-        v.origin[1] + j[1] * cy * v.res[1],
-        v.origin[0] + Math.min(v.W, (j[0] + 1) * cx) * v.res[0],
-        v.origin[1] + Math.min(v.H, (j[1] + 1) * cy) * v.res[1]
+        edgeAt(v, 0, j[0] * cx),
+        edgeAt(v, 1, j[1] * cy),
+        edgeAt(v, 0, Math.min(v.W, (j[0] + 1) * cx)),
+        edgeAt(v, 1, Math.min(v.H, (j[1] + 1) * cy))
       ]
     };
     e.extent = [
@@ -6381,7 +6423,8 @@ function zarrCatalog(opts) {
         crsFrom: v.crsFrom,
         crsAssumed: v.crsAssumed,
         bbox: v.bbox,
-        res: v.res,
+        res: v.nominal || v.res,
+        rectilinear: !!v.axes,
         curvilinear: !!v.curv,
         units: v.units,
         longName: v.longName,
@@ -6430,7 +6473,7 @@ function zarrCatalog(opts) {
         idx = idx.slice(-(q.maxItems || 300));
       }
       var b = v.bbox;
-      var groundRes = Math.abs(v.res[0]) * (v.crs === "EPSG:4326" ? 111320 : 1) * (v.dggs ? 0.25 : 1);
+      var groundRes = Math.abs((v.nominal || v.res)[0]) * (v.crs === "EPSG:4326" ? 111320 : 1) * (v.dggs ? 0.25 : 1);
       return idx.map(function(i) {
         var assets = {}, meta = {};
         var at = selection(v, opts.sel);
@@ -6450,6 +6493,7 @@ function zarrCatalog(opts) {
         meta[key] = v.units ? { unit: v.units } : {};
         if (c.ds.icechunk) meta[key].noVrt = "Icechunk repositories are not exported as a source VRT (GDAL has no Icechunk driver)";
         else if (c.ds.refs) meta[key].noVrt = "Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)";
+        else if (v.axes) meta[key].noVrt = "rectilinear (unevenly spaced) grids are not exported as a source VRT (use the GeoTIFF)";
         else if (v.curv) meta[key].noVrt = "curvilinear grids are not exported as a source VRT yet (use the GeoTIFF)";
         else if (v.dggs) meta[key].noVrt = "HEALPix grids have no source VRT (GDAL cannot place their cells; use the GeoTIFF)";
         else meta[key].gdal = {

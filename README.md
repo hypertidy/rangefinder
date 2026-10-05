@@ -334,6 +334,9 @@ design:
 - The "common stores" picker has BRAN2023 (temp, salt, eta, mld, u, v as
   Kerchunk Parquet from mdsumner/virtualized, plus one Zarr build). Their
   chunks are on NCI THREDDS, which must allow cross-origin reads.
+- A 1D x or y coordinate that is monotonic but unevenly spaced (a
+  rectilinear grid, such as HYCOM's latitude) is read in index space,
+  interpolating the coordinate values; the info line says so.
 - Dimensions come from `_ARRAY_DIMENSIONS` (v2) or `dimension_names` (v3).
   x, y and time are recognised by name or CF attributes (units
   `degrees_east` / `... since ...`, `axis`, `standard_name`). Every other
@@ -533,6 +536,10 @@ explorer itself has no dependencies to install).
   against the model's own cells (psi corners) in three CRSs and across
   the antimeridian. `test-values.mjs` with `PROFILE=1` reads a profile at
   the pinned point.
+- `make_rect_fixture.py` writes a rectilinear Zarr store (latitude
+  spacing 0.1 then 0.5 degree, value = the cell's own latitude), served at
+  `/dev/fixtures/rect`; load it with `test-zarr.mjs` and an `EVAL` that
+  compares each output row's value with its latitude.
 - `make_icechunk_fixture.py` writes a small sharded Icechunk repository
   with two commits and a tag (`pip install icechunk zarr numpy`; not
   committed), served at `/ic/sst`. `test-icechunk.mjs` checks the sniff,

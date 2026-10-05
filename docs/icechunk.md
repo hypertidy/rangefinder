@@ -312,7 +312,10 @@ https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/ocean-icechunk
   reads fail.
 - hycom/hycom-gofs-3pt1-reanalysis: GOFS 3.1, 3-hourly 1994-2015, 40
   depths, 1/12 degree; chunks in the hycom-gofs-3pt1-reanalysis bucket, no
-  CORS. Open and list, reads fail.
+  CORS. Open and list, reads fail. Its latitude is rectilinear (0.04
+  degree south of 40S and north of 40N, 0.08 between), which rangefinder
+  now reads (index-space lookup on the 1D coordinate), so it would draw
+  if the bucket allowed cross-origin reads.
 - test-repo/...: build tests, ignore.
 
 Earthmover's icechunk-public-data bucket (era5_weatherbench2, glad) has
