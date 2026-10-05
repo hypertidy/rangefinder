@@ -24,6 +24,18 @@ guess as data, and label every place where presentation and data differ.
   same value a full read of the day would give at that pixel (checked
   against full reads on Sentinel-2 and MUR SST).
 
+- **Curvilinear grids** (2D longitude / latitude: ROMS, NEMO, tripolar)
+  are not warped through a lattice. Each output pixel takes the cell whose
+  footprint holds the pixel centre, tested exactly. The footprint is the
+  model's own where it says so: CF `bounds`, or ROMS psi points. Checked on
+  CBOFS against the psi cells: every water pixel took a cell whose psi
+  quadrilateral holds it.
+- **Profiles** read each level at the pinned pixel through the same
+  1x1 cell grid as the point series, so each value is the map's value at
+  that level. ROMS depths use the model's own stretching (Vtransform 1 or
+  2, `Cs_r`, `hc`) with `h` and `zeta` at that pixel and time; they
+  matched a direct computation from the NetCDF.
+
 ## Approximated, and how it is disclosed
 
 - **Resampling is nearest-neighbour onto the output grid.** The composite
@@ -55,9 +67,15 @@ guess as data, and label every place where presentation and data differ.
   from scene metadata. The status line says whether it is "auto", "always"
   or "off", and the readout shows the stored number beside the corrected
   one. The point series decides it per day. See `rgb-compositing.md`.
+- **Curvilinear footprints without bounds** are built half way between
+  neighbouring centres (on the sphere), with the outer ring extrapolated
+  one cell. The source line says which footprints were used. Where
+  footprints overlap (ROMS land cells carry made-up coordinates; CBOFS has
+  water cells over water cells near the bay mouth), a cell with data wins,
+  and among those the last in storage order.
 - **CRS.** Every source line says where its CRS came from, and marks
   guesses `[assumed]`. Today's guesses are XYZ templates taken as Web
-  Mercator and Zarr lon/lat taken as WGS84. The GeoTIFF and VRT exports
+  Mercator and Zarr lon/lat (1D or 2D) taken as WGS84. The GeoTIFF and VRT exports
   record the definition's provenance.
 - **Tile servers serve pictures.** Most XYZ/WMTS tiles are colours, often
   JPEG, not values. Only the RGB-packed elevation encodings (terrarium,

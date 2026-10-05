@@ -141,7 +141,12 @@ Two ways to open it locally:
    same pixel size, so it matches a full read of that day. The 40 days
    nearest the current one are read first; `read all days` reads the rest.
    The L2A offset is worked out per day, so a series across the 2022
-   baseline change stays comparable.
+   baseline change stays comparable. For a Zarr variable with another
+   dimension (depth, level, s-coordinate), `profile` plots the pinned
+   pixel's value at every level for the day shown, down the page by depth
+   (from the coordinate in metres, or from the ROMS stretching for an
+   s-coordinate; click a level to show it on the map, `profile csv` saves
+   it).
 8. **Export.** `GeoTIFF` saves the composite's values (not its colours)
    on the output grid, in their own data type. The CRS, extent and nodata
    are in the file, and so are each band's name, offset and unit (GDAL
@@ -178,7 +183,8 @@ lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory, tile registry
 lib/sources/vrt.js       layers 1+2: GDAL VRT mosaic (the VRT is the file index)
 lib/sources/cog.js       layers 1+2: pasted COG URLs (headers only)
 lib/sources/tiles.js     layers 1+2: XYZ template or WMTS capabilities (layers, sets, times)
-lib/sources/zarr.js      layers 1-3: one variable of a Zarr store (zarrita), chunk reads
+lib/sources/zarr.js      layers 1-3: one variable of a Zarr store (zarrita), chunk reads, profiles
+lib/curvilinear.js       cell footprints of 2D lon/lat grids, projected and rasterised
 lib/cog.js               layer 3: windowed overview reads warped to the grid
 lib/chunks.js            shared byte-budgeted cache of native tiles and chunks
 lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/decode,
@@ -303,15 +309,34 @@ design:
   with its coordinate values and units when it has a 1D coordinate; `sel`
   (`{ name: index }`, hash key `zsel`) holds the choices, and changing one
   re-reads the same day (and the pinned point's series) at that slice.
-- x and y must have regular 1D coordinate arrays (no curvilinear grids
-  yet). Longitudes 0..360 are wrapped.
+- x and y need regular 1D coordinate arrays, or the variable's
+  `coordinates` (else any arrays in the store) must name 2D longitude and
+  latitude over two of its dimensions: a curvilinear grid (ROMS, NEMO,
+  MOM tripolar, rotated pole; see `lib/curvilinear.js`). 2D lon/lat win
+  over 1D x/y unless the variable has a `grid_mapping`, since on these
+  grids the 1D axes are often nominal. Each cell is drawn as its
+  footprint: the CF `bounds` of the coordinates, else the ROMS psi points,
+  else corners half way between centres. Every output pixel takes the cell
+  whose footprint holds its centre, found exactly (no lattice); where
+  footprints overlap (ROMS gives land cells made-up coordinates), a cell
+  with data wins. Footprints are projected once per CRS and rasterised once
+  per grid, so stepping days costs only the chunk reads. Cells across the
+  antimeridian are drawn on both sides in lon/lat and Web Mercator. No
+  source VRT for these yet (the GeoTIFF works). Longitudes 0..360 are
+  wrapped.
 - The CRS is EPSG:4326 for lon/lat axes, else the variable's
   `grid_mapping` (`crs_wkt` / `spatial_ref`), else `proj:code` / `crs`
   attributes, else the CRS box on the page.
 - Values are unpacked with `scale_factor` / `add_offset`, and the fill
   value or `missing_value` becomes NaN.
-- Times decode from CF units; a long time axis that is regular in its
-  first and last chunks is not read chunk by chunk.
+- Times decode from CF units and the `calendar` (`noleap` / `365_day`,
+  `all_leap` / `366_day` and `360_day` count days their own way: a model's
+  15 December stays 15 December); a long time axis that is regular in its
+  first and last chunks is not read chunk by chunk. Times are grouped by
+  day, so hourly steps of one day are mosaicked as one day (the first
+  wins).
+- An ocean s-coordinate (`standard_name` `ocean_s_coordinate*`, positive
+  up) starts at its surface level rather than index 0.
 
 A read fetches whole chunks, the only unit a store has, so the chunk shape
 sets what a view costs. Reads are capped at 64 chunks or 400 MB decoded.
@@ -452,7 +477,16 @@ explorer itself has no dependencies to install).
   container can't reach).
 - `test-zarr.mjs` loads a Zarr permalink, steps one day (the chunk cache)
   and draws `last read`. `npm run bundle-zarrita` first; the tests serve
-  zarrita from that bundle in place of jsdelivr.
+  zarrita from that bundle in place of jsdelivr. `NOSTEP=1` for a store
+  with one day, `MAPSHOT=file.png` for the map before the inspector, and
+  `EVAL` for an expression over the composite.
+- `make_roms_fixture.py` fetches three hours of NOAA's Chesapeake Bay
+  ROMS model (CBOFS) into `fixtures/refs/roms/` (not committed) and writes
+  Kerchunk references to them and a Zarr copy (`pip install h5py
+  kerchunk`). `test-curvilinear.mjs` checks the rasteriser on that grid
+  against the model's own cells (psi corners) in three CRSs and across
+  the antimeridian. `test-values.mjs` with `PROFILE=1` reads a profile at
+  the pinned point.
 - `test-inspect.mjs` drives the tile inspector headless (grid, probe,
   walk, last read) from a permalink and a map view.
 - `test.mjs` drives the page headless from a permalink hash and prints the

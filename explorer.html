@@ -383,7 +383,16 @@
         <button id="pointMore" class="minor">read all days</button>
         <button id="pointStop" class="minor">stop</button>
         <button id="pointCsv" class="minor">csv</button>
+        <button id="pointProfile" class="minor hide" title="the values at this point through the store's other dimension (depth, level), for the day shown">profile</button>
         <button id="pointClear" class="minor">clear</button>
+      </div>
+      <div id="profileBox" class="hide">
+        <div class="note" id="profileNote"></div>
+        <svg id="profileChart" width="100%" height="220" style="display:block;margin-top:6px"></svg>
+        <div class="row" style="margin-top:6px">
+          <button id="profileCsv" class="minor">profile csv</button>
+          <button id="profileHide" class="minor">hide profile</button>
+        </div>
       </div>
     </div>
 
@@ -567,7 +576,8 @@ __export(explorer_exports, {
   wildtilesCatalog: () => wildtilesCatalog,
   wktEpsg: () => wktEpsg,
   wmtsSource: () => wmtsSource,
-  zarrCatalog: () => zarrCatalog
+  zarrCatalog: () => zarrCatalog,
+  zarrProfile: () => zarrProfile
 });
 
 // lib/geo.js
@@ -3366,7 +3376,7 @@ function sourceVrt(comp, opts) {
       var a = s.assets[key], href;
       var m = s.assetMeta && s.assetMeta[key] || {};
       if (a && a.kind === "zarr" && !m.gdal) {
-        throw new Error("Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)");
+        throw new Error(m.noVrt || "this Zarr variable cannot be exported as a VRT");
       }
       if (a && a.kind === "zarr" && m.gdal) {
         href = 'vrt://ZARR:"' + gdalHref(a.url) + '":/' + a.variable + m.gdal.slice.map(function(x) {
@@ -3900,6 +3910,289 @@ function vrtCatalog(opts) {
   return cat;
 }
 
+// lib/curvilinear.js
+var D2R = Math.PI / 180;
+var R2D = 180 / Math.PI;
+function normLon(x) {
+  return ((x + 180) % 360 + 360) % 360 - 180;
+}
+function toLonLat(x, y, z) {
+  var r = Math.sqrt(x * x + y * y + z * z);
+  if (!(r > 0)) return [NaN, NaN];
+  return [Math.atan2(y, x) * R2D, Math.asin(Math.max(-1, Math.min(1, z / r))) * R2D];
+}
+function psiCorners(plon, plat, W, H) {
+  var CW = W + 1, CH2 = H + 1, n = CW * CH2;
+  var x = new Float64Array(n), y = new Float64Array(n), z = new Float64Array(n);
+  var j, i, k;
+  for (j = 1; j < H; j++) {
+    for (i = 1; i < W; i++) {
+      var q = (j - 1) * (W - 1) + (i - 1), a = plon[q] * D2R, b = plat[q] * D2R, cb = Math.cos(b);
+      k = j * CW + i;
+      x[k] = cb * Math.cos(a);
+      y[k] = cb * Math.sin(a);
+      z[k] = Math.sin(b);
+    }
+  }
+  function ext(k0, k1, k2) {
+    x[k0] = 2 * x[k1] - x[k2];
+    y[k0] = 2 * y[k1] - y[k2];
+    z[k0] = 2 * z[k1] - z[k2];
+  }
+  for (j = 1; j < H; j++) {
+    ext(j * CW, j * CW + 1, j * CW + 2);
+    ext(j * CW + W, j * CW + W - 1, j * CW + W - 2);
+  }
+  for (i = 0; i < CW; i++) {
+    ext(i, CW + i, 2 * CW + i);
+    ext(H * CW + i, (H - 1) * CW + i, (H - 2) * CW + i);
+  }
+  var clon = new Float64Array(n), clat = new Float64Array(n);
+  for (k = 0; k < n; k++) {
+    var ll = toLonLat(x[k], y[k], z[k]);
+    clon[k] = ll[0];
+    clat[k] = ll[1];
+  }
+  return { lon: clon, lat: clat };
+}
+function centreCorners(lon, lat, W, H) {
+  var PW = W + 2, PH = H + 2;
+  var px = new Float64Array(PW * PH), py = new Float64Array(PW * PH), pz = new Float64Array(PW * PH);
+  var j, i, k, q;
+  for (j = 0; j < H; j++) {
+    for (i = 0; i < W; i++) {
+      var a = lon[j * W + i] * D2R, b = lat[j * W + i] * D2R, cb = Math.cos(b);
+      k = (j + 1) * PW + i + 1;
+      px[k] = cb * Math.cos(a);
+      py[k] = cb * Math.sin(a);
+      pz[k] = Math.sin(b);
+    }
+  }
+  function ext(k0, k1, k2) {
+    px[k0] = 2 * px[k1] - px[k2];
+    py[k0] = 2 * py[k1] - py[k2];
+    pz[k0] = 2 * pz[k1] - pz[k2];
+  }
+  for (j = 1; j <= H; j++) {
+    ext(j * PW, j * PW + 1, j * PW + 2);
+    ext(j * PW + W + 1, j * PW + W, j * PW + W - 1);
+  }
+  for (i = 0; i < PW; i++) {
+    ext(i, PW + i, 2 * PW + i);
+    ext((H + 1) * PW + i, H * PW + i, (H - 1) * PW + i);
+  }
+  var CW = W + 1, CH2 = H + 1;
+  var clon = new Float64Array(CW * CH2), clat = new Float64Array(CW * CH2);
+  for (j = 0; j < CH2; j++) {
+    for (i = 0; i < CW; i++) {
+      var k00 = j * PW + i, k10 = k00 + 1, k01 = k00 + PW, k11 = k01 + 1;
+      var x = px[k00] + px[k10] + px[k01] + px[k11];
+      var y = py[k00] + py[k10] + py[k01] + py[k11];
+      var z = pz[k00] + pz[k10] + pz[k01] + pz[k11];
+      var r = Math.sqrt(x * x + y * y + z * z);
+      q = j * CW + i;
+      if (!(r > 0)) {
+        clon[q] = NaN;
+        clat[q] = NaN;
+        continue;
+      }
+      clon[q] = Math.atan2(y, x) * R2D;
+      clat[q] = Math.asin(Math.max(-1, Math.min(1, z / r))) * R2D;
+    }
+  }
+  return { lon: clon, lat: clat };
+}
+function footprints(lon, lat, W, H, corners) {
+  var n = W * H, flon = new Float64Array(4 * n), flat = new Float64Array(4 * n);
+  corners = corners || {};
+  var bd = corners.bounds;
+  if (bd && bd[0].length === 4 * n && bd[1].length === 4 * n) {
+    for (var k = 0; k < 4 * n; k++) {
+      flon[k] = bd[0][k];
+      flat[k] = bd[1][k];
+    }
+    return { W, H, lon: flon, lat: flat, from: "bounds" };
+  }
+  var ps = corners.psi;
+  var usePsi = ps && ps[0].length === (W - 1) * (H - 1) && W > 2 && H > 2;
+  var c = usePsi ? psiCorners(ps[0], ps[1], W, H) : centreCorners(lon, lat, W, H), CW = W + 1;
+  for (var j = 0; j < H; j++) {
+    for (var i = 0; i < W; i++) {
+      var o = 4 * (j * W + i), a = j * CW + i;
+      var idx = [a, a + 1, a + CW + 1, a + CW];
+      for (var m = 0; m < 4; m++) {
+        flon[o + m] = c.lon[idx[m]];
+        flat[o + m] = c.lat[idx[m]];
+      }
+    }
+  }
+  return { W, H, lon: flon, lat: flat, from: usePsi ? "psi" : "centres" };
+}
+function crsPeriod(crs) {
+  var d = globalThis.proj4.defs(crs);
+  if (!d) return 0;
+  if (/longlat|lonlat/.test(d.projName || "")) return 360;
+  if (d.projName === "merc" && !d.lat_ts) return 2 * Math.PI * (d.a || 6378137) * (d.k0 || d.k || 1);
+  return 0;
+}
+function projectFootprints(fp, crs) {
+  var tr = globalThis.proj4("EPSG:4326", crs);
+  var n = fp.lon.length, x = new Float64Array(n), y = new Float64Array(n);
+  for (var c = 0; c < n; c += 4) {
+    var l0 = normLon(fp.lon[c]);
+    for (var m = 0; m < 4; m++) {
+      var lo = fp.lon[c + m], la = fp.lat[c + m];
+      if (!isFinite(lo) || !isFinite(la)) {
+        x[c + m] = NaN;
+        y[c + m] = NaN;
+        continue;
+      }
+      lo = l0 + normLon(lo - l0);
+      la = Math.max(-90, Math.min(90, la));
+      var p;
+      try {
+        p = tr.forward([lo, la]);
+      } catch (e) {
+        p = [NaN, NaN];
+      }
+      x[c + m] = p[0];
+      y[c + m] = p[1];
+    }
+  }
+  return { W: fp.W, H: fp.H, x, y, period: crsPeriod(crs) };
+}
+function cross(ax, ay, bx, by, px, py) {
+  return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+function inTri(ax, ay, bx, by, cx, cy, px, py) {
+  var d1 = cross(ax, ay, bx, by, px, py), d2 = cross(bx, by, cx, cy, px, py), d3 = cross(cx, cy, ax, ay, px, py);
+  return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+}
+function rasterCells(pf, grid, opts) {
+  opts = opts || {};
+  var GW = grid.width, GH = grid.height, b = grid.bbox;
+  var dx = (b[2] - b[0]) / GW, dy = (b[3] - b[1]) / GH;
+  var per = pf.period ? pf.period / Math.abs(dx) : 0;
+  var cell = new Int32Array(GW * GH).fill(-1);
+  var n = pf.W * pf.H;
+  var qx = new Float64Array(4), qy = new Float64Array(4);
+  var limit = Infinity;
+  if (!per) {
+    var sizes = [], step = Math.max(1, Math.floor(n / 2e4));
+    for (var s = 0; s < n; s += step) {
+      var o = 4 * s, d = Math.hypot(pf.x[o + 2] - pf.x[o], pf.y[o + 2] - pf.y[o]);
+      if (isFinite(d)) sizes.push(d);
+    }
+    sizes.sort(function(p, q) {
+      return p - q;
+    });
+    if (sizes.length) limit = Math.max(100 * sizes[sizes.length >> 1], 8 * Math.max(Math.abs(dx), Math.abs(dy)));
+  }
+  var c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity, skipped = 0;
+  var win = opts.window || [0, 0, pf.W, pf.H], keep = opts.keep;
+  for (var c = 0; c < n; c++) {
+    var ci0 = c % pf.W;
+    if (ci0 < win[0] || ci0 >= win[2]) continue;
+    if (c < win[1] * pf.W) {
+      c = win[1] * pf.W - 1;
+      continue;
+    }
+    if (c >= win[3] * pf.W) break;
+    if (keep && !keep(c)) continue;
+    var o4 = 4 * c, ok = true;
+    for (var m = 0; m < 4; m++) {
+      qx[m] = (pf.x[o4 + m] - b[0]) / dx;
+      qy[m] = (b[3] - pf.y[o4 + m]) / dy;
+      if (!isFinite(qx[m]) || !isFinite(qy[m])) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) continue;
+    if (per) {
+      for (m = 1; m < 4; m++) qx[m] -= per * Math.round((qx[m] - qx[0]) / per);
+    } else if (Math.hypot(pf.x[o4 + 2] - pf.x[o4], pf.y[o4 + 2] - pf.y[o4]) > limit || Math.hypot(pf.x[o4 + 3] - pf.x[o4 + 1], pf.y[o4 + 3] - pf.y[o4 + 1]) > limit) {
+      skipped++;
+      continue;
+    }
+    var xmin = Math.min(qx[0], qx[1], qx[2], qx[3]), xmax = Math.max(qx[0], qx[1], qx[2], qx[3]);
+    var ymin = Math.min(qy[0], qy[1], qy[2], qy[3]), ymax = Math.max(qy[0], qy[1], qy[2], qy[3]);
+    var Y0 = Math.max(0, Math.ceil(ymin - 0.5)), Y1 = Math.min(GH - 1, Math.floor(ymax - 0.5));
+    if (Y1 < Y0) continue;
+    var shifts = per ? [0, -per, per] : [0];
+    var hit2 = false;
+    for (var si = 0; si < shifts.length; si++) {
+      var sh = shifts[si];
+      var X0 = Math.max(0, Math.ceil(xmin + sh - 0.5)), X1 = Math.min(GW - 1, Math.floor(xmax + sh - 0.5));
+      if (X1 < X0) continue;
+      for (var Y = Y0; Y <= Y1; Y++) {
+        var py = Y + 0.5, row = Y * GW;
+        for (var X = X0; X <= X1; X++) {
+          var px = X + 0.5 - sh;
+          if (inTri(qx[0], qy[0], qx[1], qy[1], qx[2], qy[2], px, py) || inTri(qx[0], qy[0], qx[2], qy[2], qx[3], qy[3], px, py)) {
+            cell[row + X] = c;
+            hit2 = true;
+          }
+        }
+      }
+    }
+    if (hit2) {
+      var ci = c % pf.W, ri = (c - ci) / pf.W;
+      if (ci < c0) c0 = ci;
+      if (ci > c1) c1 = ci;
+      if (ri < r0) r0 = ri;
+      if (ri > r1) r1 = ri;
+    }
+  }
+  return { cell, window: c1 >= c0 ? [c0, r0, c1 + 1, r1 + 1] : null, skipped };
+}
+function centresBbox(lon, lat) {
+  var w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
+  var w2 = Infinity, e2 = -Infinity;
+  for (var k = 0; k < lon.length; k++) {
+    var lo = lon[k], la = lat[k];
+    if (!isFinite(lo) || !isFinite(la)) continue;
+    lo = normLon(lo);
+    var l2 = lo < 0 ? lo + 360 : lo;
+    if (lo < w) w = lo;
+    if (lo > e) e = lo;
+    if (l2 < w2) w2 = l2;
+    if (l2 > e2) e2 = l2;
+    if (la < s) s = la;
+    if (la > n) n = la;
+  }
+  if (e2 - w2 < e - w - 1e-9 && e2 - w2 < 180) {
+    return [-180, s, 180, n];
+  }
+  return [w, s, e, n];
+}
+function centreSpacing(lon, lat, W, H) {
+  function arc(k1, k2) {
+    var a1 = lat[k1] * D2R, a2 = lat[k2] * D2R, dl = (lon[k2] - lon[k1]) * D2R;
+    var c = Math.sin(a1) * Math.sin(a2) + Math.cos(a1) * Math.cos(a2) * Math.cos(dl);
+    return Math.acos(Math.max(-1, Math.min(1, c))) * R2D;
+  }
+  var xs = [], ys = [], step = Math.max(1, Math.floor(W * H / 5e3));
+  for (var k = 0; k < W * H; k += step) {
+    var i = k % W, j = (k - i) / W;
+    if (i + 1 < W) {
+      var dx = arc(k, k + 1);
+      if (isFinite(dx)) xs.push(dx);
+    }
+    if (j + 1 < H) {
+      var dy = arc(k, k + W);
+      if (isFinite(dy)) ys.push(dy);
+    }
+  }
+  function med(v) {
+    v.sort(function(p, q) {
+      return p - q;
+    });
+    return v.length ? v[v.length >> 1] : NaN;
+  }
+  return [med(xs), med(ys)];
+}
+
 // lib/sources/zarr.js
 var CDNS = ["https://cdn.jsdelivr.net/npm/zarrita@0.7/+esm", "https://esm.sh/zarrita@0.7"];
 var zmod = null;
@@ -4220,7 +4513,7 @@ function regularAxis(v, name) {
   var tol = Math.abs(step) * 0.01;
   for (var i = 1; i < n; i++) {
     if (Math.abs(v[i] - v[i - 1] - step) > tol) {
-      throw new Error(name + " is not regularly spaced (irregular and curvilinear grids are not supported yet)");
+      throw new Error(name + " is not regularly spaced, and no 2D longitude / latitude coordinates were found (irregular grids are not supported)");
     }
   }
   return { first: v[0], step, n };
@@ -4241,7 +4534,14 @@ var UNIT_MS = {
   msec: 1,
   ms: 1
 };
-function timeDecoder(units) {
+var MONTHS = {
+  noleap: [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31],
+  all_leap: [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31],
+  "360_day": [30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
+};
+MONTHS["365_day"] = MONTHS.noleap;
+MONTHS["366_day"] = MONTHS.all_leap;
+function timeDecoder(units, calendar) {
   var m = /^\s*(\w+?)s?\s+since\s+(.+?)\s*$/i.exec(String(units || ""));
   if (!m) return null;
   var per = UNIT_MS[m[1].toLowerCase()];
@@ -4251,8 +4551,28 @@ function timeDecoder(units) {
   if (!/(Z|[+-]\d\d:?\d\d)$/.test(ref)) ref += "Z";
   var t0 = Date.parse(ref.replace(/^(\d{4})-(\d)-/, "$1-0$2-").replace(/-(\d)T/, "-0$1T"));
   if (!isFinite(t0)) return null;
-  return function(v) {
+  var mon = MONTHS[String(calendar || "").toLowerCase()];
+  if (!mon) return function(v) {
     return t0 + v * per;
+  };
+  var yearDays = mon.reduce(function(a, b) {
+    return a + b;
+  }, 0);
+  var d0 = new Date(t0), y0 = d0.getUTCFullYear(), dayOfYear = d0.getUTCDate() - 1;
+  for (var k = 0; k < d0.getUTCMonth(); k++) dayOfYear += mon[k];
+  var inDay0 = t0 - Date.UTC(y0, d0.getUTCMonth(), d0.getUTCDate());
+  return function(v) {
+    var ms = dayOfYear * 864e5 + inDay0 + v * per;
+    var days = Math.floor(ms / 864e5), rest = ms - days * 864e5;
+    var y = y0 + Math.floor(days / yearDays);
+    days -= Math.floor(days / yearDays) * yearDays;
+    var mo = 0;
+    while (days >= mon[mo]) {
+      days -= mon[mo];
+      mo++;
+    }
+    var last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    return Date.UTC(y, mo, Math.min(days + 1, last)) + rest;
   };
 }
 async function timeValues(ds, arr) {
@@ -4323,6 +4643,48 @@ async function variableCrs(ds, arr, xName, xAttrs, opts) {
   }
   throw new Error("no CRS found for " + arr.path + " (no grid_mapping); enter one, e.g. EPSG:3031");
 }
+async function curvilinearCoords(ds, arr, dims, parent) {
+  var a = arr.attrs || {}, names = a.coordinates;
+  names = Array.isArray(names) ? names.join(" ") : String(names || "");
+  names = names.split(/\s+/).filter(Boolean);
+  var fromAttr = names.length > 0;
+  if (!fromAttr && ds.paths) names = ds.paths.map(function(q) {
+    return q.replace(/^\//, "");
+  });
+  var lon = null, lat = null;
+  for (var k = 0; k < names.length && !(lon && lat); k++) {
+    var n = names[k], c = null;
+    try {
+      c = await arrayAt(ds, (n.indexOf("/") < 0 ? parent + "/" : "/") + n);
+    } catch (e) {
+      try {
+        c = await arrayAt(ds, "/" + n);
+      } catch (e2) {
+        c = null;
+      }
+    }
+    if (!c || c.shape.length !== 2) continue;
+    var cd = dimNames(c);
+    if (!cd || dims.indexOf(cd[0]) < 0 || dims.indexOf(cd[1]) < 0) continue;
+    var r = role(n.split("/").pop(), c.attrs);
+    var sn = String((c.attrs || {}).standard_name || "");
+    if (!lon && (r === "x" || /longitude/.test(sn)) && isLonLat(n, c.attrs)) lon = { arr: c, name: n, dims: cd };
+    else if (!lat && (r === "y" || /latitude/.test(sn)) && isLonLat(n, c.attrs)) lat = { arr: c, name: n, dims: cd };
+  }
+  if (!lon || !lat || lon.dims.join() !== lat.dims.join()) return null;
+  return { lon: lon.arr, lat: lat.arr, lonName: lon.name, latName: lat.name, dims: lon.dims, fromAttr };
+}
+async function cellBounds(ds, c, parent) {
+  var b = c.attrs && c.attrs.bounds;
+  if (!b) return null;
+  try {
+    var ba = await arrayAt(ds, parent + "/" + String(b));
+    if (ba.shape.length !== 3 || ba.shape[2] !== 4) return null;
+    return toNumbers((await ds.z.get(ba)).data);
+  } catch (e) {
+    return null;
+  }
+}
 function describe(ds, name, opts) {
   opts = opts || {};
   var key = name + "|" + (opts.crs || "");
@@ -4346,34 +4708,98 @@ function describe(ds, name, opts) {
         return role(d2, coords[i] && coords[i].attrs);
       });
       var xi = roles.lastIndexOf("x"), yi = roles.lastIndexOf("y"), ti = roles.indexOf("t");
-      if (xi < 0 || yi < 0) {
-        if (arr.shape.length < 2) throw new Error(name + " is not gridded");
-        yi = arr.shape.length - 2;
-        xi = arr.shape.length - 1;
+      var cv = (arr.attrs || {}).grid_mapping && xi >= 0 && yi >= 0 && coords[xi] && coords[yi] ? null : await curvilinearCoords(ds, arr, dims, parent);
+      var curv = null, geom;
+      if (cv) {
+        xi = dims.indexOf(cv.dims[1]);
+        yi = dims.indexOf(cv.dims[0]);
+        if (roles[xi] === "t" || roles[yi] === "t") cv = null;
       }
-      if (!coords[xi] || !coords[yi]) {
-        throw new Error(name + ": no 1D coordinate arrays for " + dims[xi] + " / " + dims[yi]);
+      if (cv) {
+        var Wc = arr.shape[xi], Hc = arr.shape[yi];
+        var lonv = toNumbers((await ds.z.get(cv.lon)).data), latv = toNumbers((await ds.z.get(cv.lat)).data);
+        var blon = await cellBounds(ds, cv.lon, parent), blat = blon ? await cellBounds(ds, cv.lat, parent) : null;
+        var corners = null, cornersFrom = "half way between centres";
+        if (blon && blat) {
+          corners = { bounds: [blon, blat] };
+          cornersFrom = "from their CF bounds";
+        } else if (/^lon_rho$/.test(cv.lonName.split("/").pop())) {
+          try {
+            var pl = await arrayAt(ds, parent + "/lon_psi"), pt = await arrayAt(ds, parent + "/lat_psi");
+            if (pl.shape[0] === Hc - 1 && pl.shape[1] === Wc - 1) {
+              corners = { psi: [toNumbers((await ds.z.get(pl)).data), toNumbers((await ds.z.get(pt)).data)] };
+              cornersFrom = "from the ROMS psi points";
+            }
+          } catch (e) {
+          }
+        }
+        var bbx = centresBbox(lonv, latv), sp = centreSpacing(lonv, latv, Wc, Hc);
+        curv = {
+          lon: lonv,
+          lat: latv,
+          corners,
+          W: Wc,
+          H: Hc,
+          names: [cv.lonName, cv.latName],
+          fp: null,
+          projected: /* @__PURE__ */ new Map(),
+          cells: /* @__PURE__ */ new Map()
+        };
+        geom = {
+          origin: null,
+          res: [sp[0], -sp[1]],
+          crs: "EPSG:4326",
+          wrap: false,
+          ext: bbx,
+          bbox: bbx,
+          crsFrom: "the 2D coordinates " + cv.lonName + " / " + cv.latName + " (curvilinear; cell corners " + cornersFrom + "), WGS84 taken as the datum",
+          assumed: true
+        };
+      } else {
+        geom = await regularGeometry();
       }
-      var xv = toNumbers((await ds.z.get(coords[xi])).data);
-      var yv = toNumbers((await ds.z.get(coords[yi])).data);
-      var xa = regularAxis(xv, dims[xi]), ya = regularAxis(yv, dims[yi]);
-      var cs = await variableCrs(ds, arr, dims[xi], coords[xi].attrs, opts), crs = cs.crs;
-      var origin = [xa.first - xa.step / 2, ya.first - ya.step / 2];
-      var res = [xa.step, ya.step];
+      async function regularGeometry() {
+        if (xi < 0 || yi < 0) {
+          if (arr.shape.length < 2) throw new Error(name + " is not gridded");
+          yi = arr.shape.length - 2;
+          xi = arr.shape.length - 1;
+        }
+        if (!coords[xi] || !coords[yi]) {
+          throw new Error(name + ": no 1D coordinate arrays for " + dims[xi] + " / " + dims[yi]);
+        }
+        var xv = toNumbers((await ds.z.get(coords[xi])).data);
+        var yv = toNumbers((await ds.z.get(coords[yi])).data);
+        var xa = regularAxis(xv, dims[xi]), ya = regularAxis(yv, dims[yi]);
+        var cs = await variableCrs(ds, arr, dims[xi], coords[xi].attrs, opts), crs = cs.crs;
+        var W2 = arr.shape[xi], H2 = arr.shape[yi];
+        var origin = [xa.first - xa.step / 2, ya.first - ya.step / 2];
+        var res = [xa.step, ya.step];
+        var x0 = origin[0], x1 = origin[0] + W2 * res[0], y0 = origin[1], y1 = origin[1] + H2 * res[1];
+        var ext = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+        var geo = crs === "EPSG:4326";
+        var wrap = geo && ext[2] > 180.5;
+        var bbox = geo ? [
+          wrap ? -180 : Math.max(-180, ext[0]),
+          Math.max(-90, ext[1]),
+          wrap ? 180 : Math.min(180, ext[2]),
+          Math.min(90, ext[3])
+        ] : transformBbox(ext, crs, "EPSG:4326");
+        return {
+          origin,
+          res,
+          crs,
+          wrap,
+          ext,
+          bbox,
+          crsFrom: cs.from,
+          assumed: cs.assumed
+        };
+      }
       var W = arr.shape[xi], H = arr.shape[yi];
-      var x0 = origin[0], x1 = origin[0] + W * res[0], y0 = origin[1], y1 = origin[1] + H * res[1];
-      var ext = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
-      var geo = crs === "EPSG:4326";
-      var wrap = geo && ext[2] > 180.5;
-      var bbox = geo ? [
-        wrap ? -180 : Math.max(-180, ext[0]),
-        Math.max(-90, ext[1]),
-        wrap ? 180 : Math.min(180, ext[2]),
-        Math.min(90, ext[3])
-      ] : transformBbox(ext, crs, "EPSG:4326");
       var times = null;
       if (ti >= 0 && coords[ti]) {
-        var dec = timeDecoder(coords[ti].attrs && coords[ti].attrs.units);
+        var tat = coords[ti].attrs || {};
+        var dec = timeDecoder(tat.units, tat.calendar);
         if (dec) {
           var tv = await timeValues(ds, coords[ti]);
           times = Array.prototype.map.call(tv, dec);
@@ -4391,12 +4817,17 @@ function describe(ds, name, opts) {
             vals = null;
           }
         }
+        var def = 0;
+        if (vals && /ocean_s_coordinate|ocean_sigma/.test(String(ca.standard_name || "")) && ca.positive === "up") {
+          for (var q = 1; q < vals.length; q++) if (vals[q] > vals[def]) def = q;
+        }
         extra.push({
           d,
           name: dims[d],
           n: arr.shape[d],
           values: vals,
           units: ca.units || "",
+          def,
           longName: ca.long_name || ca.standard_name || "",
           positive: ca.positive || ""
         });
@@ -4413,14 +4844,15 @@ function describe(ds, name, opts) {
         W,
         H,
         extra,
-        origin,
-        res,
-        crs,
-        crsFrom: cs.from + "; definition: " + crsProvenance(crs),
-        crsAssumed: !!cs.assumed,
-        wrap,
-        extent: ext,
-        bbox,
+        curv,
+        origin: geom.origin,
+        res: geom.res,
+        crs: geom.crs,
+        crsFrom: geom.crsFrom + "; definition: " + crsProvenance(geom.crs),
+        crsAssumed: !!geom.assumed,
+        wrap: geom.wrap,
+        extent: geom.ext,
+        bbox: geom.bbox,
         scale: a.scale_factor !== void 0 && a.scale_factor !== null ? +a.scale_factor : 1,
         offset: a.add_offset !== void 0 && a.add_offset !== null ? +a.add_offset : 0,
         fill: fill === null || fill === void 0 || fill === "NaN" ? null : Number(fill),
@@ -4468,7 +4900,7 @@ function selection(v, sel) {
   });
   (v.extra || []).forEach(function(e) {
     var k = sel && sel[e.name];
-    if (k !== void 0 && k !== null) at[e.d] = Math.max(0, Math.min(e.n - 1, Math.floor(+k) || 0));
+    at[e.d] = k !== void 0 && k !== null ? Math.max(0, Math.min(e.n - 1, Math.floor(+k) || 0)) : e.def || 0;
   });
   return at;
 }
@@ -4477,6 +4909,7 @@ async function readZarrWarped(a, grid, opts) {
   var maxChunks = opts.maxChunks || a.maxChunks || 64, maxMB = opts.maxMB || 400;
   var ds = await openDataset(a.url);
   var v = await describe(ds, a.variable, { crs: a.crs });
+  if (v.curv) return readCurvilinear(a, grid, opts, ds, v, maxChunks, maxMB);
   var proj2 = globalThis.proj4(ensureCrs(grid.crs), ensureCrs(v.crs));
   var toSrc = proj2;
   if (v.wrap) {
@@ -4603,6 +5036,237 @@ async function readZarrWarped(a, grid, opts) {
   }
   return { bands: res.bands, valid: res.valid, nodata: NaN, level: f, log };
 }
+function curvCells(v, grid) {
+  var cv = v.curv, crs = ensureCrs(grid.crs);
+  if (!cv.fp) cv.fp = footprints(cv.lon, cv.lat, cv.W, cv.H, cv.corners);
+  if (!cv.projected.has(crs)) {
+    if (cv.projected.size > 3) cv.projected.clear();
+    cv.projected.set(crs, projectFootprints(cv.fp, crs));
+  }
+  var gk = crs + "|" + grid.bbox.join(",") + "|" + grid.width + "x" + grid.height;
+  if (!cv.cells.has(gk)) {
+    if (cv.cells.size > 8) cv.cells.delete(cv.cells.keys().next().value);
+    cv.cells.set(gk, rasterCells(cv.projected.get(crs), grid));
+  }
+  return cv.cells.get(gk);
+}
+async function readCurvilinear(a, grid, opts, ds, v, maxChunks, maxMB) {
+  var rc = curvCells(v, grid), win = rc.window;
+  if (!win) return null;
+  var cx = v.arr.chunks[v.xi], cy = v.arr.chunks[v.yi];
+  var ch0 = Math.floor(win[0] / cx), ch1 = Math.ceil(win[2] / cx) - 1;
+  var cr0 = Math.floor(win[1] / cy), cr1 = Math.ceil(win[3] / cy) - 1;
+  var n = (ch1 - ch0 + 1) * (cr1 - cr0 + 1);
+  var chunkMB = v.arr.chunks.reduce(function(p2, c2) {
+    return p2 * c2;
+  }, 1) * (v.arr.dtype.match(/\d+/) ? +v.arr.dtype.match(/\d+/)[0] / 8 : 4) / 1048576;
+  if (n > maxChunks || n * chunkMB > maxMB) {
+    throw new Error("this region needs " + n + " chunks of " + v.path.slice(1) + " (" + v.arr.chunks.join("x") + ", " + chunkMB.toFixed(chunkMB < 10 ? 1 : 0) + " MB each decoded); draw a smaller one (at most " + Math.min(maxChunks, Math.floor(maxMB / chunkMB)) + " chunks)");
+  }
+  var ww = win[2] - win[0], wh = win[3] - win[1];
+  var vals = new Float32Array(ww * wh).fill(NaN);
+  var at = selection(v, a.sel);
+  if (v.ti >= 0) at[v.ti] = Math.max(0, a.index || 0);
+  var jobs = [];
+  for (var r = cr0; r <= cr1; r++) for (var c = ch0; c <= ch1; c++) jobs.push([c, r]);
+  var log = [], cv = v.curv;
+  var scale = v.scale, offset = v.offset, fill = v.fill, missing = v.missing;
+  await pool3(jobs, 4, async function(j) {
+    var coords = v.dims.map(function(d2, i) {
+      if (i === v.xi) return j[0];
+      if (i === v.yi) return j[1];
+      return Math.floor((at[i] || 0) / v.arr.chunks[i]);
+    });
+    var r0 = j[1] * cy, r1 = Math.min(v.H, r0 + cy), c0 = j[0] * cx, c1 = Math.min(v.W, c0 + cx);
+    var w = Infinity, s = Infinity, e = -Infinity, nn = -Infinity;
+    for (var y = r0; y < r1; y++) {
+      for (var x = c0; x < c1; x++) {
+        var lo = cv.lon[y * v.W + x], la = cv.lat[y * v.W + x];
+        if (lo < w) w = lo;
+        if (lo > e) e = lo;
+        if (la < s) s = la;
+        if (la > nn) nn = la;
+      }
+    }
+    var key = a.url + "|" + v.path + "|" + coords.join(".");
+    var t0 = performance.now();
+    var got = cached(key, function(sig) {
+      return v.arr.getChunk(coords, { signal: sig });
+    }, opts.signal);
+    var ent = {
+      kind: "chunk",
+      z: v.path.slice(1),
+      x: j[0],
+      y: j[1],
+      url: a.url + chunkKey(v, coords)[0],
+      crs: "EPSG:4326",
+      ok: false,
+      status: null,
+      bytes: 0,
+      ms: 0,
+      cached: got.hit,
+      extent: e - w < 180 ? [w, s, e, nn] : [-180, s, 180, nn]
+    };
+    log.push(ent);
+    var chunk;
+    try {
+      chunk = await got.p;
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      ent.error = String(err && err.message || err);
+      ent.status = 404;
+      return;
+    }
+    ent.ms = Math.round(performance.now() - t0);
+    ent.ok = true;
+    ent.status = got.hit ? "cache" : 200;
+    if (!got.hit) {
+      var keys = chunkKey(v, coords);
+      for (var q = 0; q < keys.length; q++) {
+        if (ds.counting.bytes.has(keys[q])) {
+          ent.bytes = ds.counting.bytes.get(keys[q]);
+          break;
+        }
+      }
+    }
+    var data = chunk.data, st = chunk.stride, big = typeof data[0] === "bigint";
+    var base = 0;
+    for (var d = 0; d < coords.length; d++) {
+      if (d === v.xi || d === v.yi) continue;
+      base += ((at[d] || 0) - coords[d] * v.arr.chunks[d]) * st[d];
+    }
+    var sx = st[v.xi], sy = st[v.yi];
+    var Y0 = Math.max(win[1], r0), Y1 = Math.min(win[3], r1);
+    var X0 = Math.max(win[0], c0), X1 = Math.min(win[2], c1);
+    for (var Y = Y0; Y < Y1; Y++) {
+      var so = base + (Y - r0) * sy, o = (Y - win[1]) * ww - win[0];
+      for (var X = X0; X < X1; X++) {
+        var raw = data[so + (X - c0) * sx];
+        if (big) raw = Number(raw);
+        if (raw === fill || raw === missing || raw !== raw) continue;
+        vals[o + X] = raw * scale + offset;
+      }
+    }
+  });
+  var npx = grid.width * grid.height, out = new Float32Array(npx).fill(NaN), valid = new Uint8Array(npx);
+  function valueOf(k) {
+    var ci = k % v.W, ri = (k - ci) / v.W;
+    return vals[(ri - win[1]) * ww + (ci - win[0])];
+  }
+  var cell = rasterCells(v.curv.projected.get(ensureCrs(grid.crs)), grid, {
+    window: win,
+    keep: function(k) {
+      var x = valueOf(k);
+      return x === x;
+    }
+  }).cell;
+  var any = false;
+  for (var p = 0; p < npx; p++) {
+    if (cell[p] < 0) continue;
+    var val = valueOf(cell[p]);
+    out[p] = val;
+    valid[p] = 1;
+    any = true;
+  }
+  if (!any) {
+    var bad = log.filter(function(t) {
+      return t.error;
+    })[0];
+    if (bad && log.every(function(t) {
+      return !t.ok;
+    })) throw new Error("no chunk could be read (" + bad.error + ")");
+    return null;
+  }
+  return { bands: [out], valid, nodata: NaN, level: 1, log };
+}
+async function cellValue(a, grid, opts) {
+  var r = await readZarrWarped(a, grid, opts);
+  return r && r.valid[0] ? r.bands[0][0] : NaN;
+}
+async function scalarAt(ds, path) {
+  var r = await ds.z.get(await arrayAt(ds, path));
+  var x = r && r.data !== void 0 ? r.data : r;
+  return x && x.length !== void 0 ? Number(x[0]) : Number(x);
+}
+async function zarrProfile(a, grid, dimName, opts) {
+  opts = opts || {};
+  var ds = await openDataset(a.url);
+  var v = await describe(ds, a.variable, { crs: a.crs });
+  var e = v.extra.filter(function(x) {
+    return x.name === dimName;
+  })[0] || v.extra[0];
+  if (!e) throw new Error(a.variable + " has no dimension other than x, y and time");
+  var data = new Array(e.n).fill(NaN);
+  var idx = [];
+  for (var k = 0; k < e.n; k++) idx.push(k);
+  await pool3(idx, 4, async function(k2) {
+    var sel = Object.assign({}, a.sel || {});
+    sel[e.name] = k2;
+    data[k2] = await cellValue(Object.assign({}, a, { sel }), grid, opts);
+  });
+  var out = {
+    dim: e.name,
+    n: e.n,
+    values: e.values,
+    units: e.units,
+    positive: e.positive,
+    data,
+    z: null,
+    zFrom: ""
+  };
+  var parent = v.path.replace(/\/[^/]*$/, "");
+  var dimArr = await arrayAt(ds, parent + "/" + e.name).catch(function() {
+    return null;
+  });
+  var isS = !!dimArr && /ocean_s_coordinate/.test(String((dimArr.attrs || {}).standard_name || ""));
+  if (isS && e.values && v.curv && /lon_rho$/.test(v.curv.names[0])) {
+    try {
+      var cs = await ds.z.get(await arrayAt(ds, parent + "/" + (e.name === "s_w" ? "Cs_w" : "Cs_r")));
+      var hc = await scalarAt(ds, parent + "/hc");
+      var vt = 1;
+      try {
+        vt = await scalarAt(ds, parent + "/Vtransform");
+      } catch (err) {
+        vt = 1;
+      }
+      if (vt !== 2) vt = 1;
+      var h = await cellValue(Object.assign({}, a, { variable: "h", sel: null }), grid, opts);
+      var zeta = 0, zf = "zeta at this time";
+      try {
+        zeta = await cellValue(Object.assign({}, a, { variable: "zeta", sel: null }), grid, opts);
+      } catch (err) {
+        zeta = NaN;
+      }
+      if (!isFinite(zeta)) {
+        zeta = 0;
+        zf = "zeta taken as 0";
+      }
+      if (isFinite(h) && isFinite(hc)) {
+        out.z = e.values.map(function(sv, k2) {
+          var C = Number(cs.data[k2]), z;
+          if (vt === 2) {
+            var z0 = (hc * sv + h * C) / (hc + h);
+            z = zeta + (zeta + h) * z0;
+          } else {
+            var z1 = hc * sv + (h - hc) * C;
+            z = z1 + zeta * (1 + z1 / h);
+          }
+          return -z;
+        });
+        out.zFrom = "ROMS Vtransform " + vt + ", hc " + hc + ", h " + +h.toFixed(2) + " m, " + zf;
+      }
+    } catch (err) {
+      out.zFrom = "s-coordinate (no depth: " + String(err && err.message || err) + ")";
+    }
+  } else if (e.values && /^(m|meters?|metres?)$/i.test(e.units)) {
+    out.z = e.positive === "up" ? e.values.map(function(x) {
+      return -x;
+    }) : e.values.slice();
+    out.zFrom = e.name + " (" + e.units + (e.positive ? ", positive " + e.positive : "") + ")";
+    out.zIsCoordinate = true;
+  }
+  return out;
+}
 function isoDay(ms) {
   return new Date(ms).toISOString().slice(0, 10);
 }
@@ -4694,12 +5358,14 @@ function zarrCatalog(opts) {
         crsAssumed: v.crsAssumed,
         bbox: v.bbox,
         res: v.res,
+        curvilinear: !!v.curv,
         units: v.units,
         longName: v.longName,
         extra: v.extra.map(function(e) {
           return {
             name: e.name,
             n: e.n,
+            def: e.def,
             values: e.values,
             units: e.units,
             longName: e.longName,
@@ -4757,7 +5423,9 @@ function zarrCatalog(opts) {
           href: url + "#" + key + "@" + i + (selTag ? "[" + selTag + "]" : "")
         };
         meta[key] = v.units ? { unit: v.units } : {};
-        if (!c.ds.refs) meta[key].gdal = {
+        if (c.ds.refs) meta[key].noVrt = "Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)";
+        else if (v.curv) meta[key].noVrt = "curvilinear grids are not exported as a source VRT yet (use the GeoTIFF)";
+        else meta[key].gdal = {
           slice: v.dims.map(function(d, j) {
             return j === v.xi || j === v.yi ? null : j === v.ti ? Math.max(0, i) : at[j];
           }).filter(function(x) {
@@ -6414,6 +7082,7 @@ var GIBS = "https://gibs.earthdata.nasa.gov/wmts/";
 var SCOGS = "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/55/G/EN/2025/1/";
 var PGC = "https://pgc-opendata-dems.s3.us-west-2.amazonaws.com/";
 var VIRT = "https://raw.githubusercontent.com/mdsumner/virtualized/refs/heads/main/";
+var CMIP6 = "https://storage.googleapis.com/cmip6/CMIP6/CMIP/";
 var EXAMPLES = {
   tiles: [
     ["AWS terrain tiles (terrarium elevation, XYZ)", "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
@@ -6464,7 +7133,25 @@ var EXAMPLES = {
     ["BRAN2023 mixed layer depth, daily (Kerchunk Parquet)", VIRT + "remote/ocean_mld_2023.parq"],
     ["BRAN2023 eastward velocity u, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_u_2023.parq"],
     ["BRAN2023 northward velocity v, daily, 51 depths (Kerchunk Parquet)", VIRT + "remote/ocean_v_2023.parq"],
-    ["BRAN2023 ocean temperature, built with R/rhdf5 (Kerchunk Parquet)", VIRT + "zarr/ocean_temp.zarr"]
+    ["BRAN2023 ocean temperature, built with R/rhdf5 (Kerchunk Parquet)", VIRT + "zarr/ocean_temp.zarr"],
+    // CMIP6 ocean models on their own curvilinear grids (Pangeo, Google
+    // Cloud); each chunk holds years of months, so the first read is big
+    [
+      "CMIP6 ACCESS-ESM1-5 sea surface temperature, monthly 1850-2014 (tripolar, 1 degree; 38 MB chunk)",
+      CMIP6 + "CSIRO/ACCESS-ESM1-5/historical/r1i1p1f1/Omon/tos/gn/v20191115"
+    ],
+    [
+      "CMIP6 ACCESS-ESM1-5 ocean temperature, monthly, 50 depths (tripolar; 45 MB chunk)",
+      CMIP6 + "CSIRO/ACCESS-ESM1-5/historical/r1i1p1f1/Omon/thetao/gn/v20191115"
+    ],
+    [
+      "CMIP6 GFDL-ESM4 sea surface temperature, monthly (tripolar, 0.5 degree; 50 MB chunk)",
+      CMIP6 + "NOAA-GFDL/GFDL-ESM4/historical/r1i1p1f1/Omon/tos/gn/v20190726"
+    ],
+    [
+      "CMIP6 IPSL-CM6A-LR sea surface temperature, monthly (NEMO ORCA1 curvilinear)",
+      CMIP6 + "IPSL/IPSL-CM6A-LR/historical/r1i1p1f1/Omon/tos/gn/v20180803"
+    ]
   ]
 };
 function setupPick(id, list, apply, field) {
@@ -6526,6 +7213,7 @@ $("zarrUrl").addEventListener("change", function() {
 var zarrCat = null;
 var zarrNoTime = false;
 var zarrSel = {};
+var zarrExtra = [];
 function zarrSelTag() {
   return Object.keys(zarrSel).sort().map(function(k) {
     return k + ":" + zarrSel[k];
@@ -6566,10 +7254,12 @@ async function describeZarr(fit, keepDates) {
   zarrNoTime = !d.times;
   zarrCatalog2().capabilities = { cloud: false, time: !!d.times };
   capabilitiesChanged(null);
-  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + ", cell " + d.res.map(function(r) {
+  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.curvilinear ? ", cells about " : ", cell ") + d.res.map(function(r) {
     return +Math.abs(r).toPrecision(4);
-  }).join(" x ") + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
-  zarrDimPickers(d.extra || []);
+  }).join(" x ") + (d.curvilinear ? " degrees apart" : "") + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
+  zarrExtra = d.extra || [];
+  zarrDimPickers(zarrExtra);
+  showProfileButton();
   coverLayer.clearLayers();
   L.rectangle(roiLatLngBounds(d.bbox), {
     color: "#b39ddb",
@@ -6591,7 +7281,7 @@ function zarrDimPickers(extra) {
   box.innerHTML = "";
   var keep = {};
   extra.forEach(function(e) {
-    var k = Math.max(0, Math.min(e.n - 1, +zarrSel[e.name] || 0));
+    var k = Math.max(0, Math.min(e.n - 1, zarrSel[e.name] !== void 0 ? +zarrSel[e.name] || 0 : e.def || 0));
     keep[e.name] = k;
     var wrap = document.createElement("div"), lab = document.createElement("label"), sel = document.createElement("select");
     lab.textContent = e.name + (e.longName && e.longName !== e.name ? " (" + e.longName + ")" : "") + (e.positive ? ", positive " + e.positive : "");
@@ -7997,7 +8687,9 @@ function setPin(latlng, comp, r) {
     interactive: false
   }).addTo(map);
   $("pointBox").classList.remove("hide");
+  showProfileButton();
   runPoint();
+  if (prof.on) runProfile().catch(profileFail);
 }
 function clearPin() {
   if (pin.ctl) pin.ctl.abort();
@@ -8009,9 +8701,14 @@ function clearPin() {
   pin.key = "";
   $("pointBox").classList.add("hide");
   $("pointNote").textContent = "click the image to pin a point and plot its values through the days";
+  if (prof.ctl) prof.ctl.abort();
+  prof.on = false;
+  prof.res = null;
+  $("profileBox").classList.add("hide");
 }
 function pointAfterLoad() {
   if (!pin.ll || !state.comp) return;
+  if (prof.on) runProfile().catch(profileFail);
   if (pinSignature(state.comp) === pin.key) {
     drawPoint();
     return;
@@ -8154,6 +8851,155 @@ $("pointCsv").addEventListener("click", function() {
   var a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([meta + lines.join("\n") + "\n"], { type: "text/csv" }));
   a.download = "rangefinder-point-" + pin.ll.lng.toFixed(4) + "_" + pin.ll.lat.toFixed(4) + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function() {
+    URL.revokeObjectURL(a.href);
+  }, 5e3);
+});
+var prof = { on: false, ctl: null, res: null, day: "" };
+function profileDim() {
+  if ($("src").value !== "zarr") return null;
+  return zarrExtra.filter(function(e) {
+    return e.n > 1;
+  })[0] || null;
+}
+function showProfileButton() {
+  $("pointProfile").classList.toggle("hide", !profileDim() || !pin.grid || prof.on);
+}
+function profileFail(e) {
+  if (e && e.name === "AbortError") return;
+  $("profileNote").textContent = "profile failed: " + String(e && e.message || e);
+}
+async function runProfile() {
+  var e = profileDim(), day = state.days[state.dayIndex];
+  if (!e || !pin.grid || !day) return;
+  if (prof.ctl) prof.ctl.abort();
+  var ctl = prof.ctl = new AbortController();
+  prof.on = true;
+  showProfileButton();
+  $("profileBox").classList.remove("hide");
+  var key = currentKeys()[0], sc = day.scenes.filter(function(s) {
+    return s.assets[key];
+  })[0];
+  if (!sc) {
+    $("profileNote").textContent = "no " + key + " on " + day.day;
+    return;
+  }
+  $("profileNote").textContent = "reading " + e.n + " levels of " + e.name + " ...";
+  var res = await zarrProfile(sc.assets[key], cellGrid(pin.grid, pin.col, pin.row), e.name, { signal: ctl.signal });
+  if (prof.ctl !== ctl) return;
+  prof.ctl = null;
+  prof.res = res;
+  prof.day = day.day;
+  prof.key = key;
+  drawProfile();
+}
+function drawProfile() {
+  var res = prof.res, svg = $("profileChart");
+  if (!res) {
+    svg.innerHTML = "";
+    return;
+  }
+  var unit = unitOf(prof.key), n = res.data.filter(isFinite).length;
+  var cur = zarrSel[res.dim] !== void 0 ? +zarrSel[res.dim] : -1;
+  $("profileNote").textContent = prof.key + " through " + res.dim + " on " + prof.day + ": " + n + " of " + res.n + " levels with data" + (unit ? "; " + unit : "") + "; down the page: " + (res.z ? "depth (m) from " + res.zFrom : (res.values ? res.dim + (res.units ? " (" + res.units + ")" : "") : res.dim + " index") + (res.zFrom ? "; " + res.zFrom : ""));
+  var ys = res.data.map(function(_, k) {
+    return res.z ? res.z[k] : res.values ? res.positive === "up" ? -res.values[k] : res.values[k] : k;
+  });
+  var W = svg.clientWidth || 280, H = 220, L0 = 46, R0 = 8, T0 = 8, B0 = 18;
+  var v0 = Infinity, v1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  res.data.forEach(function(v, k) {
+    if (isFinite(v)) {
+      v0 = Math.min(v0, v);
+      v1 = Math.max(v1, v);
+    }
+    if (isFinite(ys[k])) {
+      y0 = Math.min(y0, ys[k]);
+      y1 = Math.max(y1, ys[k]);
+    }
+  });
+  if (!isFinite(v0)) {
+    v0 = 0;
+    v1 = 1;
+  }
+  if (v1 === v0) {
+    v0 -= 1;
+    v1 += 1;
+  }
+  if (!isFinite(y0)) {
+    y0 = 0;
+    y1 = 1;
+  }
+  if (y1 === y0) {
+    y0 -= 1;
+    y1 += 1;
+  }
+  var pad = (v1 - v0) * 0.06;
+  v0 -= pad;
+  v1 += pad;
+  function X_(v) {
+    return L0 + (v - v0) / (v1 - v0) * (W - L0 - R0);
+  }
+  function Y_(y) {
+    return T0 + (y - y0) / (y1 - y0) * (H - T0 - B0);
+  }
+  var o = [];
+  o.push('<rect x="' + L0 + '" y="' + T0 + '" width="' + (W - L0 - R0) + '" height="' + (H - T0 - B0) + '" fill="none" stroke="#2a3542"/>');
+  [y0, (y0 + y1) / 2, y1].forEach(function(y) {
+    var lab = res.z || !res.values || res.positive !== "up" ? y : -y;
+    o.push('<text x="' + (L0 - 4) + '" y="' + (Y_(y) + 4) + '" text-anchor="end" font-size="10" fill="#8696a8">' + fmtNum(+lab.toPrecision(4)) + "</text>");
+  });
+  [v0 + pad, v1 - pad].forEach(function(v, j) {
+    o.push('<text x="' + X_(v) + '" y="' + (H - 4) + '" text-anchor="' + (j ? "end" : "start") + '" font-size="10" fill="#8696a8">' + fmtNum(+v.toPrecision(4)) + "</text>");
+  });
+  var pts = [];
+  res.data.forEach(function(v, k) {
+    if (isFinite(v) && isFinite(ys[k])) pts.push([k, v, ys[k]]);
+  });
+  pts.sort(function(a, b) {
+    return a[2] - b[2];
+  });
+  var d = pts.map(function(p, j) {
+    return (j ? "L" : "M") + X_(p[1]).toFixed(1) + "," + Y_(p[2]).toFixed(1);
+  }).join("");
+  if (d) o.push('<path d="' + d + '" fill="none" stroke="#4fc3f7" stroke-width="1.2" stroke-opacity="0.8"/>');
+  pts.forEach(function(p) {
+    var k = p[0];
+    o.push('<circle data-k="' + k + '" cx="' + X_(p[1]).toFixed(1) + '" cy="' + Y_(p[2]).toFixed(1) + '" r="' + (k === cur ? 4 : 2.6) + '" fill="' + (k === cur ? "#ff4081" : "#4fc3f7") + '" style="cursor:pointer"><title>' + res.dim + " " + k + (res.values ? " (" + fmtNum(res.values[k]) + (res.units ? " " + res.units : "") + ")" : "") + (res.z && !res.zIsCoordinate ? ", depth " + fmtNum(+res.z[k].toFixed(2)) + " m" : "") + ": " + fmtNum(p[1]) + "</title></circle>");
+  });
+  svg.innerHTML = o.join("");
+}
+$("pointProfile").addEventListener("click", function() {
+  runProfile().catch(profileFail);
+});
+$("profileHide").addEventListener("click", function() {
+  if (prof.ctl) prof.ctl.abort();
+  prof.on = false;
+  prof.res = null;
+  $("profileBox").classList.add("hide");
+  showProfileButton();
+});
+$("profileChart").addEventListener("click", function(ev) {
+  var k = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-k");
+  if (k === null || k === void 0 || k === "" || !prof.res) return;
+  var sel = $("zdim-" + prof.res.dim);
+  if (!sel) return;
+  sel.value = k;
+  sel.dispatchEvent(new Event("change"));
+});
+$("profileCsv").addEventListener("click", function() {
+  var res = prof.res;
+  if (!res) return;
+  var lines = ["index," + res.dim + ",depth_m," + prof.key];
+  res.data.forEach(function(v, k) {
+    lines.push(k + "," + (res.values ? res.values[k] : "") + "," + (res.z ? res.z[k] : "") + "," + (isFinite(v) ? v : ""));
+  });
+  var meta = "# rangefinder profile: lon " + pin.ll.lng.toFixed(6) + ", lat " + pin.ll.lat.toFixed(6) + ", output pixel " + pin.col + "," + pin.row + " of a " + pin.grid.width + "x" + pin.grid.height + " grid in " + pin.grid.crs + ", " + prof.day + (res.z ? ", depth from " + res.zFrom : "") + "\n";
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([meta + lines.join("\n") + "\n"], { type: "text/csv" }));
+  a.download = "rangefinder-profile-" + pin.ll.lng.toFixed(4) + "_" + pin.ll.lat.toFixed(4) + "_" + prof.day + ".csv";
   document.body.appendChild(a);
   a.click();
   a.remove();

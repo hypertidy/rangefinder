@@ -1,6 +1,7 @@
 // Headless Zarr check: node test-zarr.mjs "<permalink hash with day=>" out.png
 // Loads the day, steps to the next one (should come from the chunk cache),
-// draws "last read" and prints the status lines. Needs `node server.mjs`
+// draws "last read" and prints the status lines (NOSTEP=1: no step, for a
+// store with one day). Needs `node server.mjs`
 // and `npm run bundle-zarrita`.
 import { chromium } from "playwright";
 const NM = process.cwd() + "/node_modules/";
@@ -18,8 +19,14 @@ const done = () => page.waitForFunction(() => { const s = document.getElementByI
 const st = async l => console.log(l, (await page.textContent("#status")).replace(/\s+/g, " "));
 await page.goto("http://localhost:8765/#" + process.argv[2]);
 await page.waitForTimeout(1500); await done(); await st("load:");
-await page.evaluate(() => document.getElementById("status").textContent = "");
-await page.evaluate(() => window.explorer.stepDay(1)); await page.waitForTimeout(300); await done(); await st("step:");
+console.log("info:", await page.textContent("#zarrInfo"));
+// EVAL: an expression over the shown composite (c), e.g. a row of values
+if (process.env.EVAL) console.log("eval:", JSON.stringify(await page.evaluate(new Function("var e = window.explorer, c = e.state.comp || e.state.base; return (" + process.env.EVAL + ");"))));
+if (!process.env.NOSTEP) {
+  await page.evaluate(() => document.getElementById("status").textContent = "");
+  await page.evaluate(() => window.explorer.stepDay(1)); await page.waitForTimeout(300); await done(); await st("step:");
+}
+if (process.env.MAPSHOT) await page.screenshot({ path: process.env.MAPSHOT });
 await page.click("#inspLast"); await page.waitForTimeout(300);
 console.log("last:", await page.textContent("#inspInfo"));
 await page.screenshot({ path: process.argv[3] || "zarr.png" });

@@ -2,7 +2,7 @@
 // node test-values.mjs "<permalink hash>" [out.png]   (with node server.mjs running)
 // Loads the hash, waits for the composite, then hovers the map centre and an
 // off-image corner and prints the readout box each time, then pins a
-// point and prints the point series.
+// point and prints the point series (and with PROFILE=1 its profile).
 import { chromium } from "playwright";
 const NM = process.cwd() + "/node_modules/";
 const map = {
@@ -55,6 +55,15 @@ await page.waitForFunction(() => !/reading/.test(document.getElementById("pointN
 console.log("POINT:", await page.textContent("#pointNote"));
 console.log("POINT dots:", await page.locator("#pointChart circle").count(),
   JSON.stringify(await page.evaluate(() => [...document.querySelectorAll("#pointChart circle title")].slice(0, 4).map(t => t.textContent))));
+// PROFILE=1: the profile through the Zarr store's other dimension at the pin
+if (process.env.PROFILE) {
+  await page.click("#pointProfile");
+  await page.waitForFunction(() => /levels with data|failed/.test(document.getElementById("profileNote").textContent), null,
+    { timeout: 180000 }).catch(() => console.log("profile timeout"));
+  console.log("PROFILE:", await page.textContent("#profileNote"));
+  console.log("PROFILE dots:", JSON.stringify(await page.evaluate(() =>
+    [...document.querySelectorAll("#profileChart circle title")].map(t => t.textContent))));
+}
 await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
 await page.screenshot({ path: shot });
 await page.locator("#pointBox").scrollIntoViewIfNeeded();
