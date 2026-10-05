@@ -78,6 +78,17 @@ Two ways to open it locally:
 3. **Scenes.** Date range (a blank date is an open end), max cloud,
    `Search scenes`. Results are grouped by solar day (local date at the
    scene centre). Click a day to load it, or use the timeline.
+   The search itself has no cloud filter: the max cloud box and the slider
+   under `Search scenes` apply the limit to the result, live. Each day row
+   shows a glyph of that day's footprints over the region (filled for
+   scenes under the limit, more opaque the clearer), how much of the
+   region its clear scenes cover, and clear / flown scene counts. Sort by
+   region covered (default), clear of flown, clear scenes or date, and
+   hide days below a minimum scene count or cover. Hovering a row draws
+   the day's scene thumbnails in place; `score sharpness from thumbnails`
+   adds a haze proxy as a sort key for the listed days. The selected day's
+   footprints are coloured by cloud cover (green clear to red), with
+   scenes over the limit dashed. See `docs/clear-day-scan.md`.
 4. **Timeline.** Under the map once a search returns: one bar per day on a
    true time axis, taller for clearer days, brighter once read. Drag or
    click it, `<` / `>` (or the arrow keys, `[` / `]`), or `play` (key `p`)
@@ -177,6 +188,7 @@ index.html               thin page: UI and wiring only
 explorer.html            generated single-file copy (works from file://)
 lib/explorer.js          entry point; re-exports, groupByDay(), loadComposite()
 lib/geo.js               layer 1: CRS helpers, OutputGrid, solar day
+lib/scan.js              clear-day scan: per-day counts, region cover, sort/filter, sharpness
 lib/sources/stac.js      layers 1+2: STAC API binding (Catalog interface doc)
 lib/sources/starc.js     layers 1+2: starc store binding (acquisitions/products/assets)
 lib/sources/wildtiles.js layers 1+2: wildtiles binding (inventory, tile registry, BANDS.txt)
@@ -201,6 +213,7 @@ docs/design.md           the original design notes (four layers, minimal path)
 docs/rgb-compositing.md  compositing controls and the L2A offset findings
 docs/starc.md            publishing and reading a starc store
 docs/fidelity.md         what the numbers are: exact, approximated, display only
+docs/clear-day-scan.md   finding the clearest day over a region from one search
 docs/sources-brainstorm.md  beyond Sentinel-2: other sources, tile servers
 ```
 
@@ -219,7 +232,8 @@ zarrita 0.7 the same way (esm.sh as a fallback). No build step.
    assets, sorts them least-cloudy first and reads at most `maxScenes`.
 3. `readWarped(href, grid)` (lib/cog.js) reprojects a lattice of grid pixels
    (every 16 px) into the file's CRS, takes the covered window, picks the
-   coarsest overview that is still as fine as the grid, reads the file's
+   coarsest overview that is still as fine as the grid (or the coarsest
+   of all with `lowest overview (fast scan)` ticked), reads the file's
    own tiles under that window (each decoded once and cached), and resamples nearest-neighbour with bilinear coordinate
    interpolation inside each lattice cell.
 4. `mosaic()` fills each grid pixel from the first scene with valid data.
@@ -489,6 +503,12 @@ explorer itself has no dependencies to install).
   the pinned point.
 - `test-inspect.mjs` drives the tile inspector headless (grid, probe,
   walk, last read) from a permalink and a map view.
+- `test-scan.mjs` checks the clear-day scan (rasteriser, sharpness, stats)
+  on `items.json`; given the output of `make_scan_fixture.py` (real
+  Tasmania to Brisbane items, Apr to Jul 2026, walked from the public
+  bucket, about 70 MB, not committed) it ranks the days and checks the
+  design's validation case. `server.mjs` serves that file as collection
+  `sentinel-2-c1-l2a` when it is present.
 - `test.mjs` drives the page headless from a permalink hash and prints the
   status line and bytes read; pixels always come from the real
   sentinel-cogs bucket.

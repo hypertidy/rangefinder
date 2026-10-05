@@ -8,13 +8,17 @@
 // of the world, has native data to a fixed level and is upsampled beyond it,
 // answers 404 or a blank placeholder outside its coverage.
 // Run from dev/: node server.mjs
-// (fixtures: python3 make_fixtures.py; python3 make_starc_fixture.py)
+// (fixtures: python3 make_fixtures.py; python3 make_starc_fixture.py; optional
+// python3 make_scan_fixture.py for /stac/search on sentinel-2-c1-l2a)
 import http from "node:http"; import fs from "node:fs"; import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const items = JSON.parse(fs.readFileSync(path.join(HERE, "fixtures/items.json")));
+// optional: the clear-day scan case (python3 make_scan_fixture.py), as collection sentinel-2-c1-l2a
+const SCAN = path.join(HERE, "fixtures/scan-items.json");
+const scanItems = fs.existsSync(SCAN) ? JSON.parse(fs.readFileSync(SCAN)).features : [];
 const inter = (a, b) => a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
 
@@ -87,12 +91,14 @@ http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "*");
   if (req.method === "OPTIONS") { res.end(); return; }
   if (tilesFor(u, res)) return;
-  if (u.pathname === "/stac/collections") { res.end(JSON.stringify({ collections: [{ id: "sentinel-2-l2a", title: "Sentinel-2 L2A" }] })); return; }
+  if (u.pathname === "/stac/collections") { res.end(JSON.stringify({ collections: [{ id: "sentinel-2-l2a", title: "Sentinel-2 L2A" }].concat(
+    scanItems.length ? [{ id: "sentinel-2-c1-l2a", title: "Sentinel-2 C1 L2A (scan case)" }] : []) })); return; }
   if (u.pathname === "/stac/search") {
     let body = ""; req.on("data", c => body += c); req.on("end", () => {
-      const q = JSON.parse(body); console.log("search", body);
+      const q = JSON.parse(body); console.log("search", body.slice(0, 300));
       const [a, b] = q.datetime.split("/");
-      let f = items.filter(it => inter(it.bbox, q.bbox) && it.properties.datetime >= a && it.properties.datetime <= b);
+      const pool = (q.collections || [])[0] === "sentinel-2-c1-l2a" ? scanItems : items;
+      let f = pool.filter(it => inter(it.bbox, q.bbox) && it.properties.datetime >= a && it.properties.datetime <= b);
       if (q.query) f = f.filter(it => it.properties["eo:cloud_cover"] <= q.query["eo:cloud_cover"].lte);
       const off = q.token ? +q.token : 0;
       const page = f.slice(off, off + q.limit);
