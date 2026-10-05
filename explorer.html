@@ -5694,7 +5694,8 @@ function wildtilesCatalog(opts) {
     // Bucket summary for the page, all discovered from the bucket's keys:
     //   { bands, registry: bool, tiles, days, dayMin, dayMax,
     //     resolutions: [10, 60, ...]           with data, finest first
-    //     regions: [{ id, bbox, res: { 10: nTiles, 60: nTiles }, example }] }
+    //     regions: [{ id, resolution, bbox, res: { <resolution>: nTiles }, example }] }
+    //       (one entry per region and resolution)
     // Regions need the registry; without it there are none and tiles come
     // from the id arithmetic. Only tiles with inventory rows count.
     info: async function() {
@@ -5727,9 +5728,9 @@ function wildtilesCatalog(opts) {
         }
         if (r) resSet.add(r);
         if (!t) return;
-        var k = t.region || "(no region)", bb = lonlat(t), g = regions.get(k);
+        var name = t.region || "(no region)", k = name + "|" + t.res, bb = lonlat(t), g = regions.get(k);
         if (!g) {
-          g = { id: k, bbox: bb.slice(), res: {}, example: t.id };
+          g = { id: name, resolution: t.res, bbox: bb.slice(), res: {}, example: t.id };
           regions.set(k, g);
         }
         g.res[t.res] = (g.res[t.res] || 0) + 1;
@@ -5752,7 +5753,7 @@ function wildtilesCatalog(opts) {
           return a - b;
         }),
         regions: Array.from(regions.values()).sort(function(a, b) {
-          return a.id < b.id ? -1 : 1;
+          return a.id < b.id ? -1 : a.id > b.id ? 1 : a.resolution - b.resolution;
         })
       };
     },
@@ -6312,8 +6313,8 @@ async function readCube(quiet) {
     var op = document.createElement("option");
     op.value = String(i);
     op.textContent = r.id + " (" + Object.keys(r.res).map(function(k) {
-      return k + " m: " + r.res[k];
-    }).join(", ") + ")";
+      return k + " m, " + r.res[k] + " tile" + (r.res[k] > 1 ? "s" : "");
+    }).join("; ") + ")";
     sel.appendChild(op);
     var ex = document.createElement("option");
     ex.value = r.example;
@@ -6330,7 +6331,13 @@ async function readCube(quiet) {
       interactive: false
     }).addTo(coverLayer);
   });
-  $("wtInfo").textContent = info.tiles + " tiles with data at " + info.resolutions.join(" and ") + " m in " + info.regions.length + " regions, " + info.days + " days from " + (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") + (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic") + (info.registryMismatch && info.registryMismatch.length ? "; " + info.registryMismatch.length + " registry row(s) disagree with their tile id's extent and were placed by the id instead (e.g. " + info.registryMismatch.slice(0, 3).join(", ") + ")" : "");
+  $("wtInfo").textContent = info.tiles + " tiles with data at " + info.resolutions.join(" and ") + " m in " + (function(n) {
+    return n + " region" + (n === 1 ? "" : "s");
+  })(
+    new Set(info.regions.map(function(r) {
+      return r.id;
+    })).size
+  ) + ", " + info.days + " days from " + (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") + (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic") + (info.registryMismatch && info.registryMismatch.length ? "; " + info.registryMismatch.length + " registry row(s) disagree with their tile id's extent and were placed by the id instead (e.g. " + info.registryMismatch.slice(0, 3).join(", ") + ")" : "");
   if (!quiet) setStatus("index read: pick a region or draw one, then search");
   return info;
 }
@@ -6348,7 +6355,10 @@ $("wtRegion").addEventListener("change", function() {
   var have = Object.keys(r.res).map(Number).sort(function(a, b) {
     return a - b;
   });
-  if (have.length && have.indexOf(+$("wtRes").value) < 0) $("wtRes").value = String(have[0]);
+  if (have.length && have.indexOf(+$("wtRes").value) < 0) {
+    $("wtRes").value = String(have[0]);
+    $("wtRes").dispatchEvent(new Event("change"));
+  }
   setRoi(r.bbox);
   fitLonLat(r.bbox, 0.1);
 });

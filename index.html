@@ -693,8 +693,8 @@ async function readCube(quiet) {
     var op = document.createElement("option");
     op.value = String(i);
     op.textContent = r.id + " (" + Object.keys(r.res).map(function (k) {
-      return k + " m: " + r.res[k];
-    }).join(", ") + ")";
+      return k + " m, " + r.res[k] + " tile" + (r.res[k] > 1 ? "s" : "");
+    }).join("; ") + ")";
     sel.appendChild(op);
     var ex = document.createElement("option");   // one example tile per region
     ex.value = r.example; ex.textContent = r.id;
@@ -706,7 +706,8 @@ async function readCube(quiet) {
       interactive: false }).addTo(coverLayer);
   });
   $("wtInfo").textContent = info.tiles + " tiles with data at " + info.resolutions.join(" and ") +
-    " m in " + info.regions.length + " regions, " + info.days + " days from " +
+    " m in " + (function (n) { return n + " region" + (n === 1 ? "" : "s"); })(
+      new Set(info.regions.map(function (r) { return r.id; })).size) + ", " + info.days + " days from " +
     (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") +
     (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic") +
     (info.registryMismatch && info.registryMismatch.length ? "; " + info.registryMismatch.length +
@@ -723,9 +724,9 @@ $("readCube").addEventListener("click", function () {
 $("wtRegion").addEventListener("change", function () {
   var r = cubeRegions[+this.value];
   if (!r || this.value === "") return;
-  // keep the current resolution if the region has it, else its finest
+  // regions come one per resolution: switch to it
   var have = Object.keys(r.res).map(Number).sort(function (a, b) { return a - b; });
-  if (have.length && have.indexOf(+$("wtRes").value) < 0) $("wtRes").value = String(have[0]);
+  if (have.length && have.indexOf(+$("wtRes").value) < 0) { $("wtRes").value = String(have[0]); $("wtRes").dispatchEvent(new Event("change")); }
   setRoi(r.bbox);
   fitLonLat(r.bbox, 0.1);
 });
