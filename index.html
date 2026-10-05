@@ -876,8 +876,11 @@ var EXAMPLES = {
      "https://dynamical-noaa-gfs.s3.amazonaws.com/noaa-gfs-analysis/v0.1.0.icechunk"],
     ["HRRR analysis, hourly 2014-, 3 km, CONUS Lambert (Icechunk, dynamical.org)",
      "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-analysis/v0.2.0.icechunk"],
-    ["GFS analysis, virtual chunks into NOAA's GRIB2 (Icechunk, dynamical.org)",
-     "https://dynamical-noaa-gfs.s3.amazonaws.com/noaa-gfs-analysis-virtual/v0.1.0.icechunk"],
+    // source.coop ocean-icechunks: virtual, the chunks stay at NCEI, which
+    // must allow cross-origin reads (their HYCOM and CoastWatch OHC repos
+    // open and list, but those providers send no CORS headers)
+    ["Ocean acidification indicators, North American margins, 1 degree, 14 depths (Icechunk, source.coop; NetCDF at NCEI)",
+     "https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/ocean-icechunks/oa-indicators/climatology"],
     ["MUR SST, daily, 0.01 degree, 2002-2020 (AWS)", "https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1"],
     ["ITS_LIVE ice velocity cube, West Antarctica (EPSG:3031; chunked for time series, so draw a small region)",
      "https://its-live-data.s3.amazonaws.com/datacubes/v2-updated-october2024/S70W060/ITS_LIVE_vel_EPSG3031_G0120_X-1050000_Y450000.zarr"],

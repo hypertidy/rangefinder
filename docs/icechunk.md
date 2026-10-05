@@ -297,6 +297,24 @@ Icechunk v2 repositories on AWS, anonymous read:
   "Unknown codec: gribberish". Not in the picker. Registering a codec
   (a wasm build of gribberish) would be the way in.
 
+source.coop's ocean-icechunks (https://source.coop/ocean-icechunks) has
+five virtual repositories (format v2). Their metadata is CORS-open through
+the S3 endpoint
+https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/ocean-icechunks/<path>
+(the data.source.coop form is what their own docs give):
+
+- oa-indicators/climatology: NCEI ocean acidification climatology, 72
+  variables on (depth 14, lat 76, lon 141), chunks at www.ncei.noaa.gov.
+  Their README says it draws in a browser; NCEI was not reachable from the
+  build container, so unverified here. In the picker.
+- noaa-ohc/na, np, sp: CoastWatch ocean heat content, groups 14day,
+  14day_v1, ... ; chunks at coastwatch.noaa.gov, no CORS. Open and list,
+  reads fail.
+- hycom/hycom-gofs-3pt1-reanalysis: GOFS 3.1, 3-hourly 1994-2015, 40
+  depths, 1/12 degree; chunks in the hycom-gofs-3pt1-reanalysis bucket, no
+  CORS. Open and list, reads fail.
+- test-repo/...: build tests, ignore.
+
 Earthmover's icechunk-public-data bucket (era5_weatherbench2, glad) has
 no CORS, so it cannot be read from a page.
 
