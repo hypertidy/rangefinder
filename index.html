@@ -708,7 +708,10 @@ async function readCube(quiet) {
   $("wtInfo").textContent = info.tiles + " tiles with data at " + info.resolutions.join(" and ") +
     " m in " + info.regions.length + " regions, " + info.days + " days from " +
     (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") +
-    (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic");
+    (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic") +
+    (info.registryMismatch && info.registryMismatch.length ? "; " + info.registryMismatch.length +
+      " registry row(s) disagree with their tile id's extent and were placed by the id instead (e.g. " +
+      info.registryMismatch.slice(0, 3).join(", ") + ")" : "");
   if (!quiet) setStatus("index read: pick a region or draw one, then search");
   return info;
 }

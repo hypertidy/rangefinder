@@ -5626,6 +5626,7 @@ function wildtilesCatalog(opts) {
     }
     var rows = await hp.parquetReadObjects({ file });
     var m = /* @__PURE__ */ new Map();
+    catalog.registryMismatch = [];
     rows.forEach(function(r) {
       var epsg = String(r.zone_epsg || r.epsg || "").replace(/^EPSG:/i, "");
       var t;
@@ -5636,6 +5637,15 @@ function wildtilesCatalog(opts) {
       }
       var ext = [r.xmin, r.ymin, r.xmax, r.ymax].map(Number);
       if (!ext.every(isFinite) && t) ext = tileExtent2(t);
+      else if (t && (!epsg || +epsg === 32700 + t.zone)) {
+        var want = tileExtent2(t);
+        if (want.some(function(v, i) {
+          return Math.abs(v - ext[i]) > t.res;
+        })) {
+          catalog.registryMismatch.push(r.tile_id);
+          ext = want;
+        }
+      }
       var crs = epsg ? "EPSG:" + epsg : t ? utmCode(t.zone, true) : null;
       if (!crs || !ext.every(isFinite)) return;
       m.set(r.tile_id, {
@@ -5735,6 +5745,7 @@ function wildtilesCatalog(opts) {
         registry: !!reg,
         tiles: idx.size,
         days: sorted.length,
+        registryMismatch: catalog.registryMismatch || [],
         dayMin: sorted[0] || null,
         dayMax: sorted[sorted.length - 1] || null,
         resolutions: Array.from(resSet).sort(function(a, b) {
@@ -6319,7 +6330,7 @@ async function readCube(quiet) {
       interactive: false
     }).addTo(coverLayer);
   });
-  $("wtInfo").textContent = info.tiles + " tiles with data at " + info.resolutions.join(" and ") + " m in " + info.regions.length + " regions, " + info.days + " days from " + (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") + (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic");
+  $("wtInfo").textContent = info.tiles + " tiles with data at " + info.resolutions.join(" and ") + " m in " + info.regions.length + " regions, " + info.days + " days from " + (info.dayMin || "?") + " to " + (info.dayMax || "?") + "; bands: " + info.bands.join(", ") + (info.registry ? "" : "; no registry/tiles.parquet, so tiles come from the id arithmetic") + (info.registryMismatch && info.registryMismatch.length ? "; " + info.registryMismatch.length + " registry row(s) disagree with their tile id's extent and were placed by the id instead (e.g. " + info.registryMismatch.slice(0, 3).join(", ") + ")" : "");
   if (!quiet) setStatus("index read: pick a region or draw one, then search");
   return info;
 }
