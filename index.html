@@ -812,6 +812,14 @@ var EXAMPLES = {
     ["AWS terrain GeoTIFF tile, Tasmania (Web Mercator, z10)", "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/10/928/643.tif"],
     ["Tasmania statewide DEM, 2 m (source.coop, Alex Leith)",
      "https://data.source.coop/alexgleith/tasmania-dem-2m/Tasmania_Statewide_2m_DEM_14-08-2021.tif"],
+    ["Sea ice concentration, Antarctic, 2026-01-16 (NSIDC; EPSG:3412, polar stereographic on the Hughes 1980 ellipsoid)",
+     "https://noaadata.apps.nsidc.org/NOAA/G02135/south/daily/geotiff/2026/01_Jan/S_20260116_concentration_v4.0.tif"],
+    ["Sea ice concentration, Arctic, 2026-01-16 (NSIDC; EPSG:3411, Hughes 1980 ellipsoid)",
+     "https://noaadata.apps.nsidc.org/NOAA/G02135/north/daily/geotiff/2026/01_Jan/N_20260116_concentration_v4.0.tif"],
+    ["MUR SST 2025-01-15, daily COG, 0.01 degree (source.coop ghrsst-mur-v2)",
+     "https://data.source.coop/ausantarctic/ghrsst-mur-v2/2025/01/15/20250115090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1_analysed_sst.tif"],
+    ["GEBCO 2023 sub-ice topography (COG, valeria.science)",
+     "https://gebco2023.s3.valeria.science/gebco_2023_sub_ice_topo_cog.tif"],
     ["GEBCO 2026 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2026.tif"],
     ["GEBCO 2025 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2025.tif"],
     ["GEBCO 2024 global terrain, 15 arc-second (source.coop)", "https://data.source.coop/ausantarctic/gebco/GEBCO_2024.tif"]
@@ -821,7 +829,9 @@ var EXAMPLES = {
      "https://raw.githubusercontent.com/mdsumner/rema-ovr/main/REMA-2m_dem_ovr.vrt"],
     ["REMA v2 32 m (Antarctica)", PGC + "rema/mosaics/v2.0/32m_dem_tiles.vrt"],
     ["REMA v2 10 m", PGC + "rema/mosaics/v2.0/10m_dem_tiles.vrt"],
-    ["ArcticDEM v4.1 32 m", PGC + "arcticdem/mosaics/v4.1/32m_dem_tiles.vrt"]
+    ["ArcticDEM v4.1 32 m", PGC + "arcticdem/mosaics/v4.1/32m_dem_tiles.vrt"],
+    ["Copernicus DEM 30 m, global (OpenTopography; tiles in lon/lat)", "https://opentopography.s3.sdsc.edu/raster/COP30/COP30_hh.vrt"],
+    ["NASADEM, global (OpenTopography)", "https://opentopography.s3.sdsc.edu/raster/NASADEM/NASADEM_be.vrt"]
   ],
   zarr: [
     ["MUR SST, daily, 0.01 degree, 2002-2020 (AWS)", "https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1"],
