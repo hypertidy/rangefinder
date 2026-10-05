@@ -84,7 +84,7 @@
   .day:hover { background: var(--bg); }
   .day.sel { background: var(--sel); }
   .day .n { color: var(--muted); font-size: 12px; }
-  #roiInfo { white-space: pre-line; }
+  #roiInfo, #pointNote { white-space: pre-line; }
   #status { margin-top: 10px; font-size: 12px; color: var(--muted);
             white-space: pre-wrap; min-height: 2.5em; }
   #status .err { color: #ff8a80; }
@@ -995,8 +995,8 @@ async function describeZarr(fit, keepDates) {
   $("zarrInfo").textContent = icechunkLine(zinfo && zinfo.icechunk) + d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " +
     d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") +
     " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " +
-    crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.curvilinear ? ", cells about " : ", cell ") +
-    d.res.map(function (r) { return +Math.abs(r).toPrecision(4); }).join(" x ") + (d.curvilinear ? " degrees apart" : "") +
+    crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.dggs ? "; " + d.dggs : (d.curvilinear ? ", cells about " : ", cell ") +
+    d.res.map(function (r) { return +Math.abs(r).toPrecision(4); }).join(" x ") + (d.curvilinear ? " degrees apart" : "")) +
     (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
   zarrExtra = d.extra || [];
   zarrDimPickers(zarrExtra);
@@ -2520,6 +2520,22 @@ async function runPoint() {
   if (pin.ctl === ctl) pin.ctl = null;
   drawPoint();
 }
+// The HEALPix cell under the pinned point, outlined (Zarr on a DGGS only).
+function pinCell(latlng) {
+  if (pin.cell) { map.removeLayer(pin.cell); pin.cell = null; }
+  pin.cellText = "";
+  var key = currentKeys()[0], sc = $("src").value === "zarr" && state.scenes.filter(function (s) { return s.assets[key]; })[0];
+  if (!sc || typeof sc.assets[key] !== "object") return;
+  var ll = pin.ll;
+  X.zarrCellAt(sc.assets[key], latlng.lng, latlng.lat).then(function (c) {
+    if (!c || pin.ll !== ll) return;
+    pin.cell = L.polygon(c.outline.map(function (q) { return [q[1], q[0]]; }),
+      { color: "#ff4081", weight: 1.5, fill: false, interactive: false }).addTo(map);
+    pin.cellText = "HEALPix cell " + c.id + (c.index < 0 ? " (not in the store)" : " (index " + c.index + " along " + c.dim + ")") +
+      ", centre " + c.centre.map(function (x) { return x.toFixed(3); }).join(", ");
+    drawPoint();
+  }).catch(function () { /* not a DGGS, or the cell could not be found */ });
+}
 function setPin(latlng, comp, r) {
   if (pin.marker) map.removeLayer(pin.marker);
   pin.ll = latlng; pin.col = r.col; pin.row = r.row; pin.grid = comp.grid;
@@ -2528,6 +2544,7 @@ function setPin(latlng, comp, r) {
   pin.rows = state.days.map(function (d, i) { return { i: i, day: d.day, state: "pending", values: null }; });
   pin.marker = L.circleMarker(latlng, { radius: 5, color: "#fff", weight: 2, fillColor: "#ff4081",
                                          fillOpacity: 1, interactive: false }).addTo(map);
+  pinCell(latlng);
   $("pointBox").classList.remove("hide");
   showProfileButton();
   runPoint();
@@ -2536,6 +2553,7 @@ function setPin(latlng, comp, r) {
 function clearPin() {
   if (pin.ctl) pin.ctl.abort();
   if (pin.marker) map.removeLayer(pin.marker);
+  if (pin.cell) { map.removeLayer(pin.cell); pin.cell = null; }
   pin.ll = null; pin.grid = null; pin.marker = null; pin.rows = []; pin.key = "";
   $("pointBox").classList.add("hide");
   $("pointNote").textContent = "click the image to pin a point and plot its values through the days";
@@ -2574,7 +2592,7 @@ function drawPoint() {
     ok.length + " of " + rows.length + " days with data" +
     (n.empty ? ", " + n.empty + " empty" : "") + (n.error ? ", " + n.error + " failed" : "") +
     (n.reading + n.pending && pin.ctl ? ", reading ..." : n.pending ? ", " + n.pending + " not read" : "") +
-    (unit ? "; " + unit : "");
+    (unit ? "; " + unit : "") + (pin.cellText ? "\n" + pin.cellText : "");
   $("pointMore").classList.toggle("hide", !n.pending || pin.all);
   $("pointStop").classList.toggle("hide", !pin.ctl);
   var W = svg.clientWidth || 280, H = 150, L0 = 46, R0 = 8, T0 = 8, B0 = 18;

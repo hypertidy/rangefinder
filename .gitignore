@@ -11,3 +11,4 @@ dev/hyparquet-compressors.esm.js
 dev/fixtures/scan-items.json
 dev/icechunk.esm.js
 dev/fixtures/icechunk/
+dev/fixtures/healpix/

@@ -201,6 +201,7 @@ lib/sources/cog.js       layers 1+2: pasted COG URLs (headers only)
 lib/sources/tiles.js     layers 1+2: XYZ template or WMTS capabilities (layers, sets, times)
 lib/sources/zarr.js      layers 1-3: one variable of a Zarr store (zarrita), chunk reads, profiles
 lib/curvilinear.js       cell footprints of 2D lon/lat grids, projected and rasterised
+lib/dggs.js              HEALPix grids: detection, healpix-geo (wasm), the inverse read
 lib/cog.js               layer 3: windowed overview reads warped to the grid
 lib/chunks.js            shared byte-budgeted cache of native tiles and chunks
 lib/tiles.js             layer 3: tile matrix sets, URL templates, tile fetch/decode,
@@ -355,6 +356,20 @@ design:
   antimeridian are drawn on both sides in lon/lat and Web Mercator. No
   source VRT for these yet (the GeoTIFF works). Longitudes 0..360 are
   wrapped.
+- A HEALPix variable (one cell dimension, no coordinates; see
+  `lib/dggs.js` and `docs/healpix.md`) is recognised by xdggs / Zarr DGGS
+  attributes (`grid_name`, `level`, `indexing_scheme`, or `dggs`), a CF
+  grid mapping (`grid_mapping_name: healpix`, `healpix_nside`,
+  `healpix_order`) or a `crs` attribute dictionary, on the variable, its
+  coordinates, a `crs` variable or the root group. The read inverts the
+  view: each output pixel's centre goes to lon/lat, to a cell id
+  (healpix-geo, loaded from jsdelivr on first use), to its chunk; nested
+  and ring are both read as stored. A `cell_ids` coordinate that is not
+  0 .. 12 nside^2 - 1 (a regional subset) is used as the cell list. The
+  sphere is assumed (and flagged) unless the attributes name an
+  ellipsoid. Past the chunk cap the most-used chunks are read and the rest
+  are left empty and shown as "not read" in the inspector. Pinning a point
+  outlines its cell. No source VRT.
 - The CRS is EPSG:4326 for lon/lat axes, else the variable's
   `grid_mapping` (`crs_wkt` / `spatial_ref`), else `proj:code` / `crs`
   attributes, else the CRS box on the page.
@@ -524,6 +539,12 @@ explorer itself has no dependencies to install).
   the values, `?tag=`, and the snapshot pinned by a permalink
   (`npm run bundle-icechunk` first; `REMOTE=1` also opens dynamical.org's
   GFS analysis).
+- `node make_healpix_fixture.mjs` writes HEALPix stores (levels 3, 7 and
+  a level 8 regional subset; each value is its cell id) to
+  `fixtures/healpix/`, served at `/hp/`. `test-healpix.mjs` checks every
+  sampled pixel against healpix-geo directly (no tolerance), the chunk
+  cap, the pinned cell, and the footprints against the inverse
+  (`REMOTE=<store url>` also opens a live store).
 - `test-inspect.mjs` drives the tile inspector headless (grid, probe,
   walk, last read) from a permalink and a map view.
 - `test-scan.mjs` checks the clear-day scan (rasteriser, sharpness, stats)

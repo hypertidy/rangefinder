@@ -10,7 +10,8 @@
 // Run from dev/: node server.mjs
 // (fixtures: python3 make_fixtures.py; python3 make_starc_fixture.py; optional
 // python3 make_scan_fixture.py for /stac/search on sentinel-2-c1-l2a;
-// python3 make_icechunk_fixture.py for Icechunk repositories at /ic/)
+// python3 make_icechunk_fixture.py for Icechunk repositories at /ic/;
+// node make_healpix_fixture.mjs for HEALPix stores at /hp/)
 import http from "node:http"; import fs from "node:fs"; import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
@@ -127,7 +128,7 @@ http.createServer((req, res) => {
   }
   const bucket = [["/wt/", "fixtures/wt/"], ["/starc/", "fixtures/starc/"],
                   ["/starc-flat/", "fixtures/starc-flat/"], ["/s3/store/", "fixtures/starc/"],
-                  ["/refs/", "fixtures/refs/"], ["/ic/", "fixtures/icechunk/"]]
+                  ["/refs/", "fixtures/refs/"], ["/ic/", "fixtures/icechunk/"], ["/hp/", "fixtures/healpix/"]]
     .find(([pre]) => u.pathname.startsWith(pre));
   if (bucket) {
     const f = path.join(HERE, bucket[1], decodeURIComponent(u.pathname.slice(bucket[0].length)));

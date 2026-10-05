@@ -85,7 +85,7 @@
   .day:hover { background: var(--bg); }
   .day.sel { background: var(--sel); }
   .day .n { color: var(--muted); font-size: 12px; }
-  #roiInfo { white-space: pre-line; }
+  #roiInfo, #pointNote { white-space: pre-line; }
   #status { margin-top: 10px; font-size: 12px; color: var(--muted);
             white-space: pre-wrap; min-height: 2.5em; }
   #status .err { color: #ff8a80; }
@@ -621,6 +621,7 @@ __export(explorer_exports, {
   wktEpsg: () => wktEpsg,
   wmtsSource: () => wmtsSource,
   zarrCatalog: () => zarrCatalog,
+  zarrCellAt: () => zarrCellAt,
   zarrProfile: () => zarrProfile
 });
 
@@ -4472,6 +4473,493 @@ function centreSpacing(lon, lat, W, H) {
   return [med(xs), med(ys)];
 }
 
+// lib/dggs.js
+var HP_BASES = ["https://cdn.jsdelivr.net/npm/healpix-geo@0.3.3/", "https://unpkg.com/healpix-geo@0.3.3/"];
+var hpmod = null;
+function healpixGeo() {
+  if (!hpmod) {
+    hpmod = (async function() {
+      var last;
+      for (var i = 0; i < HP_BASES.length; i++) {
+        try {
+          var bg = await import(HP_BASES[i] + "healpix_geo_bg.js");
+          var r = await fetch(HP_BASES[i] + "healpix_geo_bg.wasm");
+          if (!r.ok) throw new Error("HTTP " + r.status + " for healpix_geo_bg.wasm");
+          var inst = (await WebAssembly.instantiate(await r.arrayBuffer(), { "./healpix_geo_bg.js": bg })).instance;
+          bg.__wbg_set_wasm(inst.exports);
+          inst.exports.__wbindgen_start();
+          return bg;
+        } catch (e) {
+          last = e;
+        }
+      }
+      throw new Error("could not load healpix-geo: " + (last && last.message || last));
+    })();
+    hpmod.catch(function() {
+      hpmod = null;
+    });
+  }
+  return hpmod;
+}
+var SCHEMES = { nest: "nested", nested: "nested", ring: "ring", zuniq: "zuniq" };
+var ELLIPSOIDS = {
+  wgs84: { semi_major_axis: 6378137, inverse_flattening: 298.257223563 },
+  grs80: { semi_major_axis: 6378137, inverse_flattening: 298.257222101 }
+};
+function given(x) {
+  return x !== void 0 && x !== null && x !== "";
+}
+function ellipsoidOf(e, cf) {
+  if (cf && given(cf.semi_major_axis) && given(cf.inverse_flattening) && +cf.inverse_flattening > 0) {
+    e = { semi_major_axis: +cf.semi_major_axis, inverse_flattening: +cf.inverse_flattening };
+  } else if (cf && given(cf.earth_radius)) e = { radius: +cf.earth_radius };
+  if (typeof e === "string") {
+    var k = e.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (ELLIPSOIDS[k]) return { spec: ELLIPSOIDS[k], label: "the " + e + " ellipsoid (named in the attributes)", assumed: false };
+    if (/sphere/.test(k)) return { spec: null, label: "a sphere (named in the attributes)", assumed: false };
+    return { spec: null, label: 'a sphere: the attributes name the body "' + e + '", which is not recognised', assumed: true };
+  }
+  if (e && typeof e === "object") {
+    var a = +(e.semi_major_axis || e.semimajor_axis || e.a || e.radius);
+    if (given(e.radius) && a > 0) return { spec: { radius: a }, label: "a sphere of radius " + a + " m (from the attributes)", assumed: false };
+    var nm = e.name ? "the " + e.name + " ellipsoid, " : "an ellipsoid ";
+    if (a > 0 && +e.inverse_flattening > 0) {
+      return {
+        spec: { semi_major_axis: a, inverse_flattening: +e.inverse_flattening },
+        label: nm + "a = " + a + " m, 1/f = " + +e.inverse_flattening + " (from the attributes)",
+        assumed: false
+      };
+    }
+    if (a > 0 && +e.semi_minor_axis > 0) {
+      return {
+        spec: { semi_major_axis: a, semi_minor_axis: +e.semi_minor_axis },
+        label: nm + "a = " + a + " m, b = " + +e.semi_minor_axis + " m (from the attributes)",
+        assumed: false
+      };
+    }
+    if (e.name) return ellipsoidOf(String(e.name));
+  }
+  return { spec: null, label: "a sphere (none named in the attributes; healpix-geo's default, radius 6370997 m)", assumed: true };
+}
+function healpixAttrs(a) {
+  if (!a || typeof a !== "object") return null;
+  var c = null, d = a.dggs;
+  if (d && typeof d === "object" && /healpix/i.test(String(d.name || d.grid_name || ""))) {
+    c = {
+      level: given(d.refinement_level) ? d.refinement_level : d.level,
+      nside: d.nside,
+      order: d.indexing_scheme,
+      ell: d.ellipsoid,
+      how: "the dggs attribute (Zarr DGGS convention)",
+      dim: d.spatial_dimension,
+      coord: d.coordinate
+    };
+  } else if (/^healpix$/i.test(String(a.grid_name || ""))) {
+    c = {
+      level: given(a.level) ? a.level : given(a.refinement_level) ? a.refinement_level : a.resolution,
+      nside: a.nside,
+      order: a.indexing_scheme,
+      ell: a.ellipsoid,
+      how: "xdggs attributes (grid_name healpix)"
+    };
+  } else if (/^healpix$/i.test(String(a.grid_mapping_name || ""))) {
+    c = {
+      nside: a.healpix_nside,
+      level: a.refinement_level,
+      order: a.healpix_order || a.indexing_scheme,
+      ell: a.ellipsoid || a.reference_ellipsoid_name,
+      cf: a,
+      how: "a CF grid mapping (grid_mapping_name healpix)"
+    };
+  } else if (given(a.healpix_nside)) {
+    c = { nside: a.healpix_nside, order: a.healpix_order, ell: a.ellipsoid, how: "healpix_nside / healpix_order attributes" };
+  } else if (a.crs && typeof a.crs === "object") {
+    var r = healpixAttrs(a.crs);
+    if (r) r.how = "the crs attribute dictionary (" + r.how + ")";
+    return r;
+  }
+  if (!c) return null;
+  var level = given(c.level) ? +c.level : given(c.nside) ? Math.log2(+c.nside) : NaN;
+  if (!(Number.isInteger(level) && level >= 0 && level <= 29)) {
+    return { bad: "HEALPix attributes in " + c.how + " give " + (given(c.nside) ? "nside " + c.nside : "level " + c.level) + ", which is not a power of two up to 2^29" };
+  }
+  var scheme = SCHEMES[String(c.order || "nested").toLowerCase()];
+  if (!scheme) return { bad: 'HEALPix indexing scheme "' + c.order + '" (in ' + c.how + ") is not nested, ring or zuniq" };
+  return {
+    level,
+    nside: Math.pow(2, level),
+    scheme,
+    schemeAssumed: !given(c.order),
+    ellipsoid: ellipsoidOf(c.ell, c.cf),
+    how: c.how,
+    dim: c.dim || null,
+    coord: c.coord || null
+  };
+}
+async function findHealpix(name, arr, dims, parent, rootAttrs, at) {
+  var a = arr.attrs || {};
+  function tryAt(p) {
+    return at(p).then(function(x) {
+      return x;
+    }, function() {
+      return null;
+    });
+  }
+  var hp = healpixAttrs(a), on = "the variable";
+  var cands = [];
+  if (!hp) {
+    if (a.grid_mapping) cands.push(String(a.grid_mapping).split(/[\s:]+/)[0]);
+    var co = Array.isArray(a.coordinates) ? a.coordinates : String(a.coordinates || "").split(/\s+/);
+    co.forEach(function(n) {
+      if (n) cands.push(n);
+    });
+    dims.forEach(function(d) {
+      cands.push(d);
+    });
+    cands.push("cell_ids", "crs");
+    var seen = {};
+    for (var i = 0; i < cands.length && !hp; i++) {
+      if (seen[cands[i]]) continue;
+      seen[cands[i]] = 1;
+      var c = await tryAt(parent + "/" + cands[i]);
+      if (c && (hp = healpixAttrs(c.attrs))) on = '"' + cands[i] + '"';
+    }
+  }
+  if (!hp && (hp = healpixAttrs(rootAttrs))) on = "the root group";
+  if (!hp) return null;
+  if (hp.bad) throw new Error(name + ": " + hp.bad);
+  var ncell = 12 * hp.nside * hp.nside;
+  if (ncell > Math.pow(2, 53)) throw new Error(name + ": HEALPix level " + hp.level + " has more cells than a JS number can index");
+  var cellIds = null, axis = -1;
+  var names = [hp.coord, "cell_ids", "cell_id"].concat(dims.filter(function(d) {
+    return /cell/i.test(d);
+  }));
+  if (/^"/.test(on)) names.push(on.slice(1, -1));
+  for (var k = 0; k < names.length && !cellIds; k++) {
+    var ca = names[k] && await tryAt(parent + "/" + names[k]);
+    var cd = ca && (ca.dimensionNames || ca.attrs && ca.attrs._ARRAY_DIMENSIONS);
+    if (ca && ca.shape.length === 1 && cd && dims.indexOf(cd[0]) >= 0 && /int/.test(ca.dtype)) {
+      cellIds = ca;
+      axis = dims.indexOf(cd[0]);
+    }
+  }
+  if (axis < 0 && hp.dim) axis = dims.indexOf(hp.dim);
+  if (axis < 0) axis = arr.shape.indexOf(ncell);
+  var label = "HEALPix grid (nside " + hp.nside + ", " + hp.scheme + ")";
+  if (axis < 0) {
+    throw new Error(name + ": " + label + " in " + on + "'s attributes, but none of its dimensions [" + dims.join(", ") + "] has 12 x nside^2 = " + ncell + " cells and no cell_ids coordinate lists them");
+  }
+  if (!cellIds && arr.shape[axis] !== ncell) {
+    throw new Error(name + ": " + label + ", but dimension " + dims[axis] + " has " + arr.shape[axis] + " cells, not 12 x nside^2 = " + ncell + ", and no cell_ids coordinate lists them");
+  }
+  return { hp, axis, dim: dims[axis], ncell, cellIds, on, label };
+}
+async function healpixGeometry(f, n, readIds) {
+  var hg = await healpixGeo();
+  var hp = f.hp;
+  var opts = { scheme: hp.scheme, level: hp.level };
+  if (hp.ellipsoid.spec) opts.ellipsoid = hp.ellipsoid.spec;
+  var grid = new hg.Grid(opts);
+  var g = {
+    kind: "healpix",
+    level: hp.level,
+    nside: hp.nside,
+    scheme: hp.scheme,
+    schemeAssumed: hp.schemeAssumed,
+    ncell: f.ncell,
+    n,
+    dim: f.dim,
+    axis: f.axis,
+    grid,
+    sparse: false,
+    idsFrom: "",
+    // cells of equal area: the side of a square of that area, in degrees
+    cellDeg: Math.sqrt(4 * Math.PI / f.ncell) * 180 / Math.PI,
+    bbox: [-180, -90, 180, 90],
+    how: f.on + " (" + hp.how + ")",
+    ellipsoid: hp.ellipsoid,
+    cells: /* @__PURE__ */ new Map()
+    // per output grid: the index under each pixel
+  };
+  var sorted = null, perm = null, num3 = null;
+  if (f.cellIds) {
+    var full = n === f.ncell && hp.scheme !== "zuniq";
+    if (full && n > 32e5) {
+      g.idsFrom = "cell_ids taken as 0 .. " + (n - 1) + " (too long to check)";
+    } else {
+      var ids = await readIds();
+      var arange = full;
+      for (var i = 0; arange && i < n; i++) if (Number(ids[i]) !== i) arange = false;
+      if (arange) g.idsFrom = "cell_ids checked: 0 .. " + (n - 1);
+      else {
+        num3 = new Float64Array(n);
+        for (var j = 0; j < n; j++) num3[j] = Number(ids[j]);
+        perm = new Int32Array(n);
+        for (var q = 0; q < n; q++) perm[q] = q;
+        perm.sort(function(x, y) {
+          return num3[x] - num3[y];
+        });
+        sorted = new Float64Array(n);
+        for (var s = 0; s < n; s++) sorted[s] = num3[perm[s]];
+        g.sparse = true;
+        g.idsFrom = "the cell_ids coordinate lists " + n + " of the " + f.ncell + " cells" + (n < f.ncell ? " (a regional subset)" : "");
+        var step = Math.max(1, Math.floor(n / 2e5)), m = Math.ceil(n / step);
+        var some = new BigUint64Array(m);
+        for (var t = 0; t < m; t++) some[t] = BigInt(num3[t * step]);
+        var ll = grid.healpixToLonLat(some), lo = new Float64Array(m), la = new Float64Array(m);
+        for (var u = 0; u < m; u++) {
+          lo[u] = ll[2 * u];
+          la[u] = ll[2 * u + 1];
+        }
+        var b = centresBbox(lo, la), pad = g.cellDeg;
+        g.bbox = [
+          Math.max(-180, b[0] - (b[0] > -180 ? pad : 0)),
+          Math.max(-90, b[1] - pad),
+          Math.min(180, b[2] + (b[2] < 180 ? pad : 0)),
+          Math.min(90, b[3] + pad)
+        ];
+      }
+    }
+  }
+  g.cellsOf = function(lonlats) {
+    return grid.lonLatToHealpix(lonlats);
+  };
+  g.indexOf = function(ids2) {
+    var out = new Float64Array(ids2.length);
+    for (var k = 0; k < ids2.length; k++) {
+      var id = Number(ids2[k]);
+      if (!sorted) {
+        out[k] = id < n ? id : -1;
+        continue;
+      }
+      var lo2 = 0, hi = n - 1, at = -1;
+      while (lo2 <= hi) {
+        var mid = lo2 + hi >> 1, v = sorted[mid];
+        if (v === id) {
+          at = perm[mid];
+          break;
+        }
+        if (v < id) lo2 = mid + 1;
+        else hi = mid - 1;
+      }
+      out[k] = at;
+    }
+    return out;
+  };
+  g.idOf = function(index) {
+    return BigInt(num3 ? num3[index] : index);
+  };
+  g.centresOf = function(ids2) {
+    return grid.healpixToLonLat(ids2);
+  };
+  g.cornersOf = function(ids2) {
+    var out = new Float64Array(8 * ids2.length), uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    for (var k = 0; k < ids2.length; k++) {
+      for (var m2 = 0; m2 < 4; m2++) {
+        var c = grid.vertex(ids2[k], uv[m2][0], uv[m2][1]);
+        out[8 * k + 2 * m2] = c.lon;
+        out[8 * k + 2 * m2 + 1] = c.lat;
+        c.free();
+      }
+    }
+    return out;
+  };
+  return g;
+}
+function dggsLine(g) {
+  return "HEALPix nside " + g.nside + " (level " + g.level + "), " + g.scheme + (g.schemeAssumed ? " [assumed: no indexing scheme given]" : "") + ", " + (g.sparse ? g.n + " of " + g.ncell : g.ncell) + " cells about " + +g.cellDeg.toPrecision(2) + " degrees across";
+}
+function pixelIndex(g, grid) {
+  var crs = ensureCrs(grid.crs);
+  var gk = crs + "|" + grid.bbox.join(",") + "|" + grid.width + "x" + grid.height;
+  if (g.cells.has(gk)) return g.cells.get(gk);
+  var W = grid.width, H = grid.height, np = W * H;
+  var dx = (grid.bbox[2] - grid.bbox[0]) / W, dy = (grid.bbox[3] - grid.bbox[1]) / H;
+  var d = globalThis.proj4.defs(crs), geo = !!d && /longlat|lonlat/.test(d.projName || "");
+  var tr = geo ? null : globalThis.proj4(crs, "EPSG:4326");
+  var ll = new Float64Array(2 * np), ok = new Uint8Array(np);
+  for (var r = 0; r < H; r++) {
+    var Y = grid.bbox[3] - (r + 0.5) * dy;
+    for (var c = 0; c < W; c++) {
+      var X = grid.bbox[0] + (c + 0.5) * dx, p = r * W + c, lo = X, la = Y;
+      if (tr) {
+        var s;
+        try {
+          s = tr.forward([X, Y]);
+        } catch (e) {
+          s = null;
+        }
+        if (!s) continue;
+        lo = s[0];
+        la = s[1];
+      }
+      if (!isFinite(lo) || !isFinite(la) || la < -90 || la > 90) continue;
+      ll[2 * p] = lo;
+      ll[2 * p + 1] = la;
+      ok[p] = 1;
+    }
+  }
+  var idx = g.indexOf(g.cellsOf(ll));
+  for (var q = 0; q < np; q++) if (!ok[q]) idx[q] = -1;
+  if (g.cells.size > 8) g.cells.delete(g.cells.keys().next().value);
+  var out = { idx, lonlat: ll };
+  g.cells.set(gk, out);
+  return out;
+}
+function runBbox(g, i0, i1) {
+  var n = i1 - i0, step = Math.max(1, Math.floor(n / 512)), m = Math.ceil(n / step);
+  var ids = new BigUint64Array(m);
+  for (var k = 0; k < m; k++) ids[k] = g.sparse ? g.idOf(i0 + k * step) : BigInt(i0 + k * step);
+  var ll = g.centresOf(ids), lo = new Float64Array(m), la = new Float64Array(m);
+  for (var j = 0; j < m; j++) {
+    lo[j] = ll[2 * j];
+    la[j] = ll[2 * j + 1];
+  }
+  var b = centresBbox(lo, la), pad = g.cellDeg;
+  return [Math.max(-180, b[0] - pad), Math.max(-90, b[1] - pad), Math.min(180, b[2] + pad), Math.min(90, b[3] + pad)];
+}
+async function readDggs(a, grid, opts, ds, v, maxChunks, maxMB, h) {
+  var g = v.dggs, pi = pixelIndex(g, grid), idx = pi.idx, np = idx.length;
+  var cl = v.arr.chunks[g.axis];
+  var count = /* @__PURE__ */ new Map();
+  for (var p = 0; p < np; p++) {
+    if (idx[p] < 0) continue;
+    var k = Math.floor(idx[p] / cl);
+    count.set(k, (count.get(k) || 0) + 1);
+  }
+  if (!count.size) return null;
+  var chunkMB = v.arr.chunks.reduce(function(s, c) {
+    return s * c;
+  }, 1) * (v.arr.dtype.match(/\d+/) ? +v.arr.dtype.match(/\d+/)[0] / 8 : 4) / 1048576;
+  var cap = Math.max(1, Math.min(maxChunks, Math.floor(maxMB / chunkMB)));
+  var order = Array.from(count.keys()).sort(function(x, y) {
+    return count.get(y) - count.get(x);
+  });
+  var use = order.slice(0, cap), skipped = order.slice(cap);
+  var at = h.selection(v, a.sel);
+  if (v.ti >= 0) at[v.ti] = Math.max(0, a.index || 0);
+  var log = [], got = /* @__PURE__ */ new Map();
+  var scale = v.scale, offset = v.offset, fill = v.fill, missing = v.missing;
+  var before = v.shard ? new Map(ds.counting.bytes) : null;
+  function coordsOf(k2) {
+    return v.dims.map(function(d, i2) {
+      return i2 === g.axis ? k2 : Math.floor((at[i2] || 0) / v.arr.chunks[i2]);
+    });
+  }
+  function entry(k2, coords) {
+    return {
+      kind: "chunk",
+      z: v.path.slice(1),
+      x: k2,
+      y: 0,
+      url: a.url + h.chunkKey(v, coords)[0],
+      crs: "EPSG:4326",
+      ok: false,
+      status: null,
+      bytes: 0,
+      ms: 0,
+      cached: false,
+      extent: runBbox(g, k2 * cl, Math.min(g.n, (k2 + 1) * cl))
+    };
+  }
+  await h.pool(use, 4, async function(k2) {
+    var coords = coordsOf(k2);
+    var key = a.url + "|" + v.path + "|" + coords.join(".");
+    var t0 = performance.now();
+    var c = h.cached(key, function(sig) {
+      return v.arr.getChunk(coords, { signal: sig });
+    }, opts.signal);
+    var e = entry(k2, coords);
+    e.cached = c.hit;
+    log.push(e);
+    var chunk;
+    try {
+      chunk = await c.p;
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      e.error = String(err && err.message || err);
+      e.status = 404;
+      return;
+    }
+    e.ms = Math.round(performance.now() - t0);
+    e.ok = true;
+    e.status = c.hit ? "cache" : 200;
+    if (!c.hit) {
+      var keys = h.chunkKey(v, coords);
+      for (var q = 0; q < keys.length; q++) {
+        if (ds.counting.bytes.has(keys[q])) {
+          e.bytes = ds.counting.bytes.get(keys[q]);
+          break;
+        }
+      }
+      if (v.shard) e.shard = h.shardKey(v, coords);
+    }
+    var base = 0;
+    for (var d = 0; d < coords.length; d++) {
+      if (d === g.axis) continue;
+      base += ((at[d] || 0) - coords[d] * v.arr.chunks[d]) * chunk.stride[d];
+    }
+    got.set(k2, { data: chunk.data, base, st: chunk.stride[g.axis], big: typeof chunk.data[0] === "bigint" });
+  });
+  skipped.forEach(function(k2) {
+    var e = entry(k2, coordsOf(k2));
+    e.status = "capped";
+    e.error = "not read: this view needs " + order.length + " chunks of " + v.path.slice(1) + " (" + v.arr.chunks.join("x") + ", " + chunkMB.toFixed(chunkMB < 10 ? 1 : 0) + " MB each decoded), the cap is " + cap + "; zoom in, or draw a smaller region";
+    log.push(e);
+  });
+  if (before) h.meterShards(ds.counting.bytes, log, before);
+  var out = new Float32Array(np).fill(NaN), valid = new Uint8Array(np), any = false;
+  for (var i = 0; i < np; i++) {
+    if (idx[i] < 0) continue;
+    var kk = Math.floor(idx[i] / cl), ch = got.get(kk);
+    if (!ch) continue;
+    var raw = ch.data[ch.base + (idx[i] - kk * cl) * ch.st];
+    if (ch.big) raw = Number(raw);
+    if (raw === fill || raw === missing || raw !== raw) continue;
+    out[i] = raw * scale + offset;
+    valid[i] = 1;
+    any = true;
+  }
+  if (!any) {
+    var bad = log.filter(function(t) {
+      return t.error && t.status !== "capped";
+    })[0];
+    if (bad && log.every(function(t) {
+      return !t.ok;
+    })) throw new Error("no chunk could be read (" + bad.error + ")");
+    return null;
+  }
+  return { bands: [out], valid, nodata: NaN, level: 1, log };
+}
+function dggsCellAt(g, lon, lat) {
+  var ids = g.cellsOf(new Float64Array([lon, lat]));
+  var index = g.indexOf(ids)[0];
+  var cen = g.centresOf(ids), cr = g.cornersOf(ids), corners = [];
+  for (var m = 0; m < 4; m++) corners.push([cr[2 * m], cr[2 * m + 1]]);
+  var uv = [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]], outline = [], STEPS = 8, l0 = null;
+  for (var e = 0; e < 4; e++) {
+    for (var k = 0; k < STEPS; k++) {
+      var t = k / STEPS, u = uv[e][0] + (uv[e + 1][0] - uv[e][0]) * t, v = uv[e][1] + (uv[e + 1][1] - uv[e][1]) * t;
+      var c = g.grid.vertex(ids[0], u, v), x = c.lon, y = c.lat;
+      c.free();
+      if (l0 === null) {
+        x = ((x + 180) % 360 + 360) % 360 - 180;
+        l0 = x;
+      } else x = l0 + (((x - l0 + 180) % 360 + 360) % 360 - 180);
+      outline.push([x, y]);
+    }
+  }
+  outline.push(outline[0]);
+  return {
+    id: ids[0],
+    index,
+    dim: g.dim,
+    centre: [((cen[0] + 180) % 360 + 360) % 360 - 180, cen[1]],
+    corners,
+    outline
+  };
+}
+
 // lib/sources/zarr.js
 var CDNS = ["https://cdn.jsdelivr.net/npm/zarrita@0.7/+esm", "https://esm.sh/zarrita@0.7"];
 var zmod = null;
@@ -5156,7 +5644,21 @@ function describe(ds, name, opts) {
         return role(d2, coords[i] && coords[i].attrs);
       });
       var xi = roles.lastIndexOf("x"), yi = roles.lastIndexOf("y"), ti = roles.indexOf("t");
-      var cv = xi >= 0 && yi >= 0 && coords[xi] && coords[yi] && await gridMapping(ds, arr, parent) ? null : await curvilinearCoords(ds, arr, dims, parent);
+      var hpf = await findHealpix(name, arr, dims, parent, ds.rootAttrs, function(q2) {
+        return arrayAt(ds, q2);
+      });
+      var dggs = null;
+      if (hpf) {
+        try {
+          dggs = await healpixGeometry(hpf, arr.shape[hpf.axis], async function() {
+            return (await ds.z.get(hpf.cellIds)).data;
+          });
+        } catch (e) {
+          throw new Error(name + ": " + hpf.label + " is not supported here yet (" + String(e && e.message || e) + ")");
+        }
+        xi = yi = hpf.axis;
+      }
+      var cv = dggs || xi >= 0 && yi >= 0 && coords[xi] && coords[yi] && await gridMapping(ds, arr, parent) ? null : await curvilinearCoords(ds, arr, dims, parent);
       var curv = null, geom;
       if (cv) {
         xi = dims.indexOf(cv.dims[1]);
@@ -5203,6 +5705,18 @@ function describe(ds, name, opts) {
           crsFrom: "the 2D coordinates " + cv.lonName + " / " + cv.latName + " (curvilinear; cell corners " + cornersFrom + "), WGS84 taken as the datum",
           assumed: true
         };
+      } else if (dggs) {
+        var el = dggs.ellipsoid;
+        geom = {
+          origin: null,
+          res: [dggs.cellDeg, -dggs.cellDeg],
+          crs: "EPSG:4326",
+          wrap: false,
+          ext: dggs.bbox,
+          bbox: dggs.bbox,
+          assumed: el.assumed || dggs.schemeAssumed,
+          crsFrom: "HEALPix attributes on " + dggs.how + "; cells on " + el.label + (el.spec ? "" : ", its latitudes drawn as WGS84 latitudes unchanged") + (dggs.idsFrom ? "; " + dggs.idsFrom : "")
+        };
       } else {
         geom = await regularGeometry();
       }
@@ -5243,7 +5757,7 @@ function describe(ds, name, opts) {
           assumed: cs.assumed
         };
       }
-      var W = arr.shape[xi], H = arr.shape[yi];
+      var W = arr.shape[xi], H = dggs ? 1 : arr.shape[yi];
       var times = null;
       if (ti >= 0 && coords[ti]) {
         var tat = coords[ti].attrs || {};
@@ -5308,6 +5822,7 @@ function describe(ds, name, opts) {
         H,
         extra,
         curv,
+        dggs,
         origin: geom.origin,
         res: geom.res,
         crs: geom.crs,
@@ -5391,6 +5906,16 @@ async function readZarrWarped(a, grid, opts) {
   var ds = await openDataset(a.url);
   var v = await describe(ds, a.variable, { crs: a.crs });
   if (v.curv) return readCurvilinear(a, grid, opts, ds, v, maxChunks, maxMB);
+  if (v.dggs) {
+    return readDggs(a, grid, opts, ds, v, maxChunks, maxMB, {
+      cached,
+      chunkKey,
+      shardKey,
+      meterShards,
+      selection,
+      pool: pool3
+    });
+  }
   var proj2 = globalThis.proj4(ensureCrs(grid.crs), ensureCrs(v.crs));
   var toSrc = proj2;
   if (v.wrap) {
@@ -5754,6 +6279,10 @@ async function zarrProfile(a, grid, dimName, opts) {
   }
   return out;
 }
+async function zarrCellAt(a, lon, lat) {
+  var v = await describe(await openDataset(a.url), a.variable, { crs: a.crs });
+  return v.dggs ? dggsCellAt(v.dggs, lon, lat) : null;
+}
 function isoDay(ms) {
   return new Date(ms).toISOString().slice(0, 10);
 }
@@ -5804,10 +6333,18 @@ function zarrCatalog(opts) {
               dimSet[d] = 1;
             });
           });
+          var cellDims = {};
+          arrs.forEach(function(a) {
+            if (a && healpixAttrs(a.attrs)) (dimNames(a) || []).forEach(function(d) {
+              cellDims[d] = 1;
+            });
+          });
           var vars = [];
           arrs.forEach(function(a, i) {
-            if (!a || a.shape.length < 2 || dimSet[names[i].split("/").pop()]) return;
-            var at = a.attrs || {};
+            var at = a && a.attrs || {}, leaf = names[i].split("/").pop();
+            if (!a || dimSet[leaf] || /^cell_ids?$/.test(leaf) || at.grid_name || at.dggs) return;
+            var lv = a.shape.length === 1 ? Math.log2(a.shape[0] / 12) / 2 : -1;
+            if (a.shape.length < 2 && !((Number.isInteger(lv) || cellDims[(dimNames(a) || [])[0]]) && /float|int/.test(a.dtype))) return;
             vars.push({
               name: names[i],
               dims: dimNames(a) || [],
@@ -5848,6 +6385,7 @@ function zarrCatalog(opts) {
         curvilinear: !!v.curv,
         units: v.units,
         longName: v.longName,
+        dggs: v.dggs ? dggsLine(v.dggs) : null,
         extra: v.extra.map(function(e) {
           return {
             name: e.name,
@@ -5892,7 +6430,7 @@ function zarrCatalog(opts) {
         idx = idx.slice(-(q.maxItems || 300));
       }
       var b = v.bbox;
-      var groundRes = Math.abs(v.res[0]) * (v.crs === "EPSG:4326" ? 111320 : 1);
+      var groundRes = Math.abs(v.res[0]) * (v.crs === "EPSG:4326" ? 111320 : 1) * (v.dggs ? 0.25 : 1);
       return idx.map(function(i) {
         var assets = {}, meta = {};
         var at = selection(v, opts.sel);
@@ -5913,6 +6451,7 @@ function zarrCatalog(opts) {
         if (c.ds.icechunk) meta[key].noVrt = "Icechunk repositories are not exported as a source VRT (GDAL has no Icechunk driver)";
         else if (c.ds.refs) meta[key].noVrt = "Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)";
         else if (v.curv) meta[key].noVrt = "curvilinear grids are not exported as a source VRT yet (use the GeoTIFF)";
+        else if (v.dggs) meta[key].noVrt = "HEALPix grids have no source VRT (GDAL cannot place their cells; use the GeoTIFF)";
         else meta[key].gdal = {
           slice: v.dims.map(function(d, j) {
             return j === v.xi || j === v.yi ? null : j === v.ti ? Math.max(0, i) : at[j];
@@ -7802,9 +8341,9 @@ async function describeZarr(fit, keepDates) {
   var zinfo = zarrCat && await zarrCat.info().catch(function() {
     return null;
   });
-  $("zarrInfo").textContent = icechunkLine(zinfo && zinfo.icechunk) + d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.curvilinear ? ", cells about " : ", cell ") + d.res.map(function(r) {
+  $("zarrInfo").textContent = icechunkLine(zinfo && zinfo.icechunk) + d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.dggs ? "; " + d.dggs : (d.curvilinear ? ", cells about " : ", cell ") + d.res.map(function(r) {
     return +Math.abs(r).toPrecision(4);
-  }).join(" x ") + (d.curvilinear ? " degrees apart" : "") + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
+  }).join(" x ") + (d.curvilinear ? " degrees apart" : "")) + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
   zarrExtra = d.extra || [];
   zarrDimPickers(zarrExtra);
   showProfileButton();
@@ -9513,6 +10052,32 @@ async function runPoint() {
   if (pin.ctl === ctl) pin.ctl = null;
   drawPoint();
 }
+function pinCell(latlng) {
+  if (pin.cell) {
+    map.removeLayer(pin.cell);
+    pin.cell = null;
+  }
+  pin.cellText = "";
+  var key = currentKeys()[0], sc = $("src").value === "zarr" && state.scenes.filter(function(s) {
+    return s.assets[key];
+  })[0];
+  if (!sc || typeof sc.assets[key] !== "object") return;
+  var ll = pin.ll;
+  zarrCellAt(sc.assets[key], latlng.lng, latlng.lat).then(function(c) {
+    if (!c || pin.ll !== ll) return;
+    pin.cell = L.polygon(
+      c.outline.map(function(q) {
+        return [q[1], q[0]];
+      }),
+      { color: "#ff4081", weight: 1.5, fill: false, interactive: false }
+    ).addTo(map);
+    pin.cellText = "HEALPix cell " + c.id + (c.index < 0 ? " (not in the store)" : " (index " + c.index + " along " + c.dim + ")") + ", centre " + c.centre.map(function(x) {
+      return x.toFixed(3);
+    }).join(", ");
+    drawPoint();
+  }).catch(function() {
+  });
+}
 function setPin(latlng, comp, r) {
   if (pin.marker) map.removeLayer(pin.marker);
   pin.ll = latlng;
@@ -9534,6 +10099,7 @@ function setPin(latlng, comp, r) {
     fillOpacity: 1,
     interactive: false
   }).addTo(map);
+  pinCell(latlng);
   $("pointBox").classList.remove("hide");
   showProfileButton();
   runPoint();
@@ -9542,6 +10108,10 @@ function setPin(latlng, comp, r) {
 function clearPin() {
   if (pin.ctl) pin.ctl.abort();
   if (pin.marker) map.removeLayer(pin.marker);
+  if (pin.cell) {
+    map.removeLayer(pin.cell);
+    pin.cell = null;
+  }
   pin.ll = null;
   pin.grid = null;
   pin.marker = null;
@@ -9589,7 +10159,7 @@ function drawPoint() {
     if (r.state !== "ok") n[r.state]++;
   });
   var ll = pin.ll, labels2 = pointLabels(), unit = pin.kind === "rgb8" ? "" : unitOf(pin.keys[0]);
-  $("pointNote").textContent = ll.lng.toFixed(4) + ", " + ll.lat.toFixed(4) + " (px " + pin.col + "," + pin.row + "): " + ok.length + " of " + rows.length + " days with data" + (n.empty ? ", " + n.empty + " empty" : "") + (n.error ? ", " + n.error + " failed" : "") + (n.reading + n.pending && pin.ctl ? ", reading ..." : n.pending ? ", " + n.pending + " not read" : "") + (unit ? "; " + unit : "");
+  $("pointNote").textContent = ll.lng.toFixed(4) + ", " + ll.lat.toFixed(4) + " (px " + pin.col + "," + pin.row + "): " + ok.length + " of " + rows.length + " days with data" + (n.empty ? ", " + n.empty + " empty" : "") + (n.error ? ", " + n.error + " failed" : "") + (n.reading + n.pending && pin.ctl ? ", reading ..." : n.pending ? ", " + n.pending + " not read" : "") + (unit ? "; " + unit : "") + (pin.cellText ? "\n" + pin.cellText : "");
   $("pointMore").classList.toggle("hide", !n.pending || pin.all);
   $("pointStop").classList.toggle("hide", !pin.ctl);
   var W = svg.clientWidth || 280, H = 150, L0 = 46, R0 = 8, T0 = 8, B0 = 18;
