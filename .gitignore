@@ -9,3 +9,5 @@ dev/fixtures/zarr4d/
 dev/fixtures/refs/
 dev/hyparquet-compressors.esm.js
 dev/fixtures/scan-items.json
+dev/icechunk.esm.js
+dev/fixtures/icechunk/

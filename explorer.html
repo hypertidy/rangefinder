@@ -195,7 +195,7 @@
 
     <div id="zarrbox" class="hide">
       <select id="zarrPick" class="pick"></select>
-      <label for="zarrUrl">or paste a Zarr store or Kerchunk JSON URL</label>
+      <label for="zarrUrl">or paste a Zarr store, Icechunk repository or Kerchunk JSON URL</label>
       <div class="row">
         <input id="zarrUrl" spellcheck="false"
           value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">
@@ -207,7 +207,8 @@
           <input id="zarrCrs" placeholder="EPSG:3031" spellcheck="false"></div>
       </div>
       <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata, or a
-        Kerchunk / VirtualiZarr reference JSON (NetCDF-4, HDF5, GRIB2 read in place), with regular
+        Kerchunk / VirtualiZarr reference JSON (NetCDF-4, HDF5, GRIB2 read in place), or an Icechunk
+        repository (icechunk+https://..., ?branch= / ?tag= / ?snapshot=, default branch main), with regular
         1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
       <div id="zarrDims"></div>
     </div>
@@ -4513,6 +4514,148 @@ function countingStore(z, url) {
   }
   return s;
 }
+var ICECHUNK = ["https://cdn.jsdelivr.net/npm/icechunk-js@0.6/+esm", "https://esm.sh/icechunk-js@0.6"];
+var icmod = null;
+function icechunkJs() {
+  if (!icmod) {
+    icmod = (async function() {
+      var last;
+      for (var i = 0; i < ICECHUNK.length; i++) {
+        try {
+          return await import(ICECHUNK[i]);
+        } catch (e) {
+          last = e;
+        }
+      }
+      throw new Error("could not load icechunk-js: " + (last && last.message || last));
+    })();
+    icmod.catch(function() {
+      icmod = null;
+    });
+  }
+  return icmod;
+}
+var IC_KEYS = ["icechunk", "branch", "tag", "snapshot"];
+function icechunkParts(url) {
+  var u = String(url || "").trim(), hinted = false;
+  var m = /^icechunk(\+https?)?:\/\//i.exec(u);
+  if (m) {
+    hinted = true;
+    u = (m[1] ? m[1].slice(1) : "https") + "://" + u.slice(m[0].length);
+  }
+  var hash = "", hi = u.indexOf("#");
+  if (hi >= 0) {
+    hash = u.slice(hi + 1);
+    u = u.slice(0, hi);
+  }
+  if (/^icechunk$/i.test(hash)) {
+    hinted = true;
+    hash = "";
+  }
+  var out = { branch: null, tag: null, snapshot: null };
+  var qi = u.indexOf("?"), keep = [];
+  if (qi >= 0) {
+    u.slice(qi + 1).split("&").forEach(function(kv) {
+      var k = decodeURIComponent(kv.split("=")[0]), v = decodeURIComponent(kv.slice(k.length + 1));
+      if (IC_KEYS.indexOf(k) < 0) {
+        if (kv) keep.push(kv);
+        return;
+      }
+      hinted = true;
+      if (k !== "icechunk") out[k] = v || null;
+    });
+    u = u.slice(0, qi) + (keep.length ? "?" + keep.join("&") : "");
+  }
+  u = u.replace(/\/+$/, "");
+  if (/\.icechunk$/i.test(u.split("?")[0])) hinted = true;
+  out.url = u;
+  out.hinted = hinted;
+  return out;
+}
+function isIcechunkUrl(url) {
+  return icechunkParts(url).hinted;
+}
+async function looksLikeIcechunk(url) {
+  var probes = ["/repo", "/refs/branch.main/ref.json"];
+  for (var i = 0; i < probes.length; i++) {
+    try {
+      var r = await fetch(url + probes[i], { headers: { Range: "bytes=0-0" } });
+      if (r.ok) return true;
+    } catch (e) {
+    }
+  }
+  return false;
+}
+async function icechunkStore(url, z) {
+  var parts = icechunkParts(url);
+  var ic = await icechunkJs();
+  var o = { withRangeCoalescing: z.withRangeCoalescing };
+  if (parts.snapshot) o.snapshot = parts.snapshot;
+  else if (parts.tag) o.tag = parts.tag;
+  else o.branch = parts.branch || "main";
+  var raw;
+  try {
+    raw = await ic.IcechunkStore.open(parts.url, o);
+  } catch (e) {
+    throw new Error("could not open the Icechunk repository " + parts.url + " (" + (parts.snapshot ? "snapshot " + parts.snapshot : parts.tag ? "tag " + parts.tag : "branch " + o.branch) + "): " + (e && e.message || e) + (/fetch/i.test(String(e && e.message)) ? " (no CORS on the bucket?)" : ""));
+  }
+  var bytes2 = /* @__PURE__ */ new Map();
+  function note(key, b, add) {
+    if (b) bytes2.set(key, (add && bytes2.get(key) || 0) + b.byteLength);
+    return b;
+  }
+  var virt = (raw.session && raw.session.virtualChunkContainers || []).map(function(c) {
+    return c.urlPrefix;
+  });
+  async function guard(key, fn) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e && e.name === "AbortError") throw e;
+      var msg = e && e.message || String(e);
+      if (/\/c[./]|\/c$/.test(key) && virt.length) {
+        msg += " (this repository has virtual chunks in " + virt.join(", ") + ": is that CORS-open?)";
+      } else if (/failed to fetch|networkerror|load failed/i.test(msg)) msg += " (no CORS?)";
+      throw new Error(msg);
+    }
+  }
+  var snap = "";
+  try {
+    snap = ic.encodeObjectId12(raw.session.getSnapshotId());
+  } catch (e) {
+  }
+  return {
+    bytes: bytes2,
+    refs: "icechunk",
+    raw,
+    icechunk: {
+      url: parts.url,
+      branch: parts.snapshot || parts.tag ? null : o.branch,
+      tag: parts.tag,
+      snapshot: snap || parts.snapshot,
+      pinned: !!parts.snapshot
+    },
+    paths: raw.listNodes().filter(function(n) {
+      return n.nodeData && n.nodeData.type === "array";
+    }).map(function(n) {
+      return n.path;
+    }),
+    get: function(key, opts) {
+      return guard(key, function() {
+        return raw.get(key, opts);
+      }).then(function(b) {
+        return note(key, b);
+      });
+    },
+    getRange: function(key, range, opts) {
+      return guard(key, function() {
+        return raw.getRange(key, range, opts);
+      }).then(function(b) {
+        return note(key, b, true);
+      });
+    }
+  };
+}
 function isReferenceUrl(url) {
   return /\.json(\?|#|$)/i.test(String(url || "")) || isParquetRefs(url);
 }
@@ -4710,22 +4853,28 @@ function openDataset(url) {
   if (!datasets.has(url)) {
     var p = (async function() {
       var z = await zarrita();
-      var counting = isParquetRefs(url) ? await parquetRefStore(url) : isReferenceUrl(url) ? await referenceStore(url) : null;
+      var counting = isIcechunkUrl(url) ? await icechunkStore(url, z) : isParquetRefs(url) ? await parquetRefStore(url) : isReferenceUrl(url) ? await referenceStore(url) : null;
       if (!counting) {
-        var zm = null;
+        var zm = null, v3 = false;
         try {
           var zr = await fetch(url + "/.zmetadata");
           if (zr.ok) zm = laxJson(await zr.text());
         } catch (e) {
         }
-        counting = zm && zm.record_size ? await parquetRefStore(url, zm) : countingStore(z, url);
+        if (!zm) {
+          try {
+            v3 = (await fetch(url + "/zarr.json")).ok;
+          } catch (e) {
+          }
+        }
+        counting = zm && zm.record_size ? await parquetRefStore(url, zm) : !zm && !v3 && await looksLikeIcechunk(url) ? await icechunkStore(url, z) : countingStore(z, url);
       }
-      var store = await z.withMaybeConsolidatedMetadata(counting);
-      var paths = store.contents ? store.contents().filter(function(c) {
+      var store = counting.paths ? counting : await z.withMaybeConsolidatedMetadata(counting);
+      var paths = counting.paths || (store.contents ? store.contents().filter(function(c) {
         return c.kind === "array";
       }).map(function(c) {
         return c.path;
-      }) : null;
+      }) : null);
       var rootAttrs = {};
       try {
         rootAttrs = (await z.open(z.root(store), { kind: "group" })).attrs || {};
@@ -4739,6 +4888,7 @@ function openDataset(url) {
         paths,
         rootAttrs,
         refs: counting.refs || false,
+        icechunk: counting.icechunk || null,
         arrays: /* @__PURE__ */ new Map(),
         vars: /* @__PURE__ */ new Map()
       };
@@ -4763,6 +4913,13 @@ function arrayAt(ds, path) {
 }
 function dimNames(arr) {
   return arr.dimensionNames || arr.attrs && arr.attrs._ARRAY_DIMENSIONS || null;
+}
+function fillOf(v, dtype) {
+  if (typeof v !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(v) || v.length % 4 || /^(NaN|-?Infinity)$/.test(v)) return v;
+  var b = b64bytes(v), dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  if (b.length === 8) return dv.getFloat64(0, true);
+  if (b.length === 4) return /int/.test(dtype) ? dv.getInt32(0, true) : dv.getFloat32(0, true);
+  return v;
 }
 var X_NAMES = /^(x|lon|long|longitude|nav_lon|xc|rlon|easting)$/i;
 var Y_NAMES = /^(y|lat|latitude|nav_lat|yc|rlat|northing)$/i;
@@ -4881,6 +5038,19 @@ async function timeValues(ds, arr) {
   await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map(worker));
   return all;
 }
+async function gridMapping(ds, arr, parent) {
+  var a = arr.attrs || {};
+  if (a.grid_mapping) return String(a.grid_mapping).split(/[\s:]+/)[0];
+  var names = String(a.coordinates || "").split(/\s+/).filter(Boolean);
+  for (var i = 0; i < names.length; i++) {
+    try {
+      var c = await arrayAt(ds, (parent || "") + "/" + names[i]);
+      if (c.shape.length === 0 && c.attrs && (c.attrs.crs_wkt || c.attrs.spatial_ref)) return names[i];
+    } catch (e) {
+    }
+  }
+  return null;
+}
 async function variableCrs(ds, arr, xName, xAttrs, opts) {
   if (opts.crs) return { crs: await resolveCrs(opts.crs), from: "entered on the page", assumed: true };
   if (isLonLat(xName, xAttrs)) {
@@ -4891,7 +5061,7 @@ async function variableCrs(ds, arr, xName, xAttrs, opts) {
     };
   }
   var a = arr.attrs || {};
-  var gm = a.grid_mapping && String(a.grid_mapping).split(/[\s:]+/)[0];
+  var gm = await gridMapping(ds, arr, arr.path.replace(/\/[^/]*$/, ""));
   if (gm) {
     try {
       var g = await arrayAt(ds, gm), ga = g.attrs || {};
@@ -4986,7 +5156,7 @@ function describe(ds, name, opts) {
         return role(d2, coords[i] && coords[i].attrs);
       });
       var xi = roles.lastIndexOf("x"), yi = roles.lastIndexOf("y"), ti = roles.indexOf("t");
-      var cv = (arr.attrs || {}).grid_mapping && xi >= 0 && yi >= 0 && coords[xi] && coords[yi] ? null : await curvilinearCoords(ds, arr, dims, parent);
+      var cv = xi >= 0 && yi >= 0 && coords[xi] && coords[yi] && await gridMapping(ds, arr, parent) ? null : await curvilinearCoords(ds, arr, dims, parent);
       var curv = null, geom;
       if (cv) {
         xi = dims.indexOf(cv.dims[1]);
@@ -5110,11 +5280,26 @@ function describe(ds, name, opts) {
           positive: ca.positive || ""
         });
       }
+      var shard = null;
+      if (arr.dimensionNames) {
+        try {
+          var zj = JSON.parse(new TextDecoder().decode(await ds.store.get(path + "/zarr.json")));
+          var sc = (zj.codecs || [])[0], kenc = zj.chunk_key_encoding || {};
+          if (sc && sc.name === "sharding_indexed") {
+            shard = {
+              shape: zj.chunk_grid.configuration.chunk_shape,
+              sep: kenc.configuration && kenc.configuration.separator || "/"
+            };
+          }
+        } catch (e) {
+        }
+      }
       var a = arr.attrs || {};
-      var fill = a._FillValue !== void 0 ? a._FillValue : arr.fillValue;
+      var fill = a._FillValue !== void 0 ? fillOf(a._FillValue, arr.dtype) : arr.fillValue;
       return {
         path,
         arr,
+        shard,
         dims,
         xi,
         yi,
@@ -5159,6 +5344,24 @@ function chunkKey(v, coords) {
     v.path + "/" + coords.join("/"),
     v.path + "/c/" + coords.join("/")
   ];
+}
+function shardKey(v, coords) {
+  return v.path + "/c" + v.shard.sep + coords.map(function(c, i) {
+    return Math.floor(c * v.arr.chunks[i] / v.shard.shape[i]);
+  }).join(v.shard.sep);
+}
+function meterShards(bytes2, log, before) {
+  var by = {};
+  log.forEach(function(e) {
+    if (e.shard) (by[e.shard] = by[e.shard] || []).push(e);
+  });
+  Object.keys(by).forEach(function(k) {
+    var got = (bytes2.get(k) || 0) - (before.get(k) || 0);
+    by[k].forEach(function(e) {
+      e.bytes = Math.round(got / by[k].length);
+      delete e.shard;
+    });
+  });
 }
 async function pool3(items, n, fn) {
   var next = 0;
@@ -5223,6 +5426,7 @@ async function readZarrWarped(a, grid, opts) {
   for (var r = cr0; r <= cr1; r++) for (var c = ch0; c <= ch1; c++) jobs.push([c, r]);
   var log = [];
   var scale = v.scale, offset = v.offset, fill = v.fill, missing = v.missing;
+  var before = v.shard ? new Map(ds.counting.bytes) : null;
   await pool3(jobs, 4, async function(j) {
     var coords = v.dims.map(function(d2, i) {
       if (i === v.xi) return j[0];
@@ -5280,6 +5484,7 @@ async function readZarrWarped(a, grid, opts) {
           break;
         }
       }
+      if (v.shard) e.shard = shardKey(v, coords);
     }
     var data = chunk.data, st = chunk.stride, big = typeof data[0] === "bigint";
     var base = 0;
@@ -5302,6 +5507,7 @@ async function readZarrWarped(a, grid, opts) {
       }
     }
   });
+  if (before) meterShards(ds.counting.bytes, log, before);
   var res = resampleWindow(lat, grid, [out], ww, wh, wx0, wy0, f, f, NaN, null);
   if (!res.any) {
     var bad = log.filter(function(t) {
@@ -5349,6 +5555,7 @@ async function readCurvilinear(a, grid, opts, ds, v, maxChunks, maxMB) {
   for (var r = cr0; r <= cr1; r++) for (var c = ch0; c <= ch1; c++) jobs.push([c, r]);
   var log = [], cv = v.curv;
   var scale = v.scale, offset = v.offset, fill = v.fill, missing = v.missing;
+  var before = v.shard ? new Map(ds.counting.bytes) : null;
   await pool3(jobs, 4, async function(j) {
     var coords = v.dims.map(function(d2, i) {
       if (i === v.xi) return j[0];
@@ -5406,6 +5613,7 @@ async function readCurvilinear(a, grid, opts, ds, v, maxChunks, maxMB) {
           break;
         }
       }
+      if (v.shard) ent.shard = shardKey(v, coords);
     }
     var data = chunk.data, st = chunk.stride, big = typeof data[0] === "bigint";
     var base = 0;
@@ -5426,6 +5634,7 @@ async function readCurvilinear(a, grid, opts, ds, v, maxChunks, maxMB) {
       }
     }
   });
+  if (before) meterShards(ds.counting.bytes, log, before);
   var npx = grid.width * grid.height, out = new Float32Array(npx).fill(NaN), valid = new Uint8Array(npx);
   function valueOf(k) {
     var ci = k % v.W, ri = (k - ci) / v.W;
@@ -5612,7 +5821,7 @@ function zarrCatalog(opts) {
           vars.sort(function(p, q) {
             return q.shape.length - p.shape.length;
           });
-          return { variables: vars, attrs: ds.rootAttrs, consolidated: !!ds.paths };
+          return { variables: vars, attrs: ds.rootAttrs, consolidated: !!ds.paths, icechunk: ds.icechunk };
         })();
         infoP.catch(function() {
           infoP = null;
@@ -5701,7 +5910,8 @@ function zarrCatalog(opts) {
           href: url + "#" + key + "@" + i + (selTag ? "[" + selTag + "]" : "")
         };
         meta[key] = v.units ? { unit: v.units } : {};
-        if (c.ds.refs) meta[key].noVrt = "Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)";
+        if (c.ds.icechunk) meta[key].noVrt = "Icechunk repositories are not exported as a source VRT (GDAL has no Icechunk driver)";
+        else if (c.ds.refs) meta[key].noVrt = "Kerchunk references are not exported as a VRT yet (GDAL reads them from 3.11)";
         else if (v.curv) meta[key].noVrt = "curvilinear grids are not exported as a source VRT yet (use the GeoTIFF)";
         else meta[key].gdal = {
           slice: v.dims.map(function(d, j) {
@@ -7431,6 +7641,20 @@ var EXAMPLES = {
     ["NASADEM, global (OpenTopography)", "https://opentopography.s3.sdsc.edu/raster/NASADEM/NASADEM_be.vrt"]
   ],
   zarr: [
+    // Icechunk repositories (Zarr v3, sharded) from dynamical.org, CORS-open
+    // on AWS; hourly, so a day's first hour is shown
+    [
+      "GFS analysis, hourly 2021-, 0.25 degree (Icechunk, dynamical.org)",
+      "https://dynamical-noaa-gfs.s3.amazonaws.com/noaa-gfs-analysis/v0.1.0.icechunk"
+    ],
+    [
+      "HRRR analysis, hourly 2014-, 3 km, CONUS Lambert (Icechunk, dynamical.org)",
+      "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-analysis/v0.2.0.icechunk"
+    ],
+    [
+      "GFS analysis, virtual chunks into NOAA's GRIB2 (Icechunk, dynamical.org)",
+      "https://dynamical-noaa-gfs.s3.amazonaws.com/noaa-gfs-analysis-virtual/v0.1.0.icechunk"
+    ],
     ["MUR SST, daily, 0.01 degree, 2002-2020 (AWS)", "https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1"],
     [
       "ITS_LIVE ice velocity cube, West Antarctica (EPSG:3031; chunked for time series, so draw a small region)",
@@ -7544,11 +7768,18 @@ function zarrCatalog2() {
   }
   return zarrCat;
 }
+var zarrSnap = "";
+function icechunkLine(ic) {
+  if (!ic) return "";
+  return "Icechunk repository, " + (ic.pinned ? "snapshot " + ic.snapshot : (ic.tag ? "tag " + ic.tag : "branch " + ic.branch) + " at snapshot " + ic.snapshot + " (pinned in the permalink)") + ". ";
+}
 async function readZarr(fit, want, keepDates) {
   setStatus("reading the Zarr store's metadata ...");
   $("zarrVar").innerHTML = "";
   zarrCat = null;
+  zarrSnap = "";
   var info = await zarrCatalog2().info();
+  if (info.icechunk && !info.icechunk.pinned) zarrSnap = info.icechunk.snapshot || "";
   fillSelect($("zarrVar"), info.variables.map(function(v) {
     return [v.name, v.name + " [" + v.dims.join(", ") + "]" + (v.units ? " " + v.units : "")];
   }), want);
@@ -7565,7 +7796,10 @@ async function describeZarr(fit, keepDates) {
   zarrNoTime = !d.times;
   zarrCatalog2().capabilities = { cloud: false, time: !!d.times };
   capabilitiesChanged(null);
-  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.curvilinear ? ", cells about " : ", cell ") + d.res.map(function(r) {
+  var zinfo = zarrCat && await zarrCat.info().catch(function() {
+    return null;
+  });
+  $("zarrInfo").textContent = icechunkLine(zinfo && zinfo.icechunk) + d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " + d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") + " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " + crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.curvilinear ? ", cells about " : ", cell ") + d.res.map(function(r) {
     return +Math.abs(r).toPrecision(4);
   }).join(" x ") + (d.curvilinear ? " degrees apart" : "") + (d.times ? "; " + d.times[2] + " times, " + d.times[0] + " to " + d.times[1] : "; no time axis");
   zarrExtra = d.extra || [];
@@ -10143,6 +10377,7 @@ function writeHash() {
     if ($("zarrVar").value) h.set("zvar", $("zarrVar").value);
     if ($("zarrCrs").value.trim()) h.set("zcrs", $("zarrCrs").value.trim());
     if (zarrSelTag()) h.set("zsel", zarrSelTag());
+    if (zarrSnap) h.set("zsnap", zarrSnap);
   } else if ($("src").value === "tiles") {
     h.set("tiles", $("tileUrl").value.trim());
     if ($("tileLayer").value) h.set("tlayer", $("tileLayer").value);
@@ -10218,6 +10453,10 @@ async function readHash() {
   if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
   if (h.get("src") === "zarr") {
     if (h.get("zarr")) $("zarrUrl").value = h.get("zarr");
+    if (h.get("zsnap") && !/[?&]snapshot=/.test($("zarrUrl").value)) {
+      var zu = $("zarrUrl").value.split("#")[0].replace(/([?&])(branch|tag)=[^&]*&?/g, "$1").replace(/[?&]$/, "");
+      $("zarrUrl").value = zu + (zu.indexOf("?") >= 0 ? "&" : "?") + "snapshot=" + h.get("zsnap");
+    }
     if (h.get("zcrs")) $("zarrCrs").value = h.get("zcrs");
     zarrSel = {};
     (h.get("zsel") || "").split(",").forEach(function(p) {

@@ -194,7 +194,7 @@
 
     <div id="zarrbox" class="hide">
       <select id="zarrPick" class="pick"></select>
-      <label for="zarrUrl">or paste a Zarr store or Kerchunk JSON URL</label>
+      <label for="zarrUrl">or paste a Zarr store, Icechunk repository or Kerchunk JSON URL</label>
       <div class="row">
         <input id="zarrUrl" spellcheck="false"
           value="https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1">
@@ -206,7 +206,8 @@
           <input id="zarrCrs" placeholder="EPSG:3031" spellcheck="false"></div>
       </div>
       <div id="zarrInfo" class="note">a Zarr v2 or v3 store with consolidated metadata, or a
-        Kerchunk / VirtualiZarr reference JSON (NetCDF-4, HDF5, GRIB2 read in place), with regular
+        Kerchunk / VirtualiZarr reference JSON (NetCDF-4, HDF5, GRIB2 read in place), or an Icechunk
+        repository (icechunk+https://..., ?branch= / ?tag= / ?snapshot=, default branch main), with regular
         1D x/y coordinates; whole chunks are read, so the chunk shape sets the cost of a view</div>
       <div id="zarrDims"></div>
     </div>
@@ -869,6 +870,14 @@ var EXAMPLES = {
     ["NASADEM, global (OpenTopography)", "https://opentopography.s3.sdsc.edu/raster/NASADEM/NASADEM_be.vrt"]
   ],
   zarr: [
+    // Icechunk repositories (Zarr v3, sharded) from dynamical.org, CORS-open
+    // on AWS; hourly, so a day's first hour is shown
+    ["GFS analysis, hourly 2021-, 0.25 degree (Icechunk, dynamical.org)",
+     "https://dynamical-noaa-gfs.s3.amazonaws.com/noaa-gfs-analysis/v0.1.0.icechunk"],
+    ["HRRR analysis, hourly 2014-, 3 km, CONUS Lambert (Icechunk, dynamical.org)",
+     "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-analysis/v0.2.0.icechunk"],
+    ["GFS analysis, virtual chunks into NOAA's GRIB2 (Icechunk, dynamical.org)",
+     "https://dynamical-noaa-gfs.s3.amazonaws.com/noaa-gfs-analysis-virtual/v0.1.0.icechunk"],
     ["MUR SST, daily, 0.01 degree, 2002-2020 (AWS)", "https://mur-sst.s3.us-west-2.amazonaws.com/zarr-v1"],
     ["ITS_LIVE ice velocity cube, West Antarctica (EPSG:3031; chunked for time series, so draw a small region)",
      "https://its-live-data.s3.amazonaws.com/datacubes/v2-updated-october2024/S70W060/ITS_LIVE_vel_EPSG3031_G0120_X-1050000_Y450000.zarr"],
@@ -949,11 +958,19 @@ function zarrCatalog() {
   if (!zarrCat || zarrCat.key !== k) { zarrCat = X.zarrCatalog(o); zarrCat.key = k; }
   return zarrCat;
 }
+var zarrSnap = "";   // the Icechunk snapshot a branch or tag resolved to, for the permalink
+function icechunkLine(ic) {
+  if (!ic) return "";
+  return "Icechunk repository, " + (ic.pinned ? "snapshot " + ic.snapshot :
+    (ic.tag ? "tag " + ic.tag : "branch " + ic.branch) + " at snapshot " + ic.snapshot +
+    " (pinned in the permalink)") + ". ";
+}
 async function readZarr(fit, want, keepDates) {
   setStatus("reading the Zarr store's metadata ...");
   $("zarrVar").innerHTML = "";
-  zarrCat = null;
+  zarrCat = null; zarrSnap = "";
   var info = await zarrCatalog().info();
+  if (info.icechunk && !info.icechunk.pinned) zarrSnap = info.icechunk.snapshot || "";
   fillSelect($("zarrVar"), info.variables.map(function (v) {
     return [v.name, v.name + " [" + v.dims.join(", ") + "]" + (v.units ? " " + v.units : "")];
   }), want);
@@ -971,7 +988,8 @@ async function describeZarr(fit, keepDates) {
   zarrNoTime = !d.times;
   zarrCatalog().capabilities = { cloud: false, time: !!d.times };
   capabilitiesChanged(null);
-  $("zarrInfo").textContent = d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " +
+  var zinfo = zarrCat && await zarrCat.info().catch(function () { return null; });
+  $("zarrInfo").textContent = icechunkLine(zinfo && zinfo.icechunk) + d.name + (d.longName ? " (" + d.longName + ")" : "") + ": " +
     d.dtype + " " + d.shape.join("x") + " as [" + d.dims.join(", ") + "], chunks " + d.chunks.join("x") +
     " (" + d.chunkMB.toFixed(d.chunkMB < 10 ? 1 : 0) + " MB each, decoded), " +
     crsLine(d.crs, d.crsFrom, d.crsAssumed) + (d.curvilinear ? ", cells about " : ", cell ") +
@@ -3201,6 +3219,7 @@ function writeHash() {
     if ($("zarrVar").value) h.set("zvar", $("zarrVar").value);
     if ($("zarrCrs").value.trim()) h.set("zcrs", $("zarrCrs").value.trim());
     if (zarrSelTag()) h.set("zsel", zarrSelTag());
+    if (zarrSnap) h.set("zsnap", zarrSnap);
   }
   else if ($("src").value === "tiles") {
     h.set("tiles", $("tileUrl").value.trim());
@@ -3263,6 +3282,11 @@ async function readHash() {
   if (h.get("cogs")) $("cogUrls").value = h.get("cogs").split(" ").join("\n");
   if (h.get("src") === "zarr") {
     if (h.get("zarr")) $("zarrUrl").value = h.get("zarr");
+    // an Icechunk branch, pinned to the snapshot it was at when the link was made
+    if (h.get("zsnap") && !/[?&]snapshot=/.test($("zarrUrl").value)) {
+      var zu = $("zarrUrl").value.split("#")[0].replace(/([?&])(branch|tag)=[^&]*&?/g, "$1").replace(/[?&]$/, "");
+      $("zarrUrl").value = zu + (zu.indexOf("?") >= 0 ? "&" : "?") + "snapshot=" + h.get("zsnap");
+    }
     if (h.get("zcrs")) $("zarrCrs").value = h.get("zcrs");
     zarrSel = {};
     (h.get("zsel") || "").split(",").forEach(function (p) {

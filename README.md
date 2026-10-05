@@ -317,6 +317,19 @@ design:
   read (hyparquet, with hyparquet-compressors for ZSTD), and the last 12
   are kept. One-element attribute arrays (as R writers make them) are
   unwrapped and bare `NaN` in the JSON is tolerated.
+- An Icechunk repository (see `docs/icechunk.md`) is read with
+  icechunk-js 0.6, loaded on demand: a URL starting `icechunk+https://`,
+  carrying `?icechunk` / `#icechunk` or `?branch=` / `?tag=` /
+  `?snapshot=`, or ending `.icechunk` says so; otherwise a URL with
+  neither `.zmetadata` nor `zarr.json` is sniffed for a v2 `repo` object
+  or a v1 main branch ref. The snapshot's node list stands in for
+  consolidated metadata. Sharded v3 arrays read inner chunks as byte
+  ranges; each shard's bytes are shared out among the chunks read from it
+  in the cost log. The snapshot a branch or tag resolved to is shown and
+  written to the permalink (`zsnap`), so a link reopens that version.
+  Virtual chunks need their own bucket's CORS; a failed chunk read names
+  the repository's virtual chunk containers. No VRT export (GDAL has no
+  Icechunk driver). The picker has dynamical.org's GFS and HRRR analyses.
 - The "common stores" picker has BRAN2023 (temp, salt, eta, mld, u, v as
   Kerchunk Parquet from mdsumner/virtualized, plus one Zarr build). Their
   chunks are on NCI THREDDS, which must allow cross-origin reads.
@@ -505,6 +518,12 @@ explorer itself has no dependencies to install).
   against the model's own cells (psi corners) in three CRSs and across
   the antimeridian. `test-values.mjs` with `PROFILE=1` reads a profile at
   the pinned point.
+- `make_icechunk_fixture.py` writes a small sharded Icechunk repository
+  with two commits and a tag (`pip install icechunk zarr numpy`; not
+  committed), served at `/ic/sst`. `test-icechunk.mjs` checks the sniff,
+  the values, `?tag=`, and the snapshot pinned by a permalink
+  (`npm run bundle-icechunk` first; `REMOTE=1` also opens dynamical.org's
+  GFS analysis).
 - `test-inspect.mjs` drives the tile inspector headless (grid, probe,
   walk, last read) from a permalink and a map view.
 - `test-scan.mjs` checks the clear-day scan (rasteriser, sharpness, stats)

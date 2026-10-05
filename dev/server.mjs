@@ -9,7 +9,8 @@
 // answers 404 or a blank placeholder outside its coverage.
 // Run from dev/: node server.mjs
 // (fixtures: python3 make_fixtures.py; python3 make_starc_fixture.py; optional
-// python3 make_scan_fixture.py for /stac/search on sentinel-2-c1-l2a)
+// python3 make_scan_fixture.py for /stac/search on sentinel-2-c1-l2a;
+// python3 make_icechunk_fixture.py for Icechunk repositories at /ic/)
 import http from "node:http"; import fs from "node:fs"; import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
@@ -126,18 +127,19 @@ http.createServer((req, res) => {
   }
   const bucket = [["/wt/", "fixtures/wt/"], ["/starc/", "fixtures/starc/"],
                   ["/starc-flat/", "fixtures/starc-flat/"], ["/s3/store/", "fixtures/starc/"],
-                  ["/refs/", "fixtures/refs/"]]
+                  ["/refs/", "fixtures/refs/"], ["/ic/", "fixtures/icechunk/"]]
     .find(([pre]) => u.pathname.startsWith(pre));
   if (bucket) {
     const f = path.join(HERE, bucket[1], decodeURIComponent(u.pathname.slice(bucket[0].length)));
     if (!fs.existsSync(f) || !fs.statSync(f).isFile() || (bucket[0] === "/s3/store/" && f.endsWith("manifest.json"))) {
-      res.statusCode = 403; res.end(); return;
+      res.statusCode = bucket[0] === "/ic/" ? 404 : 403; res.end(); return;
     }
     const buf = fs.readFileSync(f); const rg = req.headers.range;
     res.setHeader("Accept-Ranges", "bytes"); res.setHeader("Access-Control-Expose-Headers", "Content-Range, Content-Length");
     res.setHeader("Content-Length", buf.length);
     if (req.method === "HEAD") { res.end(); return; }
-    if (rg) { const m = /bytes=(\d+)-(\d*)/.exec(rg); const a = +m[1], b = m[2] ? Math.min(+m[2], buf.length - 1) : buf.length - 1;
+    if (rg) { const m = /bytes=(\d*)-(\d*)/.exec(rg);
+      const a = m[1] === "" ? Math.max(0, buf.length - +m[2]) : +m[1], b = m[1] !== "" && m[2] ? Math.min(+m[2], buf.length - 1) : buf.length - 1;
       res.statusCode = 206; res.setHeader("Content-Range", `bytes ${a}-${b}/${buf.length}`); res.setHeader("Content-Length", b - a + 1); res.end(buf.subarray(a, b + 1)); return; }
     res.end(buf); return;
   }

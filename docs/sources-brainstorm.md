@@ -79,6 +79,8 @@ I know of the services; none was probed from here.
 - Zarr / GeoZarr (sea ice, SST, model output): a different layer 3, and a
   time axis that is an array dimension rather than a list of files. Worth
   keeping in mind so the Scene shape doesn't hard-code "one file per asset".
+  (Built since: lib/sources/zarr.js reads Zarr v2/v3, Kerchunk JSON and
+  Parquet references, and Icechunk repositories, see docs/icechunk.md.)
 
 ## 3. XYZ / WMTS image servers: yes, and it fits the layers cleanly
 
