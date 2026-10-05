@@ -192,3 +192,17 @@ S2A and S2B on adjacent swaths; the eastern one is the clear one, and the
 glyph shows it. 2026-06-20 and 2026-06-24 rank 74th and 46th, so they are
 not the other half of that day. On thumbnail sharpness among days over 20%
 cover, 2026-06-22 ranks 2nd of 12.
+
+## Swath-aligned regions
+
+A lon/lat box cuts across Sentinel-2's swaths, which run south-south-west on
+the descending day passes. With "swath-aligned region" ticked, a drawn box
+(or `use view`) becomes a parallelogram: same north and south edges and
+width, sides sheared along the ground track (`swathTilt`, `swathPolygon` in
+lib/scan.js). The tilt comes from the orbit (inclination 98.56 deg, period
+100.6 min) plus the Earth's rotation: 13.0 deg east of north at 25S, 13.7 at
+35S, 14.7 at 44S. The edges of the real 2026 footprints over eastern
+Australia measure 12 to 16 deg. The search uses the parallelogram's bounds;
+region cover in the day list is measured inside the parallelogram, and the
+glyphs and thumbnail preview outline it. The composite is still read on the
+bounding box. Permalink: `swath=1` with `roi` as the drawn box.

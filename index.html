@@ -84,6 +84,7 @@
   .day:hover { background: var(--bg); }
   .day.sel { background: var(--sel); }
   .day .n { color: var(--muted); font-size: 12px; }
+  #roiInfo { white-space: pre-line; }
   #status { margin-top: 10px; font-size: 12px; color: var(--muted);
             white-space: pre-wrap; min-height: 2.5em; }
   #status .err { color: #ff8a80; }
@@ -259,7 +260,10 @@
       <button id="draw" class="minor">draw on map</button>
       <button id="useView" class="minor">use view</button>
     </div>
-    <label class="row" style="margin-top:8px" title="when the map stops moving, the view becomes the region and is read again at its own detail">
+    <label class="row" style="margin-top:8px" title="a drawn box becomes a parallelogram along the Sentinel-2 ground track (descending day passes run south-south-west), so a region can follow one swath; region cover in the day list is measured inside it">
+      <input type="checkbox" id="swath"> <span>swath-aligned region (Sentinel-2 track)</span>
+    </label>
+    <label class="row" style="margin-top:4px" title="when the map stops moving, the view becomes the region and is read again at its own detail">
       <input type="checkbox" id="follow"> <span>follow the map (zoom in for finer data)</span>
     </label>
     <div id="roiInfo" class="note">no region yet: drag a box after "draw on map"</div>
@@ -1134,6 +1138,7 @@ function fitLonLat(b, pad) {
 // catalogues, its lon/lat bounds.
 function setRoi(bbox) { setRoiExtent(X.transformBbox(bbox, "EPSG:4326", state.mapCrs, 32), bbox); }
 function setRoiExtent(ext, lonlat, keepScenes) {
+  state.roiPoly = null; state.roiBox = null;
   state.roiExt = ext;
   state.roi = lonlat || X.lonLatBounds(ext, state.mapCrs);
   drawRoi();
@@ -1145,11 +1150,30 @@ function setRoiExtent(ext, lonlat, keepScenes) {
     (state.mapCrs === "EPSG:3857" ? "" : " in " + state.mapCrs);
   if (!keepScenes) clearScenes();
 }
+// A swath-aligned region (lib/scan.js swathPolygon): the parallelogram is
+// state.roiPoly, the box it was made from state.roiBox, and the region
+// extent and search bbox are the parallelogram's bounds.
+function setSwathRegion(box, keepScenes) {
+  var poly = X.swathPolygon(box), bb = X.polygonBbox(poly);
+  setRoiExtent(X.transformBbox(bb, "EPSG:4326", state.mapCrs, 32), bb, keepScenes);
+  state.roiPoly = poly; state.roiBox = box;
+  drawRoi();
+  var mid = (box[1] + box[3]) / 2;
+  $("roiInfo").textContent += "\nswath-aligned: sides " + X.swathTilt(mid).toFixed(1) +
+    " deg east of north at " + Math.abs(mid).toFixed(1) + (mid < 0 ? "S" : "N") +
+    " (box [" + box.map(function (v) { return v.toFixed(3); }).join(", ") + "])";
+}
+function regionShape(box, keepScenes) {
+  if ($("swath").checked) setSwathRegion(box, keepScenes);
+  else setRoi(box);
+}
 function drawRoi() {
   if (state.roiRect) map.removeLayer(state.roiRect);
   state.roiRect = null;
   if (!state.roiExt) return;
-  state.roiRect = L.polygon(X.extentLatLngs(map, state.roiExt), {
+  var ll = state.roiPoly ? state.roiPoly.coordinates[0].map(function (p) { return [p[1], p[0]]; })
+                         : X.extentLatLngs(map, state.roiExt);
+  state.roiRect = L.polygon(ll, {
     color: "#4fc3f7", weight: 2, fill: false, dashArray: "6 4", interactive: false
   }).addTo(map);
 }
@@ -1194,15 +1218,33 @@ map.on("mouseup", function (e) {
   endDraw();
   var v = X.viewExtent(map);
   if ((ext[2] - ext[0]) < (v[2] - v[0]) / px.x * 3 || (ext[3] - ext[1]) < (v[3] - v[1]) / px.y * 3) return;
-  setRoiExtent(ext);
+  if ($("swath").checked) setSwathRegion(X.lonLatBounds(ext, state.mapCrs));
+  else setRoiExtent(ext);
 });
-function useView() {
-  if (state.mapCrs === "EPSG:3857") {
+function useView(e) {
+  // the button shears the view when swath-aligned; following the map never does
+  if (e && $("swath").checked) {
+    var vb = map.getBounds();
+    setSwathRegion([vb.getWest(), Math.max(-80, vb.getSouth()), vb.getEast(), Math.min(80, vb.getNorth())]);
+  } else if (state.mapCrs === "EPSG:3857") {
     var b = map.getBounds();
     setRoi([b.getWest(), Math.max(-85, b.getSouth()), b.getEast(), Math.min(85, b.getNorth())]);
   } else setRoiExtent(X.viewExtent(map));
 }
 $("useView").addEventListener("click", useView);
+// switching shape keeps the drawn box and searches again if there were scenes
+$("swath").addEventListener("change", function () {
+  if (!state.roi) return;
+  var box = state.roiBox || state.roi, had = state.scenes.length > 0;
+  var day = state.days[state.dayIndex] ? state.days[state.dayIndex].day : null, preset = $("preset").value;
+  regionShape(box);
+  writeHash();
+  if (!had) return;
+  searchScenes(preset).then(function () {
+    var i = state.days.findIndex(function (d) { return d.day === day; });
+    if (i >= 0) return selectDay(i, true);
+  }).catch(fail);
+});
 
 // Follow the map: once the view settles, it becomes the region and is read
 // again, so zooming in reads finer data (a finer overview, or the full
@@ -1268,7 +1310,8 @@ async function setMapCrs(code, quiet) {
   if (warpedBase && !warpedBase._map) warpedBase.addTo(map);
   if (state.roi) {
     // same region, same scenes; the day is composed again on the new grid
-    setRoiExtent(X.transformBbox(state.roi, "EPSG:4326", code, 32), state.roi, true);
+    if (state.roiPoly) setSwathRegion(state.roiBox, true);
+    else setRoiExtent(X.transformBbox(state.roi, "EPSG:4326", code, 32), state.roi, true);
     X.fitExtent(map, state.roiExt, 0.1);
     if (state.dayIndex >= 0) selectDay(state.dayIndex, true).catch(fail);
   } else {
@@ -1367,7 +1410,7 @@ function datedDays() {
 // the selected day when it survives.
 function scanDays() {
   var day = state.days[state.dayIndex] ? state.days[state.dayIndex].day : null;
-  state.days = X.scanDays(state.scenes, state.roi, { cloudMax: +$("cloud").value });
+  state.days = X.scanDays(state.scenes, state.roi, { cloudMax: +$("cloud").value, region: state.roiPoly });
   state.days.forEach(function (d) { d.crisp = dayCrisp(d); });
   state.dayIndex = day === null ? -1 : state.days.findIndex(function (d) { return d.day === day; });
 }
@@ -1466,7 +1509,8 @@ function drawGlyph(cv, d) {
   if (!state.roi) return;
   var rb = regionBox(cv, 40), ctx = cv.getContext("2d");
   ctx.fillStyle = "rgba(255,255,255,0.06)";
-  ctx.fillRect(0, 0, rb.w, rb.h);
+  if (state.roiPoly) { ctx.beginPath(); tracePolygon(ctx, state.roiPoly, rb); ctx.fill(); }
+  else ctx.fillRect(0, 0, rb.w, rb.h);
   var lim = +$("cloud").value;
   d.all.slice().reverse().forEach(function (s) {
     ctx.beginPath(); tracePolygon(ctx, sceneGeom(s), rb);
@@ -1565,6 +1609,10 @@ function showThumbs(d, row) {
       ctx.drawImage(im, 0, 0);
       ctx.restore();
     });
+    if (state.roiPoly) {
+      ctx.beginPath(); tracePolygon(ctx, state.roiPoly, rb);
+      ctx.strokeStyle = "#4fc3f7"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+    }
   }
   paint();
   use.forEach(function (s, j) {
@@ -3164,8 +3212,9 @@ function writeHash() {
   }
   else { h.set("bucket", $("wtBucket").value.trim()); h.set("res", $("wtRes").value); }
   if (state.mapCrs !== "EPSG:3857") h.set("crs", state.mapCrs);
-  if (state.roi) h.set("roi", state.roi.map(function (v) { return v.toFixed(5); }).join(","));
-  if (state.roi && state.mapCrs !== "EPSG:3857") {
+  if (state.roi) h.set("roi", (state.roiBox || state.roi).map(function (v) { return v.toFixed(5); }).join(","));
+  if (state.roiPoly) h.set("swath", "1");
+  else if (state.roi && state.mapCrs !== "EPSG:3857") {
     h.set("rext", state.roiExt.map(function (v) { return +v.toPrecision(9); }).join(","));
   }
   h.set("from", $("from").value); h.set("to", $("to").value); h.set("cloud", $("cloud").value);
@@ -3272,7 +3321,11 @@ async function readHash() {
   if (h.get("gamma")) { $("gamma").value = Math.round(+h.get("gamma") * 100); $("gval").textContent = (+h.get("gamma")).toFixed(1); }
   if (h.get("off")) $("offset").value = h.get("off");
   var roi = h.get("roi").split(",").map(Number);
-  if (h.get("rext") && state.mapCrs !== "EPSG:3857") {
+  $("swath").checked = h.get("swath") === "1";
+  if (h.get("swath") === "1") {
+    setSwathRegion(roi);
+    X.fitExtent(map, state.roiExt, 0.1);
+  } else if (h.get("rext") && state.mapCrs !== "EPSG:3857") {
     setRoiExtent(h.get("rext").split(",").map(Number), roi);
     X.fitExtent(map, state.roiExt, 0.1);
   } else {

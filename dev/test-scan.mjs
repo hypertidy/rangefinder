@@ -5,7 +5,8 @@
 // the top days and checks the design's validation case, 2026-06-22.
 import fs from "node:fs";
 import assert from "node:assert";
-import { scanDays, viewDays, scanFrame, rasterize, sharpness } from "../lib/scan.js";
+import { scanDays, viewDays, scanFrame, rasterize, sharpness, swathTilt, swathPolygon,
+         polygonBbox } from "../lib/scan.js";
 import { stacCatalog } from "../lib/sources/stac.js";
 
 // a 10 x 10 degree region, a square footprint over its NW quarter
@@ -26,6 +27,20 @@ assert.equal(sharpness(flat, 32, 32), 0);
 var chk = new Uint8ClampedArray(32 * 32 * 4);
 for (var i = 0; i < 32 * 32; i++) chk.fill(((i % 32) + (i >> 5)) % 2 ? 200 : 40, i * 4, i * 4 + 3);
 assert(sharpness(chk, 32, 32) > 1000);
+
+// ground track tilt, against the edges of real footprints (12-16 deg over
+// eastern Australia) and growing toward the poles
+assert(Math.abs(swathTilt(-25) - 13.0) < 0.2 && Math.abs(swathTilt(-44) - 14.7) < 0.2);
+assert.equal(swathTilt(30).toFixed(6), swathTilt(-30).toFixed(6));
+// a swath-aligned region keeps the box's north and south edges and width,
+// and its north edge is east of its south edge
+var sp = swathPolygon([150, -40, 152, -30]).coordinates[0], pb = polygonBbox({ type: "Polygon", coordinates: [sp] });
+assert.equal(pb[1], -40); assert.equal(pb[3], -30);
+assert(Math.abs((sp[24][0] - sp[25][0]) - 2) < 1e-9 && sp[24][0] > sp[0][0] + 2.5);
+// cover inside the region only: a footprint equal to the region covers all of it
+var reg = swathPolygon([150, -40, 152, -30]);
+var one = scanDays([{ id: "a", day: "2026-01-01", cloud: 0, geometry: reg }], pb, { region: reg });
+assert(one[0].extent > 0.97, "cover inside region " + one[0].extent);
 
 var file = process.argv[2] || new URL("./fixtures/items.json", import.meta.url).pathname;
 var raw = JSON.parse(fs.readFileSync(file));

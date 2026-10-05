@@ -59,6 +59,10 @@ Two ways to open it locally:
    `http://` URL is fetched over https when the page itself is on https,
    since browsers block the mixed request.
 2. **Region.** `draw on map`, then drag a box; or `use view`. With
+   `swath-aligned region` ticked the box becomes a parallelogram along the
+   Sentinel-2 ground track (about 13 to 15 degrees east of north over
+   Australia), so a region can follow one swath; see
+   `docs/clear-day-scan.md`. With
    `follow the map` ticked, the view becomes the region whenever the map
    stops moving and is read again (same day and composite), so zooming in
    reads finer overviews or full-resolution files and zooming out coarser. **Map and
