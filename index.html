@@ -130,6 +130,7 @@
       <option value="wildtiles">[in-dev] wildtiles cube</option>
     </select>
     <div id="stacbox">
+      <select id="stacPick" class="pick" aria-label="common catalogues"></select>
       <label for="stacUrl">STAC API URL</label>
       <input id="stacUrl" value="https://earth-search.aws.element84.com/v1" spellcheck="false">
       <label for="coll">collection</label>
@@ -1121,6 +1122,69 @@ $("readStore").addEventListener("click", function () {
     if (info.dayMin) { $("from").value = info.dayMin; $("to").value = info.dayMax; }
   }).catch(fail);
 });
+// STAC catalogues worth having to hand: [group, label, API, collection(s)].
+// Several collections, comma separated, are searched together. The Digital
+// Earth APIs aren't reachable from the dev container, so their collection
+// ids come from the items in their public buckets.
+var EARTH_SEARCH = "https://earth-search.aws.element84.com/v1";
+var DEA_STAC = "https://explorer.dea.ga.gov.au/stac";
+var DEP_STAC = "https://stac.digitalearthpacific.org";
+var DEAFRICA_STAC = "https://explorer.digitalearth.africa/stac";
+var PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1";
+var STAC_EXAMPLES = [
+  ["Element 84 Earth Search (global)", "Sentinel-2 L2A", EARTH_SEARCH, "sentinel-2-l2a"],
+  ["Element 84 Earth Search (global)", "Sentinel-2 L2A, collection 1", EARTH_SEARCH, "sentinel-2-c1-l2a"],
+  ["Digital Earth Australia (Geoscience Australia)", "Sentinel-2 ARD, surface reflectance (2A, 2B, 2C)", DEA_STAC,
+   "ga_s2am_ard_3,ga_s2bm_ard_3,ga_s2cm_ard_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "Landsat 8 and 9 ARD, surface reflectance", DEA_STAC, "ga_ls8c_ard_3,ga_ls9c_ard_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "Landsat 5 and 7 ARD, 1986-", DEA_STAC, "ga_ls5t_ard_3,ga_ls7e_ard_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "Landsat 8 and 9 annual geomedian", DEA_STAC, "ga_ls8cls9c_gm_cyear_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "fractional cover (Landsat)", DEA_STAC, "ga_ls_fc_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "water observations (Landsat)", DEA_STAC, "ga_ls_wo_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "land cover, annual (Landsat)", DEA_STAC, "ga_ls_landcover_class_cyear_3"],
+  ["Digital Earth Pacific", "Sentinel-2 annual geomedian", DEP_STAC, "dep_s2_geomad"],
+  ["Digital Earth Pacific", "Landsat annual geomedian", DEP_STAC, "dep_ls_geomad"],
+  ["Digital Earth Pacific", "Sentinel-1 SAR annual geomedian (VV, VH)", DEP_STAC, "dep_s1_geomad"],
+  ["Digital Earth Pacific", "mangroves (Sentinel-2)", DEP_STAC, "dep_s2_mangroves"],
+  ["Digital Earth Africa (its buckets send no CORS headers yet: footprints only)", "Sentinel-2 L2A", DEAFRICA_STAC, "s2_l2a"],
+  ["Digital Earth Africa (its buckets send no CORS headers yet: footprints only)", "Sentinel-1 SAR backscatter (RTC)", DEAFRICA_STAC, "s1_rtc"],
+  ["Microsoft Planetary Computer (global)", "Sentinel-1 SAR backscatter (RTC)", PC_STAC, "sentinel-1-rtc"],
+  ["Microsoft Planetary Computer (global)", "Sentinel-2 L2A", PC_STAC, "sentinel-2-l2a"]
+];
+(function () {
+  var sel = $("stacPick"), groups = {};
+  var o0 = document.createElement("option");
+  o0.value = ""; o0.textContent = "common catalogues ...";
+  sel.appendChild(o0);
+  STAC_EXAMPLES.forEach(function (e, i) {
+    if (!groups[e[0]]) {
+      groups[e[0]] = document.createElement("optgroup");
+      groups[e[0]].label = e[0];
+      sel.appendChild(groups[e[0]]);
+    }
+    var o = document.createElement("option");
+    o.value = String(i); o.textContent = e[1];
+    groups[e[0]].appendChild(o);
+  });
+  sel.addEventListener("change", function () {
+    var e = STAC_EXAMPLES[+sel.value];
+    if (!e) return;
+    $("stacUrl").value = e[2]; $("coll").value = e[3];
+    clearScenes();
+    setStatus(e[0].replace(/ \(.*$/, "") + ": " + e[1] + ". Press Search scenes to look in this view.");
+  });
+  function sync() {
+    var u = $("stacUrl").value.trim().replace(/\/+$/, ""), c = $("coll").value.trim();
+    var i = STAC_EXAMPLES.findIndex(function (e) { return e[2] === u && e[3] === c; });
+    sel.value = i < 0 ? "" : String(i);
+  }
+  ["stacUrl", "coll"].forEach(function (id) {
+    $(id).addEventListener("input", sync);
+    $(id).addEventListener("change", sync);
+  });
+  pickSyncs.push(sync);
+  sync();
+})();
 $("listColl").addEventListener("click", function () {
   setStatus("listing collections ...");
   X.listCollections($("stacUrl").value.trim()).then(function (cs) {
@@ -1965,8 +2029,14 @@ function presetChanged(applyDefaults) {
     if (p.ramp) { $("ramp").value = p.ramp; if (X.CRAMERI[p.ramp]) unfoldCrameri(); }
     $("hs").value = String(p.hillshade || 0);
   }
-  if (applyDefaults) { $("limits").value = "pct"; $("minR").value = ""; }
+  if (applyDefaults) {
+    $("limits").value = "pct"; $("minR").value = "";
+    // a preset may ask for a curve (SAR: log10); leaving one puts it back
+    if (p.transfer) { $("curve").value = p.transfer; curveFromPreset = true; }
+    else if (curveFromPreset) { $("curve").value = "linear"; curveFromPreset = false; }
+  }
 }
+var curveFromPreset = false;
 (function () {   // rangefinder's ramps, the absolute palettes, then Crameri's
   // scientific maps, which stay folded away behind "more ..." until asked for
   // (or until one of them is in use)
@@ -3334,8 +3404,8 @@ async function readHash() {
   if (h.get("sat")) $("sat").value = h.get("sat");
   $("showBase").checked = h.get("nobase") !== "1";
   applyBasemap(); applySaturation();
-  syncPicks();
   if (h.get("coll")) $("coll").value = h.get("coll");
+  syncPicks();
   if (h.get("cloud")) $("cloud").value = h.get("cloud");
   $("cloudLive").value = $("cloud").value; $("cloudLiveVal").textContent = $("cloud").value + "%";
   if (h.get("sort")) $("daySort").value = h.get("sort");

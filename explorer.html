@@ -131,6 +131,7 @@
       <option value="wildtiles">[in-dev] wildtiles cube</option>
     </select>
     <div id="stacbox">
+      <select id="stacPick" class="pick" aria-label="common catalogues"></select>
       <label for="stacUrl">STAC API URL</label>
       <input id="stacUrl" value="https://earth-search.aws.element84.com/v1" spellcheck="false">
       <label for="coll">collection</label>
@@ -663,6 +664,8 @@ var KNOWN_CRS = {
   "EPSG:7845": "+proj=lcc +lat_0=0 +lon_0=134 +lat_1=-18 +lat_2=-36 +x_0=0 +y_0=0 " + GRS80 + " +units=m +no_defs",
   "EPSG:7899": "+proj=lcc +lat_0=-37 +lon_0=145 +lat_1=-36 +lat_2=-38 +x_0=2500000 +y_0=2500000 " + GRS80 + " +units=m +no_defs",
   // elsewhere
+  // WGS 84 / PDC Mercator, Digital Earth Pacific's grid (spans the antimeridian)
+  "EPSG:3832": "+proj=merc +lon_0=150 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs",
   "EPSG:2193": "+proj=tmerc +lat_0=0 +lon_0=173 +k=0.9996 +x_0=1600000 +y_0=10000000 " + GRS80 + " +units=m +no_defs",
   "EPSG:27700": "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +towgs84=446.448,-125.157,542.06,0.15,0.247,0.842,-20.489 +units=m +no_defs",
   "EPSG:3035": "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 " + GRS80 + " +units=m +no_defs"
@@ -6535,19 +6538,21 @@ function zarrCatalog(opts) {
 // lib/sources/stac.js
 var BAND_ALIASES = {
   visual: ["visual", "TCI", "tci", "visual_10m"],
-  coastal: ["coastal", "B01"],
-  blue: ["blue", "B02"],
-  green: ["green", "B03"],
-  red: ["red", "B04"],
-  rededge1: ["rededge1", "B05"],
-  rededge2: ["rededge2", "B06"],
-  rededge3: ["rededge3", "B07"],
-  nir: ["nir", "B08"],
-  nir08: ["nir08", "B8A"],
+  coastal: ["coastal", "B01", "nbart_coastal_aerosol"],
+  blue: ["blue", "B02", "nbart_blue"],
+  green: ["green", "B03", "nbart_green"],
+  red: ["red", "B04", "nbart_red"],
+  rededge1: ["rededge1", "B05", "nbart_red_edge_1"],
+  rededge2: ["rededge2", "B06", "nbart_red_edge_2"],
+  rededge3: ["rededge3", "B07", "nbart_red_edge_3"],
+  nir: ["nir", "B08", "nbart_nir_1", "nbart_nir"],
+  nir08: ["nir08", "B8A", "nbart_nir_2"],
   nir09: ["nir09", "B09"],
   swir16: ["swir16", "B11"],
   swir22: ["swir22", "B12"],
   scl: ["scl", "SCL"],
+  vv: ["vv", "VV"],
+  vh: ["vh", "VH"],
   aot: ["aot", "AOT"],
   wvp: ["wvp", "WVP"]
 };
@@ -6556,9 +6561,18 @@ function commonName(asset) {
   if (b && b.length === 1) return b[0].common_name || b[0]["eo:common_name"] || b[0].name;
   return null;
 }
+function deaSwir(assets) {
+  if (assets.nbart_swir_3) return { swir16: "nbart_swir_2", swir22: "nbart_swir_3" };
+  if (assets.nbart_swir_1) return { swir16: "nbart_swir_1", swir22: "nbart_swir_2" };
+  return null;
+}
 function resolveAssets(assets) {
   var out = {};
   assets = assets || {};
+  var swir = deaSwir(assets);
+  if (swir) Object.keys(swir).forEach(function(k) {
+    if (/tiff|tif/i.test(assets[swir[k]].type || "image/tiff")) out[k] = httpsHref(assets[swir[k]].href);
+  });
   var lower = {};
   Object.keys(assets).forEach(function(k) {
     lower[k.toLowerCase()] = k;
@@ -6567,21 +6581,33 @@ function resolveAssets(assets) {
     var names = BAND_ALIASES[key];
     for (var i = 0; i < names.length; i++) {
       var hit2 = assets[names[i]] ? names[i] : lower[names[i].toLowerCase()];
+      if (out[key]) return;
       if (hit2 && /tiff|tif/i.test(assets[hit2].type || "image/tiff")) {
-        out[key] = assets[hit2].href;
+        out[key] = httpsHref(assets[hit2].href);
         return;
       }
     }
     Object.keys(assets).forEach(function(k) {
       var a = assets[k];
-      if (!out[key] && commonName(a) === key && /tiff/i.test(a.type || "")) out[key] = a.href;
+      if (!out[key] && commonName(a) === key && /tiff/i.test(a.type || "")) out[key] = httpsHref(a.href);
     });
   });
   return out;
 }
+var BUCKET_REGIONS = [
+  [/^dea-public-data(-dev)?$/, "ap-southeast-2"],
+  [/^deafrica-/, "af-south-1"],
+  [/^dep-public-/, "us-west-2"]
+];
 function httpsHref(h) {
+  var d = /^https?:\/\/data\.dea\.ga\.gov\.au\/(.*)$/.exec(h || "");
+  if (d) return "https://dea-public-data.s3.ap-southeast-2.amazonaws.com/" + d[1];
   var m = /^s3:\/\/([^/]+)\/(.*)$/.exec(h || "");
-  return m ? "https://" + m[1] + ".s3.amazonaws.com/" + m[2] : h;
+  if (!m) return h;
+  var reg = BUCKET_REGIONS.filter(function(r) {
+    return r[0].test(m[1]);
+  })[0];
+  return "https://" + m[1] + (reg ? ".s3." + reg[1] : ".s3") + ".amazonaws.com/" + m[2];
 }
 function isCog(a) {
   var t = a.type || "", roles = a.roles || [];
@@ -6640,6 +6666,15 @@ function thumbnailOf(assets) {
   }
   return null;
 }
+function rasterDnOffset(item) {
+  var p = item.properties || {};
+  if (p["s2:processing_baseline"] !== void 0) return null;
+  var a = (item.assets || {}).red || (item.assets || {}).B04;
+  var rb = a && (a["raster:bands"] || a.bands || [])[0];
+  if (!rb || !rb.scale || rb.offset === void 0) return null;
+  var o = rb.offset / rb.scale;
+  return Math.abs(o + 1e3) < 1e-6 ? -1e3 : null;
+}
 function itemToScene(item) {
   var p = item.properties || {};
   var bbox = item.bbox || (item.geometry ? geometryBbox(item.geometry) : null);
@@ -6668,7 +6703,10 @@ function itemToScene(item) {
       grid: p["grid:code"] || p["s2:mgrs_tile"] || null,
       processingBaseline: p["s2:processing_baseline"] || null,
       boaOffsetApplied: p["earthsearch:boa_offset_applied"],
-      nodataPct: p["s2:nodata_pixel_percentage"]
+      nodataPct: p["s2:nodata_pixel_percentage"],
+      dnOffset: rasterDnOffset(item),
+      orbit: p["sat:orbit_state"] || null,
+      polarizations: p["sar:polarizations"] || null
     }
   };
 }
@@ -6690,8 +6728,13 @@ function isPlanetaryComputer(url) {
   return /planetarycomputer\.microsoft\.com/i.test(url || "");
 }
 async function signScenes(scenes, collection, signal) {
-  var token = await pcToken(collection, signal);
+  var tokens = {};
+  for (var i = 0; i < scenes.length; i++) {
+    var c = scenes[i].meta.collection || collection;
+    if (!tokens[c]) tokens[c] = await pcToken(c, signal);
+  }
   scenes.forEach(function(s) {
+    var token = tokens[s.meta.collection || collection];
     Object.keys(s.assets).forEach(function(k) {
       var h = s.assets[k];
       if (typeof h === "string" && /\.blob\.core\.windows\.net\//.test(h) && h.indexOf("?") < 0) {
@@ -6704,6 +6747,9 @@ async function signScenes(scenes, collection, signal) {
 function stacCatalog(opts) {
   var root = trimSlash(opts.url);
   var collection = opts.collection;
+  var collections = String(collection || "").split(",").map(function(c) {
+    return c.trim();
+  }).filter(Boolean);
   return {
     kind: "stac",
     label: root + " : " + collection,
@@ -6711,7 +6757,7 @@ function stacCatalog(opts) {
     capabilities: { cloud: true, time: true },
     search: async function(q) {
       var maxItems = q.maxItems || 500;
-      var body = { collections: [collection], bbox: q.bbox, limit: Math.min(100, maxItems) };
+      var body = { collections, bbox: q.bbox, limit: Math.min(100, maxItems) };
       if (q.datetime) body.datetime = q.datetime.split("/").map(function(d, i) {
         return d.length === 10 ? d + (i === 0 ? "T00:00:00Z" : "T23:59:59Z") : d;
       }).join("/");
@@ -6751,7 +6797,7 @@ function stacCatalog(opts) {
         }
       }
       var scenes = items.slice(0, maxItems).map(itemToScene);
-      if (isPlanetaryComputer(root)) await signScenes(scenes, collection, q.signal);
+      if (isPlanetaryComputer(root)) await signScenes(scenes, collections[0], q.signal);
       if (q.cloudMax !== void 0 && q.cloudMax < 100) {
         scenes = scenes.filter(function(s) {
           return s.cloud === null || s.cloud <= q.cloudMax;
@@ -7716,10 +7762,58 @@ var S2_PRESETS = [
   { keys: ["red", "green", "blue"], mode: "bands", label: "true colour (raw bands)" },
   { keys: ["nir", "red", "green"], mode: "bands", label: "false colour IR (vegetation)" },
   { keys: ["swir16", "nir", "red"], mode: "bands", label: "SWIR (snow/ice vs cloud)" },
-  { keys: ["swir22", "swir16", "nir"], mode: "bands", label: "geology" }
+  { keys: ["swir22", "swir16", "nir"], mode: "bands", label: "geology" },
+  // DEA fractional cover, its usual colours: bare red, green veg green, dry veg blue
+  { keys: ["bs", "pv", "npv"], mode: "bands", label: "fractional cover (bare, green, dry)" },
+  // SAR backscatter (linear power, gamma0 / sigma0) spans decades, so it is
+  // shown on a log scale: the stretch limits are then in dB terms
+  { keys: ["vv", "vh", "vv"], mode: "bands", label: "SAR VV, VH, VV (log scale)", transfer: "log10" },
+  { keys: ["vv"], mode: "single", label: "SAR VV backscatter (log scale)", ramp: "greys", transfer: "log10" },
+  { keys: ["vh"], mode: "single", label: "SAR VH backscatter (log scale)", ramp: "greys", transfer: "log10" }
 ];
 var ELEVATION = /^(dem|data|elevation|height|dsm|dtm|bathymetry|topo|z)$/i;
 var KNOWN_CLASSES = {
+  // Fmask in Geoscience Australia's ARD observation attributes (DEA)
+  oa_fmask: [
+    [0, "no data", "#000000"],
+    [1, "clear", "#00a000"],
+    [2, "cloud", "#ffffff"],
+    [3, "cloud shadow", "#643200"],
+    [4, "snow", "#ff96ff"],
+    [5, "water", "#0000ff"]
+  ].map(function(c) {
+    return { value: c[0], label: c[1], color: c[2] };
+  }),
+  // DEA water observations: bit flags, so the common combinations get names
+  water: [
+    [0, "dry", "#e0d0b0"],
+    [128, "water", "#0050ff"],
+    [1, "no data", "#000000"],
+    [2, "not contiguous", "#404040"],
+    [4, "sea", "#00205f"],
+    [8, "terrain shadow", "#606060"],
+    [16, "high slope", "#a0a0a0"],
+    [32, "cloud shadow", "#643200"],
+    [64, "cloud", "#ffffff"],
+    [96, "cloud and shadow", "#d0d0d0"]
+  ].map(function(c) {
+    return { value: c[0], label: c[1], color: c[2] };
+  }),
+  // DEA land cover (Landsat, annual), level 3
+  level3: [
+    [111, "cultivated terrestrial vegetation", "#acbc2d"],
+    [112, "natural terrestrial vegetation", "#0e7912"],
+    [124, "natural aquatic vegetation", "#1ebf79"],
+    [215, "artificial surface", "#da5c69"],
+    [216, "natural bare surface", "#f3ab69"],
+    [220, "water", "#4d9fdc"],
+    [255, "no data", "#000000"]
+  ].map(function(c) {
+    return { value: c[0], label: c[1], color: c[2] };
+  }),
+  oa_s2cloudless_mask: [[0, "no data", "#000000"], [1, "clear", "#00a000"], [2, "cloud", "#ffffff"]].map(function(c) {
+    return { value: c[0], label: c[1], color: c[2] };
+  }),
   // Sentinel-2 L2A scene classification, ESA's colours
   scl: [
     [0, "no data", "#000000"],
@@ -8538,6 +8632,74 @@ $("readStore").addEventListener("click", function() {
     }
   }).catch(fail);
 });
+var EARTH_SEARCH = "https://earth-search.aws.element84.com/v1";
+var DEA_STAC = "https://explorer.dea.ga.gov.au/stac";
+var DEP_STAC = "https://stac.digitalearthpacific.org";
+var DEAFRICA_STAC = "https://explorer.digitalearth.africa/stac";
+var PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1";
+var STAC_EXAMPLES = [
+  ["Element 84 Earth Search (global)", "Sentinel-2 L2A", EARTH_SEARCH, "sentinel-2-l2a"],
+  ["Element 84 Earth Search (global)", "Sentinel-2 L2A, collection 1", EARTH_SEARCH, "sentinel-2-c1-l2a"],
+  [
+    "Digital Earth Australia (Geoscience Australia)",
+    "Sentinel-2 ARD, surface reflectance (2A, 2B, 2C)",
+    DEA_STAC,
+    "ga_s2am_ard_3,ga_s2bm_ard_3,ga_s2cm_ard_3"
+  ],
+  ["Digital Earth Australia (Geoscience Australia)", "Landsat 8 and 9 ARD, surface reflectance", DEA_STAC, "ga_ls8c_ard_3,ga_ls9c_ard_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "Landsat 5 and 7 ARD, 1986-", DEA_STAC, "ga_ls5t_ard_3,ga_ls7e_ard_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "Landsat 8 and 9 annual geomedian", DEA_STAC, "ga_ls8cls9c_gm_cyear_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "fractional cover (Landsat)", DEA_STAC, "ga_ls_fc_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "water observations (Landsat)", DEA_STAC, "ga_ls_wo_3"],
+  ["Digital Earth Australia (Geoscience Australia)", "land cover, annual (Landsat)", DEA_STAC, "ga_ls_landcover_class_cyear_3"],
+  ["Digital Earth Pacific", "Sentinel-2 annual geomedian", DEP_STAC, "dep_s2_geomad"],
+  ["Digital Earth Pacific", "Landsat annual geomedian", DEP_STAC, "dep_ls_geomad"],
+  ["Digital Earth Pacific", "Sentinel-1 SAR annual geomedian (VV, VH)", DEP_STAC, "dep_s1_geomad"],
+  ["Digital Earth Pacific", "mangroves (Sentinel-2)", DEP_STAC, "dep_s2_mangroves"],
+  ["Digital Earth Africa (its buckets send no CORS headers yet: footprints only)", "Sentinel-2 L2A", DEAFRICA_STAC, "s2_l2a"],
+  ["Digital Earth Africa (its buckets send no CORS headers yet: footprints only)", "Sentinel-1 SAR backscatter (RTC)", DEAFRICA_STAC, "s1_rtc"],
+  ["Microsoft Planetary Computer (global)", "Sentinel-1 SAR backscatter (RTC)", PC_STAC, "sentinel-1-rtc"],
+  ["Microsoft Planetary Computer (global)", "Sentinel-2 L2A", PC_STAC, "sentinel-2-l2a"]
+];
+(function() {
+  var sel = $("stacPick"), groups = {};
+  var o0 = document.createElement("option");
+  o0.value = "";
+  o0.textContent = "common catalogues ...";
+  sel.appendChild(o0);
+  STAC_EXAMPLES.forEach(function(e, i) {
+    if (!groups[e[0]]) {
+      groups[e[0]] = document.createElement("optgroup");
+      groups[e[0]].label = e[0];
+      sel.appendChild(groups[e[0]]);
+    }
+    var o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = e[1];
+    groups[e[0]].appendChild(o);
+  });
+  sel.addEventListener("change", function() {
+    var e = STAC_EXAMPLES[+sel.value];
+    if (!e) return;
+    $("stacUrl").value = e[2];
+    $("coll").value = e[3];
+    clearScenes();
+    setStatus(e[0].replace(/ \(.*$/, "") + ": " + e[1] + ". Press Search scenes to look in this view.");
+  });
+  function sync() {
+    var u = $("stacUrl").value.trim().replace(/\/+$/, ""), c = $("coll").value.trim();
+    var i = STAC_EXAMPLES.findIndex(function(e) {
+      return e[2] === u && e[3] === c;
+    });
+    sel.value = i < 0 ? "" : String(i);
+  }
+  ["stacUrl", "coll"].forEach(function(id) {
+    $(id).addEventListener("input", sync);
+    $(id).addEventListener("change", sync);
+  });
+  pickSyncs.push(sync);
+  sync();
+})();
 $("listColl").addEventListener("click", function() {
   setStatus("listing collections ...");
   listCollections($("stacUrl").value.trim()).then(function(cs) {
@@ -9463,8 +9625,16 @@ function presetChanged(applyDefaults) {
   if (applyDefaults) {
     $("limits").value = "pct";
     $("minR").value = "";
+    if (p.transfer) {
+      $("curve").value = p.transfer;
+      curveFromPreset = true;
+    } else if (curveFromPreset) {
+      $("curve").value = "linear";
+      curveFromPreset = false;
+    }
   }
 }
+var curveFromPreset = false;
 (function() {
   function group(label, keys, value, text2) {
     var og = document.createElement("optgroup");
@@ -11101,8 +11271,8 @@ async function readHash() {
   $("showBase").checked = h.get("nobase") !== "1";
   applyBasemap();
   applySaturation();
-  syncPicks();
   if (h.get("coll")) $("coll").value = h.get("coll");
+  syncPicks();
   if (h.get("cloud")) $("cloud").value = h.get("cloud");
   $("cloudLive").value = $("cloud").value;
   $("cloudLiveVal").textContent = $("cloud").value + "%";

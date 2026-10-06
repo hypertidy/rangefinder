@@ -2,7 +2,8 @@
 // Run from dev/ after `npm install && npm run bundle-hyparquet && npm run bundle-zarrita`, with
 // `node server.mjs` running. CDN requests are served from node_modules.
 // BASE env var overrides the page URL (e.g. file:///.../explorer.html).
-// Optional STEPS env var: extra playwright code run after page load.
+// Optional STEPS env var: extra playwright code run after page load; PRE:
+// playwright code run before it (e.g. page.route mocks for remote APIs).
 import { chromium } from "playwright";
 const NM = process.cwd() + "/node_modules/";
 const map = {
@@ -29,6 +30,7 @@ await page.route(/cdnjs|jsdelivr/, r => {
 await page.route(/arcgisonline/, r => r.abort());
 let bytes = 0, nreq = 0;
 page.on("response", async resp => { if (/sentinel-cogs|zarr/.test(resp.url())) { nreq++; const l = +(resp.headers()["content-length"] || 0); bytes += l; } });
+if (process.env.PRE) await eval("(async () => {" + process.env.PRE + "})()");
 await page.goto((process.env.BASE || "http://localhost:8765/") + "#" + hash);
 await page.waitForTimeout(1000);
 if (process.env.STEPS) await eval("(async () => {" + process.env.STEPS + "})()");

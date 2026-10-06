@@ -25,7 +25,14 @@ Two ways to open it locally:
 ## Using it
 
 1. **Source.** STAC API URL + collection (the `list` button reads
-   `/collections`); a starc store URL ([in-dev]: an experimental format
+   `/collections`; several collections, comma separated, are searched
+   together). Its "common catalogues" picker fills both in for Earth
+   Search, Digital Earth Australia (Sentinel-2 and Landsat ARD, geomedians,
+   fractional cover, water observations, land cover), Digital Earth Pacific
+   (annual Sentinel-2, Landsat and Sentinel-1 SAR geomedians), Digital Earth
+   Africa and Planetary Computer (Sentinel-1 RTC). SAR collections offer
+   VV and VH backscatter and a VV, VH, VV composite on a log10 curve; a
+   starc store URL ([in-dev]: an experimental format
    from a related project, listed last) (`read store` shows what it holds,
    draws its tiles and sets the dates to its span; see `docs/starc.md`);
    or the wildtiles bucket and tile resolution ([in-dev] likewise). Choosing wildtiles reads the
@@ -459,6 +466,16 @@ yet), and STAC search responses are not cached.
   (REMA, ArcticDEM) and sentinel-cogs can. Planetary Computer hrefs are
   signed with its anonymous token API (not testable from the dev container,
   which can't reach it); CDSE S3 needs credentials and is not supported.
+- Digital Earth (checked 2026-10 from the buckets; their STAC APIs are not
+  reachable from the dev container, so searches were mocked with real
+  items): DEA's `dea-public-data` and DE Pacific's `dep-public-data` send
+  CORS headers and draw. DEA hrefs (`s3://dea-public-data/...` or
+  `data.dea.ga.gov.au`) go to the bucket's ap-southeast-2 endpoint, and its
+  `nbart_*` asset names map to the usual band keys (Sentinel-2
+  `nbart_swir_2`/`_3` are B11/B12, Landsat `nbart_swir_1`/`_2` bands 6/7).
+  DE Africa's buckets (af-south-1) send no CORS headers, so its scenes list
+  but their pixels can't be read from a page. DE Pacific's grid is EPSG:3832
+  (PDC Mercator), now built in.
 - A starc store without `footprint_wkb` matches scenes by their full MGRS
   tile, so a partial-swath scene can be listed for a region its data does
   not reach (that day then loads as "no pixels in the region").
